@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="kosmo-csrf" content="">
+<title>Kosmokrator - project browser and editor</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="topbar">
+  <a class="brand" href="#/" aria-label="Kosmokrator home">
+    <img src="/static/favicon.svg" alt="" width="28" height="28">
+    <span class="brand-name">Kosmokrator</span>
+    <span class="brand-sub">local project browser</span>
+  </a>
+  <div class="topbar-status" id="catalog-status" role="status" aria-live="polite"></div>
+  <nav class="topbar-links" aria-label="Global">
+    <a href="#/start" id="start-link">Get started</a>
+    <a href="#/docs" id="docs-link">Docs</a>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" aria-labelledby="projects-heading">
+    <div class="sidebar-head">
+      <h2 id="projects-heading">Projects</h2>
+      <button type="button" class="btn btn-ghost btn-small" id="reload-btn" title="Re-read projects from disk">Reload</button>
+    </div>
+    <nav class="sidebar-tools" aria-label="Workspace tools">
+      <a class="btn btn-small" href="#/start">New nation or map</a>
+      <a class="btn btn-small" href="#/import">Import .dm</a>
+      <a class="btn btn-small" href="#/tools">External tools</a>
+    </nav>
+    <div id="project-list" class="project-list" aria-live="polite"></div>
+  </aside>
+  <main id="main" class="main" tabindex="-1">
+    <noscript><p class="state state-error">This browser needs JavaScript (bundled locally; no network access).</p></noscript>
+  </main>
+</div>
+<footer class="footer">
+  Local authoring: saves keep a .dm backup and exports stay in each project's exports folder. Static checks do not prove that a mod loads or is balanced; test in Dominions 6.
+</footer>
+</body>
+</html>

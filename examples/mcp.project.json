@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "kosmokrator": {
+      "command": "C:\\path\\to\\Kosmokrator\\.venv\\Scripts\\kosmokrator-mcp.exe",
+      "args": [
+        "--workspace", "C:\\path\\to\\Kosmokrator\\work",
+        "--target-version", "6.37"
+      ]
+    }
+  }
+}

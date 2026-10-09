@@ -1,0 +1,9 @@
+# Add this block to ~/.codex/config.toml, or .codex/config.toml in a trusted project.
+# Replace the executable and workspace paths. Catalog is optional; see the quickstart.
+# Kosmokrator does not edit agent configuration.
+[mcp_servers.kosmokrator]
+command = 'C:\path\to\Kosmokrator\.venv\Scripts\kosmokrator-mcp.exe'
+args = [
+  "--workspace", 'C:\path\to\Kosmokrator\work',
+  "--target-version", "6.37",
+]

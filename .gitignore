@@ -1,0 +1,18 @@
+# Local reference data (manual extracts, third-party catalog) - never commit
+.local/
+# Native game UI art is extracted from each user's own installation, never bundled.
+.kosmokrator-trait-icons/
+# Virtual environments
+.venv/
+venv/
+# Build / cache output
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+# Local scratch workspaces, generated projects and exports
+work/
+exports/
+*.zip
+*.manifest.json

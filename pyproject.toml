@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kosmokrator"
+version = "0.1.0"
+description = "Local, static authoring/validation/export tooling for Dominions 6 mod (.dm) projects, with an optional MCP server."
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.11"
+dependencies = []
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.20,<2"]
+
+[project.scripts]
+kosmokrator = "kosmokrator.cli:main"
+kosmokrator-mcp = "kosmokrator.mcp_server:main"
+
+[tool.setuptools]
+packages = ["kosmokrator"]
+
+[tool.setuptools.package-data]
+kosmokrator = ["web/*.html", "web/*.css", "web/*.js", "web/*.svg", "demo_assets/pretenders/*.png", "demo_assets/*.tga"]
