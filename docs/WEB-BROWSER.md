@@ -118,6 +118,45 @@ counts are fixed in the page. Each row links to the existing view that fixes it:
 
 The panel says **needs attention** only for validation errors, missing referenced files and units without a sprite.
 
+## Reference snapshot (self-contained project)
+
+Below readiness, the Overview's **Reference snapshot** panel can **Make project self-contained**: it copies the
+catalog data and local reference art the project needs into `<project>/.kosmokrator/reference/`, so the project can
+be browsed and edited without the external catalog, for example after copying the project folder to another
+machine. The panel states that the snapshot contains game imagery extracted from your own copy of Dominions 6, is a
+local authoring reference only, and is separate from the distributable mod.
+
+- **What is copied.** Every top-level `gamedata/*.csv` table of the live catalog, byte for byte (complete, so
+  lookups, inheritance, search and comparisons read the same rows); the catalog `LICENSE`; every item icon; the
+  gem and path icons and the sacred badge; and unit sprites either for the catalog units the project references
+  (donors, `#copyspr`, selected monsters, recruit and other monster references, catalog pretenders and the default
+  balance reference rosters) or, by choice, every catalog unit sprite (about 20 MB in
+  about 9,000 files with the 6.37 catalog; more on disk). The verified native UI icon
+  cache is copied when the workspace has one. Description text folders, site images, `.git`, scripts, manuals,
+  game archives and other files are never copied. A referenced-only snapshot is labelled **partial** for sprites:
+  catalog units picked later (for example in Compare) show no sprite until it is refreshed.
+- **Preview size and coverage** reports files, size per group and the missing-dependency list (referenced units,
+  sprites or item icons the source catalog does not have, or no native icon cache) without writing anything.
+- **Writing** sends `POST /api/projects/<slug>/reference-snapshot` with
+  `{expected_sha256, expected_snapshot, sprites: "referenced"|"all", preview}`. Under the project lock the server
+  checks the saved `.dm` hash (409 `sha_mismatch`) and the current snapshot id (409 `reference_changed`), writes a
+  new snapshot to a staging folder with bounded file count and size, verifies it, renames it into place and only then
+  switches `current.json`; the previous snapshot is removed afterwards. Links, junctions and traversal are refused.
+  Creating or refreshing needs a live catalog (`--catalog`); without one the existing snapshot stays in use.
+- **Manifest.** `manifest.json` records the source (dom6inspector, credential-free origin URL, git revision,
+  dataset version, GPL-3.0 licence and attribution), the tool version, the `.dm` hash at snapshot time, the scope,
+  totals, the missing-dependency report and the SHA-256 of every file. It holds project-relative paths only.
+- **Use.** A project with a snapshot reads only its snapshot in every project route (sheets, comparisons, balance,
+  donor and reference search, editors, validation and export), including project-scoped icon routes. The live
+  catalog is never mixed in. Status is **Self-contained** (no live catalog configured, or matching it),
+  **differs from live catalog** (stale: still using the snapshot until refreshed) or **failed verification**
+  (a changed, missing, extra or linked file: the snapshot is not used and no live data is substituted). Tables are
+  re-verified when they change on disk, and snapshot images are checked against the manifest on every read.
+  Projects without a snapshot behave exactly as before.
+- **Never packaged.** Exports and Workshop folders are built only from the mod folder, so the snapshot is never
+  included; an export manifest names only the project-relative snapshot it was validated against. The project
+  `.gitignore` already excludes `.kosmokrator/`.
+
 ## Build and export
 
 **Export mod**, at the right of the project heading on every section (full width on narrow screens), opens the
@@ -552,7 +591,14 @@ catalog dataset version and revision, the `.dm` path and SHA-256. Add `?download
 /api/projects/<slug>/inheritance              copy/reset history for every project monster
 /api/projects/<slug>/balance[?references=ID,ID]  nation comparison tables (same-era references, at most 12)
 /api/projects/<slug>/map-builds               agent map jobs, defaults and limits (POST on the same path)
+/api/projects/<slug>/reference-snapshot       reference snapshot status, coverage and missing data (POST previews/writes)
+/api/projects/<slug>/{gem-icons,path-icons,ability-icons,item-icons,trait-icons}/<key>.png
+                                              native icons from the catalog this project reads (its snapshot if any)
+/api/projects/<slug>/trait-icons              native UI icon map for this project
 ```
+
+`/api/meta` adds `project_references` (projects that read a snapshot, with state and dataset version), and the
+project list adds `reference_snapshot` per project. The whole-project model adds `reference` (snapshot status).
 
 Stable identifiers are `uid` values such as `monster:5003`, `site:1700` and `nation:150`. Blocks without a number use
 `<kind>:line<N>`. Gods are namespaced by origin: `god:project:5011` (a project monster, with `monster_uid`) and

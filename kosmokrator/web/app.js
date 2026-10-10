@@ -122,6 +122,20 @@
   // A key that does not load stays text-only; letters and names are always shown beside the art.
   const PATH_KEYS = ["F", "A", "W", "E", "S", "D", "N", "G", "B", "H"];
   const gemIcons = new Map(), skillIcons = new Map(), abilityIcons = new Map();
+  // Icon source: the server-wide catalog ("/api"), or a project's own reference snapshot through its project-scoped
+  // routes while that project is open. Projects without a snapshot keep the server-wide icons.
+  const iconScope = { base: "/api", key: "global" };
+  async function useIconScope(m) {
+    const ref = m && m.reference, snap = ref && ref.active ? ref.snapshot : null;
+    const key = snap ? `${m.project.slug}:${snap}` : "global";
+    if (iconScope.key === key) return;
+    iconScope.key = key;
+    iconScope.base = snap ? `/api/projects/${encodeURIComponent(m.project.slug)}` : "/api";
+    for (const map of [traitIcons, gemIcons, skillIcons, abilityIcons]) map.clear();
+    await Promise.all([loadTraitIcons(), loadGemIcons()]);
+  }
+  // The catalog a project reads (its snapshot or the live catalog); without a project, the server-wide one.
+  const catalogOf = (m) => (m ? (m.provenance && m.provenance.catalog) || null : (state.meta && state.meta.catalog) || null);
   function probeIcon(map, key, url, cls) {
     return new Promise((done) => {
       const img = new Image(), timer = setTimeout(() => { img.src = ""; done(); }, 3000);
@@ -131,21 +145,23 @@
     });
   }
   function loadGemIcons() {
-    return Promise.all([...PATH_KEYS.map((p) => probeIcon(gemIcons, p, `/api/gem-icons/${p}.png`, "gem-ic")),
-      ...[...PATH_KEYS, "U"].map((p) => probeIcon(skillIcons, p, `/api/path-icons/${p}.png`, "path-img")),
-      probeIcon(abilityIcons, "holy", "/api/ability-icons/holy.png", "trait-icon")]);
+    const b = iconScope.base;
+    return Promise.all([...PATH_KEYS.map((p) => probeIcon(gemIcons, p, `${b}/gem-icons/${p}.png`, "gem-ic")),
+      ...[...PATH_KEYS, "U"].map((p) => probeIcon(skillIcons, p, `${b}/path-icons/${p}.png`, "path-img")),
+      probeIcon(abilityIcons, "holy", `${b}/ability-icons/holy.png`, "trait-icon")]);
   }
   async function loadTraitIcons() {
     const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 3000);
     try {
-      const res = await fetch("/api/trait-icons", { headers: { Accept: "application/json" }, cache: "no-store", credentials: "same-origin", signal: ctl.signal });
+      const b = iconScope.base;
+      const res = await fetch(`${b}/trait-icons`, { headers: { Accept: "application/json" }, cache: "no-store", credentials: "same-origin", signal: ctl.signal });
       if (!res.ok) return;
       const body = await res.json();
       if (!body || body.ok !== true || !body.icons || typeof body.icons !== "object") return;
       for (const [raw, ic] of Object.entries(body.icons)) {
         const cmd = String(raw).replace(/^#/, "").toLowerCase();
         // Only accept this exact same-origin API path for the command; anything else is ignored.
-        if (!/^[a-z0-9_]+$/.test(cmd) || !ic || typeof ic.url !== "string" || ic.url.toLowerCase() !== `/api/trait-icons/${cmd}.png`) continue;
+        if (!/^[a-z0-9_]+$/.test(cmd) || !ic || typeof ic.url !== "string" || ic.url.toLowerCase() !== `${b}/trait-icons/${cmd}.png`.toLowerCase()) continue;
         const dim = (v) => (Number.isInteger(v) && v > 0 && v <= 64 ? v : 32);
         traitIcons.set(cmd, { url: ic.url, width: dim(ic.width), height: dim(ic.height) });
       }
@@ -319,16 +335,23 @@
     renderSidebar();
     renderCatalogStatus();
   }
-  function renderCatalogStatus() {
+  function renderCatalogStatus(m) {
     const box = $("#catalog-status");
     const meta = state.meta || {};
-    const cat = meta.catalog;
-    if (cat) {
+    const cat = meta.catalog, ref = m && m.reference;
+    if (ref && ref.active) {
+      const v = ref.version || {};
+      box.replaceChildren(badge(`project snapshot ${v.dataset_version ? "data " + v.dataset_version : "version unknown"}`, ref.state === "stale" ? "warn" : "ok"), " ",
+        el("span", { class: "faint", title: ref.summary || "", text: { current: "matches live catalog", stale: "differs from live catalog", offline: "no live catalog" }[ref.state] || txt(ref.state) }));
+    } else if (ref && ref.state === "invalid") {
+      box.replaceChildren(badge("snapshot invalid", "err"), " ", el("span", { class: "faint", title: ref.summary || "", text: "vanilla data unavailable" }));
+    } else if (cat) {
       box.replaceChildren(badge(`catalog ${cat.dataset_version ? "data " + cat.dataset_version : "version unknown"}`, "ok"), " ",
         el("span", { class: "faint mono", title: cat.catalog_path || "", text: cat.revision ? `rev ${cat.revision.slice(0, 10)}` : "no git revision" }));
     } else {
+      const n = (meta.project_references && meta.project_references.projects_with_snapshot) || 0;
       box.replaceChildren(badge("no catalog", "warn"), " ",
-        el("span", { class: "faint", title: (meta.catalog_error && meta.catalog_error.message) || "", text: "donor data unavailable" }));
+        el("span", { class: "faint", title: (meta.catalog_error && meta.catalog_error.message) || "", text: n ? `${n} project${n === 1 ? " has" : "s have"} a reference snapshot` : "donor data unavailable" }));
     }
   }
   // Compact rows: a small banner, name, era/version/validation and slug. A filter appears once the list is long,
@@ -574,6 +597,146 @@
     return holder;
   }
 
+  // ---------- reference snapshot (Overview) ----------
+  // Copies the catalog tables and local reference art this project needs into <project>/.kosmokrator/reference so it
+  // can be browsed and edited without the external catalog. The server checks the saved .dm hash and the current
+  // snapshot id under the project lock; nothing here is ever packaged into exports or Workshop folders.
+  const mb = (n) => `${(Number(n || 0) / 1048576).toFixed(n >= 10485760 ? 0 : 1)} MB`;
+  function referenceUi(slug) {
+    if (!state.reference) state.reference = new Map();
+    if (!state.reference.has(slug)) state.reference.set(slug, { sprites: "referenced", busy: null, preview: null, result: null, error: null });
+    return state.reference.get(slug);
+  }
+  function referencePanel(m) {
+    const slug = m.project.slug, ref = m.reference, ui = referenceUi(slug), p = m.provenance;
+    const holder = el("section", { class: "panel reference-panel", "aria-labelledby": "ref-h" });
+    if (!ref) {
+      holder.append(el("h3", { id: "ref-h", text: "Reference snapshot" }),
+        stateBox("empty", "Not reported by this server.", "Restart `kosmokrator serve` to load the current version, then reload."));
+      return holder;
+    }
+    const base = `/api/projects/${encodeURIComponent(slug)}`;
+    const live = ref.live || {};
+    const body = () => ({ expected_sha256: p.sha256, expected_snapshot: ref.snapshot || null, sprites: ui.sprites });
+    async function run(preview) {
+      ui.busy = preview ? "preview" : "write"; ui.error = null; if (!preview) ui.result = null; draw();
+      try {
+        const r = await postJSON(`${base}/reference-snapshot`, { ...body(), preview });
+        if (preview) ui.preview = r;
+        else { ui.result = r; ui.preview = null; }
+      } catch (e) { ui.error = e; }
+      ui.busy = null;
+      if (!preview && ui.result) {
+        state.models.delete(slug); state.catalogUnits && state.catalogUnits.clear();
+        await loadProjects(true);
+        try { state.meta = await getJSON("/api/meta"); } catch (_) { /* keep the old status */ }
+        await render();
+        toast("Reference snapshot written");
+        return;
+      }
+      draw();
+      const h = holder.querySelector("#ref-outcome"); if (h) h.focus();
+    }
+    const stateRow = {
+      none: ["info", "No snapshot", live.available ? "This project reads the live catalog the server was started with." : "No live catalog either: vanilla references are unresolved."],
+      offline: ["ok", "Self-contained", "Reading this project's snapshot. No live catalog is configured, so it cannot be compared or refreshed."],
+      current: ["ok", "Self-contained", "Reading this project's snapshot; it matches the live catalog."],
+      stale: ["warn", "Snapshot differs from live catalog", "Still reading this project's snapshot (versions are never mixed). Refresh to adopt the live catalog."],
+      invalid: ["err", "Snapshot failed verification", "The snapshot is not used and no live catalog data is substituted. Recreate it from a live catalog."],
+    }[ref.state] || ["info", txt(ref.state), ref.summary];
+    const ver = (v) => v ? `${v.dataset_version ? `data ${v.dataset_version}` : "version unknown"}${v.revision ? ` · rev ${String(v.revision).slice(0, 10)}` : ""}` : "—";
+    const groupRows = (g) => Object.entries(g || {}).map(([k, x]) => [txt(k).replace(/_/g, " "), txt(x.files), mb(x.bytes)]);
+    function missingList(list, count) {
+      if (!list || !list.length) return el("p", { class: "muted", text: "Nothing referenced is missing from the source catalog." });
+      const label = (x) => x.kind === "sprite" ? `Unit ${x.id} ${x.frame} sprite` : x.kind === "unit" ? `Unit ${x.id}` : x.kind === "item_icon" ? `Item ${x.id} icon`
+        : x.kind === "trait_icons" ? "Native UI icons" : `${txt(x.kind).replace(/_/g, " ")} ${txt(x.name || x.id || "")}`;
+      return el("div", null, el("ul", { class: "plain-list ready-items" }, list.slice(0, 40).map((x) => el("li", null, el("strong", { text: label(x) }), " ", el("span", { class: "faint", text: txt(x.reason) })))),
+        (count || list.length) > 40 ? el("p", { class: "faint", text: `Showing 40 of ${count || list.length}.` }) : null);
+    }
+    function planView(r, written) {
+      const sc = r.scope || {};
+      return el("div", { class: "stack" },
+        el("p", null, el("strong", { id: "ref-outcome", tabindex: "-1", text: written ? `Snapshot ${txt(r.snapshot)} written.` : "Snapshot preview (nothing written yet)." }), " ",
+          badge(`${txt(r.totals && r.totals.files)} files · ${mb(r.totals && r.totals.bytes)}`, "info")),
+        el("dl", { class: "kv" },
+          el("dt", { text: "Catalog tables" }), el("dd", { text: `Complete: all ${txt(sc.table_count)} gamedata tables, byte for byte.` }),
+          el("dt", { text: "Unit sprites" }), el("dd", { text: sc.sprites === "all" ? `All ${txt(sc.sprite_units_count)} catalog units.` : `Partial: ${txt(sc.sprite_units_count)} catalog units this project references.` }),
+          el("dt", { text: "Item, gem and path icons" }), el("dd", { text: `Items ${txt(sc.item_icons)}; gem and path icons and the sacred badge (fixed set).` }),
+          el("dt", { text: "Native UI icons" }), el("dd", { text: sc.trait_icons ? "Copied from the verified workspace cache." : "Not available in this workspace; trait labels stay text-only." }),
+          el("dt", { text: "Source" }), el("dd", { text: `${txt((r.source || {}).name)} · ${ver(r.source)} · ${txt((r.source || {}).license)}` })),
+        table(["Group", "Files", "Size"], groupRows(r.groups), { caption: "What the snapshot holds" }),
+        el("details", { class: "raw", open: (r.missing_count || 0) > 0 && (r.missing_count || 0) <= 12 || null },
+          el("summary", null, `Missing from the source catalog (${txt(r.missing_count || 0)})`),
+          el("div", { class: "inner" }, missingList(r.missing, r.missing_count))),
+        written && (r.removed || []).length ? el("p", { class: "faint", text: `Replaced ${r.removed.join(", ")}.` }) : null);
+    }
+    function errorView(e) {
+      const err = e.error || {};
+      const title = { sha_mismatch: "Not written: the saved .dm changed since this page loaded.",
+        reference_changed: "Not written: the snapshot changed since this page loaded.",
+        catalog_missing: "A live catalog is needed to create or refresh the snapshot.",
+        project_locked: "Not written: another save or export holds the project lock.",
+        reference_too_large: "Not written: the snapshot would exceed the size limits.",
+        bad_csrf: "Not written: the page token is out of date.", bad_origin: "Not written: request was not from this page." }[err.code] || "Snapshot failed.";
+      const reload = ["sha_mismatch", "reference_changed", "bad_csrf"].includes(err.code);
+      return el("div", { class: "state state-error", role: "alert" },
+        el("strong", { id: "ref-outcome", tabindex: "-1", text: title }),
+        el("div", null, el("span", { class: "code", text: `[${txt(err.code)}] ` }), txt(err.message)),
+        el("div", { class: "btn-row" },
+          reload ? el("button", { type: "button", class: "btn btn-small", onclick: async () => { state.models.delete(slug); await loadProjects(true); await render(); } }, "Reload project") : null,
+          err.code === "project_locked" ? el("button", { type: "button", class: "btn btn-small", onclick: () => run(false) }, "Try again") : null),
+        el("p", { class: "panel-note", text: "Nothing was changed by this request; the previous snapshot, if any, is still in use." }));
+    }
+    function draw() {
+      const blocked = !CSRF ? "No editor token from this server; restart `kosmokrator serve` and reload."
+        : !live.available ? (ref.active ? "Refreshing needs the live catalog: start the server with --catalog. The current snapshot stays in use." : "Creating a snapshot needs the live catalog: start the server with --catalog.")
+        : null;
+      const scopeSel = el("select", { class: "input", id: "ref-sprites", disabled: ui.busy || blocked ? true : null },
+        el("option", { value: "referenced", text: "Sprites this project references (small)" }),
+        el("option", { value: "all", text: "Every catalog unit sprite (about 20 MB, 9,000 files)" }));
+      scopeSel.value = ui.sprites;
+      scopeSel.addEventListener("change", () => { ui.sprites = scopeSel.value; ui.preview = null; draw(); });
+      const sc = ref.scope || {}, t = ref.totals || {};
+      const nowMissing = ref.sprites_missing_now_count || 0;
+      fillKids(holder,
+        el("div", { class: "ready-head" },
+          el("h3", { id: "ref-h", text: "Reference snapshot" }),
+          badge(stateRow[1], stateRow[0])),
+        el("p", { class: "panel-note", text: "Make this project self-contained: copy the catalog data and reference art it needs into the project folder, so it can be browsed and edited without the external catalog. It travels with a copy of the project folder." }),
+        el("p", { class: "export-drafts", role: "note" }, badge("local only", "warn"),
+          " The snapshot includes game imagery extracted from your own copy of Dominions 6. It is a local authoring reference, separate from the distributable mod: exports and Workshop folders never include it. Do not share it."),
+        el("ul", { class: "ready-list" },
+          el("li", { class: `ready-row is-${stateRow[0]}` }, el("span", { class: `badge ${stateRow[0]}`, text: { ok: "OK", warn: "Check", err: "Fix", info: "Info" }[stateRow[0]] }),
+            el("span", { class: "ready-label", text: "Status" }), el("span", { class: "ready-text", text: stateRow[2] })),
+          ref.active ? el("li", { class: "ready-row is-info" }, el("span", { class: "badge info", text: "Info" }), el("span", { class: "ready-label", text: "Snapshot" }),
+            el("span", { class: "ready-text" }, `${ver(ref.version)} · ${txt(t.files)} files · ${mb(t.bytes)}`,
+              el("span", { class: "ready-detail mono faint", text: `${txt(ref.snapshot)} · created ${txt(ref.created_utc)}` }))) : null,
+          ref.active ? el("li", { class: `ready-row is-${sc.sprites === "all" || !nowMissing ? "ok" : "warn"}` },
+            el("span", { class: `badge ${sc.sprites === "all" || !nowMissing ? "ok" : "warn"}`, text: sc.sprites === "all" || !nowMissing ? "OK" : "Check" }),
+            el("span", { class: "ready-label", text: "Coverage" }),
+            el("span", { class: "ready-text", text: `Tables complete (${txt(sc.table_count)}). ${sc.sprites === "all" ? "All unit sprites." : `Sprites for ${txt(sc.sprite_units_count)} referenced units (partial).`}`
+              + (nowMissing ? ` ${nowMissing} unit${nowMissing === 1 ? " referenced now has" : "s referenced now have"} no sprite in the snapshot; refresh to add.` : "")
+              + (ref.project_changed ? " The .dm changed since the snapshot was made." : "") })) : null,
+          live.available ? el("li", { class: "ready-row is-info" }, el("span", { class: "badge info", text: "Info" }), el("span", { class: "ready-label", text: "Live catalog" }),
+            el("span", { class: "ready-text", text: ver(live) })) : null),
+        ref.state === "invalid" && ref.error ? stateBox("error", txt(ref.error.message), (ref.error.problems || []).join(", ") || null) : null,
+        el("div", { class: "btn-row export-controls" },
+          el("label", { for: "ref-sprites", class: "faint", text: "Sprites" }), scopeSel,
+          el("button", { type: "button", class: "btn btn-small btn-ghost", disabled: ui.busy || blocked ? true : null, "aria-describedby": blocked ? "ref-blocked" : null, onclick: () => run(true) },
+            ui.busy === "preview" ? "Checking…" : "Preview size and coverage"),
+          el("button", { type: "button", class: "btn", disabled: ui.busy || blocked ? true : null, "aria-describedby": blocked ? "ref-blocked" : null, onclick: () => run(false) },
+            ui.busy === "write" ? "Writing snapshot…" : ref.active ? "Refresh snapshot" : "Make project self-contained")),
+        blocked ? el("p", { class: "panel-note", id: "ref-blocked", text: blocked }) : null,
+        el("div", { role: "status", "aria-live": "polite" }, ui.busy ? stateBox("loading", ui.busy === "preview" ? "Measuring what the snapshot would hold..." : "Copying and verifying the snapshot...") : null),
+        ui.error ? errorView(ui.error) : ui.result ? planView(ui.result, true) : ui.preview ? planView(ui.preview, false) : null,
+        ref.active && !ui.preview && !ui.result ? el("details", { class: "raw" }, el("summary", null, `Missing from the source catalog when made (${(ref.missing || []).length})`),
+          el("div", { class: "inner" }, missingList(ref.missing))) : null,
+        el("p", { class: "panel-note", text: `Stored in ${slug}/.kosmokrator/reference/ with a manifest of sources, versions, licences and SHA-256 hashes (no absolute paths). Catalog data: dom6inspector (GPL-3.0), licence copied alongside. Replacing a snapshot is atomic; the old one is removed afterwards.` }));
+    }
+    draw();
+    return holder;
+  }
+
   // ---------- views ----------
   function viewOverview(m) {
     const slug = m.project.slug, c = m.counts, v = m.validation, p = m.provenance;
@@ -585,6 +748,7 @@
     return el("div", { class: "stack" },
       (m.mod_info.description || {}).value ? el("p", { class: "prose muted", text: m.mod_info.description.value }) : null,
       readinessPanel(m),
+      referencePanel(m),
       el("section", { "aria-labelledby": "ov-nation" },
         el("h4", { id: "ov-nation", text: `Nation: ${nationScopeText(m)}` }),
         el("div", { class: "tiles" },
@@ -624,6 +788,7 @@
             el("dt", { text: "Other definitions" }), el("dd", null, el("a", { href: route("p", slug, "other") }, txt(c.other_definitions))))),
           panel("Catalog provenance",
             p.catalog ? el("dl", { class: "kv" },
+              el("dt", { text: "Read from" }), el("dd", { text: p.catalog.reference_snapshot ? `this project's reference snapshot (${p.catalog.reference_snapshot.snapshot})` : "live catalog" }),
               el("dt", { text: "Dataset" }), el("dd", { text: p.catalog.dataset_version || "unknown" }),
               el("dt", { text: "Revision" }), el("dd", { class: "hash", text: p.catalog.revision || "unknown" }),
               el("dt", { text: "Source" }), el("dd", { class: "faint", text: p.catalog.source })) :
@@ -2020,7 +2185,7 @@
           const q = el("input", { class: "input", type: "search", id: `cr-q-${kind}`, value: f.donorQuery, placeholder: "Name or id, e.g. Hoplite or 199", autocomplete: "off" });
           q.addEventListener("input", () => { f.donorQuery = q.value; });
           q.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); if (q.value.trim()) searchDonors(q.value.trim()); } });
-          const btn = el("button", { type: "button", class: "btn btn-small", disabled: (state.meta && !state.meta.catalog) || null, onclick: () => { if (q.value.trim()) searchDonors(q.value.trim()); else q.focus(); } }, "Search");
+          const btn = el("button", { type: "button", class: "btn btn-small", disabled: !catalogOf(m) || null, onclick: () => { if (q.value.trim()) searchDonors(q.value.trim()); else q.focus(); } }, "Search");
           src.push(el("div", { class: "edit-field wide" }, el("label", { for: q.id, text: "Search catalog units" }), el("div", { class: "edit-control" }, q, btn), resultsBox,
             el("div", { id: "donor-picked", tabindex: "-1", class: f.donorId ? "picked" : "faint" }, f.donorId ? ["Donor: ", el("strong", { text: `${f.donorName} (#${f.donorId})` })] : "No donor chosen yet."),
             errs.donor ? el("div", { class: "field-err", text: errs.donor }) : null));
@@ -2638,7 +2803,7 @@
           el("dt", { text: "Saved revision" }), el("dd", null, el("span", { class: "mono", text: p.file }), " ", el("span", { class: "hash", text: p.sha256 })),
           el("dt", { text: "Validation" }), el("dd", null, !v ? badge("unavailable", "err") : !fresh ? badge("stale", "warn") : v.ok ? badge("no errors", "ok") : badge(`${v.counts.errors} error(s)`, "err"),
             v ? ` ${v.counts.warnings} warnings · ${v.counts.unverified} unverified · for ${shortSha(v.sha256)}` : ""),
-          el("dt", { text: "Catalog" }), el("dd", { text: p.catalog ? `dataset ${txt(p.catalog.dataset_version || "unknown")}` : "none (vanilla references unverified)" })),
+          el("dt", { text: "Catalog" }), el("dd", { text: p.catalog ? `dataset ${txt(p.catalog.dataset_version || "unknown")}${p.catalog.reference_snapshot ? " (project reference snapshot; never packaged)" : ""}` : "none (vanilla references unverified)" })),
         drafts.length ? el("p", { class: "export-drafts", role: "note" }, badge(`${drafts.length} unsaved unit draft(s)`, "warn"),
           " Not included; only the saved .dm is exported: ", drafts.map((id, i) => [i ? ", " : "", el("a", { href: route("p", slug, "units", id) }, `#${id}`)])) : null,
         el("div", { class: "btn-row export-controls" },
@@ -2891,8 +3056,8 @@
         hasDoc ? el("a", { href: route("docs", "NATION-DESIGN.md") }, "docs/NATION-DESIGN.md") : el("code", { text: "docs/NATION-DESIGN.md" }),
         ": useful roster (a purpose for each unit; compare gold, resources, recruitment capacity and upkeep), whole economy (capital-only availability, Holy limits) and the copied-unit audit (inspect the donor and the result). "
         + "No balance score is computed: base values are raw, final costs are the game's, and equal headcount is not equal investment. Test in Dominions 6."));
-    if (!state.meta || !state.meta.catalog) {
-      holder.append(back, stateBox("empty", "No game-data catalog.", "Comparison needs the local dom6inspector catalog (start the server with --catalog)."), criteria);
+    if (!catalogOf(m)) {
+      holder.append(back, stateBox("empty", "No game-data catalog.", "Comparison needs the local dom6inspector catalog (start the server with --catalog) or this project's reference snapshot."), criteria);
       return holder;
     }
     const setRefs = (list) => { location.hash = compareHref(slug, uid, [...new Set(list)].slice(0, MAX_REFS)); };
@@ -4007,7 +4172,7 @@
         q.addEventListener("input", () => { s.q = q.value; });
         q.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); search(); } });
         parts.push(el("div", { class: "edit-field wide" }, el("label", { for: q.id, text: `Search vanilla ${K.label.toLowerCase()}` }),
-          el("div", { class: "edit-control" }, q, el("button", { type: "button", class: "btn btn-small", disabled: (state.meta && !state.meta.catalog) || null, onclick: search }, "Search")), resultsBox));
+          el("div", { class: "edit-control" }, q, el("button", { type: "button", class: "btn btn-small", disabled: !catalogOf(m) || null, onclick: search }, "Search")), resultsBox));
         drawResults();
       }
       return el("fieldset", { class: "edit-group" }, el("legend", { text: K.templateRequired ? "Template (required)" : "Template (optional)" }),
@@ -5117,7 +5282,7 @@
     if (itemArg(d, "spr") !== null) return null;
     const c = itemArg(d, "copyspr");
     const id = c !== null ? (/^\d{1,4}$/.test(c) ? Number(c) : null) : /^#selectitem$/i.test(txt(d.opener)) && Number.isInteger(d.id) ? d.id : null;
-    return id && id > 0 && id < 10000 ? { url: `/api/item-icons/${id}.png`, id } : null;
+    return id && id > 0 && id < 10000 ? { url: `${iconScope.base}/item-icons/${id}.png`, id } : null;
   }
   const itemIcon = (m, d) => { const assets = itemSpriteAssets(m, d); return { assets, a: assets.find((x) => x.status !== "missing" && x.browser_preview) || null, cat: assets.length ? null : catalogItemIcon(d) }; };
   const itemIconMissing = (assets) => assets.length ? "icon file missing" : "no custom icon (#spr)";
@@ -7126,6 +7291,7 @@
     // Selectors that change the route keep focus, so keyboard users can keep browsing with them.
     const keepSelectId = document.activeElement && ["nation-select", "auth-section", "cmd-context"].includes(document.activeElement.id) ? document.activeElement.id : null;
     renderSidebar(parts[0] === "p" ? parts[1] : null);
+    if (parts[0] !== "p" || !parts[1]) renderCatalogStatus();
     for (const a of document.querySelectorAll(".topbar-links a")) a.setAttribute("aria-current", a.getAttribute("href") === `#/${parts[0] || ""}` ? "page" : "false");
     if (parts[0] === "docs") {
       document.title = "Docs - Kosmokrator";
@@ -7164,6 +7330,9 @@
       return;
     }
     if (seq !== renderSeq) return;
+    await useIconScope(m);
+    if (seq !== renderSeq) return;
+    renderCatalogStatus(m);
     // /nation/<id> names the nation itself; elsewhere ?n= (or the remembered choice) selects it.
     const wanted = tab === "nation" && arg ? arg : hashQuery().get("n");
     state.nation = { slug, key: resolveNation(m, wanted) };

@@ -147,12 +147,15 @@ def install_native_icons(workspace: str | None, game: str) -> dict[str, Any]:
             "note": "Restart the browser server to load this cache. Mod files and exports were not changed."}
 
 
-def load_icon_cache(workspace: Path) -> tuple[dict[str, Any], dict[str, bytes]]:
-    """Load only verified, bounded PNGs; a missing or corrupt optional cache stays text-only."""
+def load_icon_cache(workspace: Path, cache_dir: Path | None = None,
+                    url_prefix: str = "/api/trait-icons") -> tuple[dict[str, Any], dict[str, bytes]]:
+    """Load only verified, bounded PNGs; a missing or corrupt optional cache stays text-only.
+
+    cache_dir names another verified copy (a project reference snapshot); url_prefix is where it is served."""
     icons: dict[str, Any] = {}
     images: dict[str, bytes] = {}
     try:
-        cache = contained(workspace, CACHE_NAME, what="native icon cache")
+        cache = contained(workspace, CACHE_NAME if cache_dir is None else cache_dir, what="native icon cache")
         manifest_path = contained(cache, "manifest.json", what="icon manifest")
         if not manifest_path.is_file() or manifest_path.stat().st_size > 128 * 1024:
             return icons, images
@@ -188,7 +191,7 @@ def load_icon_cache(workspace: Path) -> tuple[dict[str, Any], dict[str, bytes]]:
             if index not in decoded or not re.fullmatch(r"[a-z0-9_]+", key):
                 continue
             w, h, png = decoded[index]
-            icons[key] = {"url": f"/api/trait-icons/{key}.png", "width": w, "height": h,
+            icons[key] = {"url": f"{url_prefix}/{key}.png", "width": w, "height": h,
                           "label": label, "sprite": index}
             images[key] = png
         # Stat art loads only from the reviewed misc.trs; its keys never collide with trait commands.
@@ -197,7 +200,7 @@ def load_icon_cache(workspace: Path) -> tuple[dict[str, Any], dict[str, bytes]]:
             for key, (index, label, _call) in STAT_ICON_SPECS.items():
                 found = verified(misc_records.get(str(index)), f"misc-{index}.png")
                 if found:
-                    icons[key] = {"url": f"/api/trait-icons/{key}.png", "width": found[0], "height": found[1],
+                    icons[key] = {"url": f"{url_prefix}/{key}.png", "width": found[0], "height": found[1],
                                   "label": label, "sprite": index, "archive": "misc.trs"}
                     images[key] = found[2]
     except (OSError, ValueError, UnicodeError, KosmoError):

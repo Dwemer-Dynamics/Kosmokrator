@@ -815,5 +815,113 @@ class WorkshopTests(Base):
         self.assertEqual(list(outside.iterdir()), [])
 
 
+class ReferenceSnapshotTests(Base):
+    """Project reference snapshots: catalog-free reuse, isolation, stale/tamper refusal and export exclusion."""
+
+    PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 40
+
+    def setUp(self) -> None:
+        super().setUp()
+        root = Path(self._tmp.name) / "cat"
+        (root / "LICENSE").write_text("GPL-3.0 test licence\n", encoding="utf-8")
+        for folder, names in (("sprites", ["0199_1.png", "0311_1.png", "0003_rider_1.png"]),
+                              ("magicicons", ["Gem_F.png", "Path_U.png"]), ("items", ["item1.png"])):
+            (root / "images" / folder).mkdir(parents=True)
+            for name in names:
+                (root / "images" / folder / name).write_bytes(self.PNG)
+        (root / "gamedata" / "unitdescr").mkdir()
+        (root / "gamedata" / "unitdescr" / "0199.txt").write_text("descr", encoding="utf-8")
+        self.set_dm(b'#modname "X"\n#newmonster 5000\n#copystats 199\n#name "Copy"\n#end\n')
+        self.root = self.ws / "demo_mod"
+
+    def body(self, **kw):
+        from kosmokrator.reference import reference_status
+        cur = reference_status(self.ws, "demo_mod", self.catalog)["snapshot"]
+        return {"expected_sha256": sha(self.dm.read_bytes()), "expected_snapshot": cur, **kw}
+
+    def test_snapshot_reused_without_live_catalog_and_never_exported(self) -> None:
+        from kosmokrator.browse import build_project_model
+        from kosmokrator.pretenders import catalog_sprite_path
+        from kosmokrator.reference import create_snapshot, reference_status, resolve_catalog
+        dm_before = self.dm.read_bytes()
+        prev = create_snapshot(self.ws, "demo_mod", self.catalog, self.body(preview=True))
+        self.assertFalse((self.root / ".kosmokrator" / "reference").exists())
+        self.assertEqual(prev["scope"]["tables"], "complete")
+        res = create_snapshot(self.ws, "demo_mod", self.catalog, self.body())
+        manifest = json.loads((self.root / ".kosmokrator" / "reference" / res["snapshot"] / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        paths = {f["path"] for f in manifest["files"]}
+        self.assertTrue({"catalog/gamedata/BaseU.csv", "catalog/LICENSE", "catalog/images/sprites/0199_1.png",
+                         "catalog/images/magicicons/Gem_F.png", "catalog/images/items/item1.png"} <= paths)
+        self.assertNotIn("catalog/images/sprites/0311_1.png", paths)  # unreferenced: partial sprite scope
+        self.assertFalse(any("unitdescr" in x or "rider" in x for x in paths))
+        self.assertEqual(manifest["scope"]["sprites"], "referenced")
+        self.assertIn({"kind": "sprite", "id": 199, "frame": "attack", "reason": "no sprite file in the source catalog"},
+                      manifest["missing"])
+        self.assertNotIn(str(self.ws).replace("\\", "\\\\"), json.dumps(manifest))  # no absolute local paths
+        # No live catalog: the project still resolves vanilla data and sprites from its own snapshot.
+        cat, err = resolve_catalog(self.ws, "demo_mod", None, {"code": "catalog_missing"})
+        self.assertIsNone(err)
+        self.assertTrue(cat.meta["catalog_path"].startswith(".kosmokrator/reference/"))
+        m = build_project_model(self.ws, "demo_mod", cat)
+        self.assertEqual(m["monsters"][0]["donor"]["name"], "Cardaces")
+        self.assertIsNotNone(catalog_sprite_path(cat, 199, "idle"))
+        self.assertEqual(reference_status(self.ws, "demo_mod", None, m)["state"], "offline")
+        self.assertEqual(reference_status(self.ws, "demo_mod", self.catalog, m)["state"], "current")
+        # Projects without a snapshot keep reading the live catalog unchanged.
+        create_project(self.ws, "plain_mod")
+        self.assertIs(resolve_catalog(self.ws, "plain_mod", self.catalog, None)[0], self.catalog)
+        # Exports carry only the mod; the snapshot and its imagery stay local.
+        out = export_mod(self.ws, "demo_mod", dest="out.zip", catalog=cat)
+        with zipfile.ZipFile(self.ws / "out.zip") as zf:
+            self.assertTrue(all(n.startswith("demo_mod/") and ".kosmokrator" not in n and not n.endswith(".png")
+                                for n in zf.namelist()))
+        self.assertTrue(out["manifest"]["catalog"]["catalog_path"].startswith(".kosmokrator/reference/"))
+        self.assertEqual(self.dm.read_bytes(), dm_before)
+
+    def test_stale_tampered_linked_and_live_differences_are_reported(self) -> None:
+        from kosmokrator.reference import create_snapshot, read_verified, reference_status, resolve_catalog
+        first = create_snapshot(self.ws, "demo_mod", self.catalog, self.body())
+        for bad, code in (({"expected_snapshot": None}, "reference_changed"),
+                          ({"expected_sha256": "0" * 64}, "sha_mismatch"), ({"sprites": "everything"}, "bad_request")):
+            with self.assertRaises(KosmoError) as cm:
+                create_snapshot(self.ws, "demo_mod", self.catalog, {**self.body(), **bad})
+            self.assertEqual(cm.exception.code, code)
+        with self.assertRaises(KosmoError) as cm:
+            create_snapshot(self.ws, "demo_mod", None, self.body())
+        self.assertEqual(cm.exception.code, "catalog_missing")
+        second = create_snapshot(self.ws, "demo_mod", self.catalog, self.body(sprites="all"))
+        ref = self.root / ".kosmokrator" / "reference"
+        self.assertEqual(sorted(p.name for p in ref.iterdir()), ["current.json", second["snapshot"]])
+        self.assertIn(first["snapshot"], second["removed"])
+        # A different live catalog is reported as stale; the snapshot stays in use (versions are not mixed).
+        other = write_catalog(Path(self._tmp.name) / "other")
+        (other / "gamedata" / "nations.csv").write_text("id\tname\tepithet\tera\n5\tChanged\tX\t1\n", encoding="utf-8")
+        live2 = load_catalog(other)
+        self.assertEqual(reference_status(self.ws, "demo_mod", live2)["state"], "stale")
+        self.assertEqual(resolve_catalog(self.ws, "demo_mod", live2, None)[0].row("nations", 5)["name"], "Arcoscephale")
+        # A tampered file makes the snapshot invalid: it is not used and the live catalog is not substituted.
+        target = ref / second["snapshot"] / "catalog" / "gamedata" / "nations.csv"
+        original = target.read_bytes()
+        target.write_bytes(original + b"6\tExtra\t\t1\n")
+        cat, err = resolve_catalog(self.ws, "demo_mod", self.catalog, None)
+        self.assertIsNone(cat)
+        self.assertEqual(err["code"], "reference_invalid")
+        self.assertEqual(reference_status(self.ws, "demo_mod", self.catalog)["state"], "invalid")
+        target.write_bytes(original)
+        cat, err = resolve_catalog(self.ws, "demo_mod", None, None)
+        self.assertIsNone(err)
+        sprite = cat.root / "images" / "sprites" / "0311_1.png"
+        self.assertEqual(read_verified(cat, sprite), self.PNG)
+        sprite.write_bytes(self.PNG + b"x")  # images are checked against the manifest on every read
+        self.assertIsNone(read_verified(cat, sprite))
+        sprite.write_bytes(self.PNG)
+        # A link or junction inside a snapshot is refused as well.
+        outside = Path(self._tmp.name) / "outside"
+        outside.mkdir()
+        PatchTests._dir_link(self, outside, ref / second["snapshot"] / "catalog" / "linked")
+        self.assertEqual(resolve_catalog(self.ws, "demo_mod", None, None)[1]["code"], "reference_invalid")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -840,8 +840,8 @@ details.used-by > summary { font-size: .88rem; }
 }
 
 /* ----- project readiness (top of Overview) ----- */
-.readiness .ready-head { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .7rem; margin-bottom: .6rem; }
-.readiness .ready-head h3 { margin: 0; }
+.readiness .ready-head, .reference-panel .ready-head { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .7rem; margin-bottom: .6rem; }
+.readiness .ready-head h3, .reference-panel .ready-head h3 { margin: 0; }
 .ready-list { list-style: none; margin: 0 0 .8rem; padding: 0; border-top: 1px solid var(--line); }
 .ready-row { display: grid; grid-template-columns: 4.2rem minmax(8rem, 11rem) minmax(0, 1fr) auto; align-items: center; gap: .3rem .8rem;
   padding: .5rem .3rem; border-bottom: 1px solid var(--line); }
@@ -852,7 +852,7 @@ details.used-by > summary { font-size: .88rem; }
 .ready-action { justify-self: end; white-space: nowrap; }
 .ready-row.is-err { box-shadow: inset 2px 0 0 var(--ember); }
 .ready-row.is-warn { box-shadow: inset 2px 0 0 var(--warn); }
-.readiness details.raw { margin-bottom: .6rem; }
+.readiness details.raw, .reference-panel details.raw { margin-bottom: .6rem; }
 .ready-items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .45rem; }
 .ready-items li { overflow-wrap: anywhere; }
 .ready-items code { overflow-wrap: anywhere; }

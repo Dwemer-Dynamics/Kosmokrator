@@ -20,6 +20,10 @@ The cache lives in `<workspace>/.kosmokrator-trait-icons/`. It is excluded from 
 project assets and mod exports. Kosmokrator's source package includes mapping metadata and extraction
 code, not Illwinter's graphics. Removing the cache restores text-only traits.
 
+A project reference snapshot copies the verified icons into `<project>/.kosmokrator/reference/<id>/trait-icons/`
+(re-hashed against this manifest), so a self-contained project keeps them without the workspace cache. That copy
+is served only through `GET /api/projects/<slug>/trait-icons[/<command>.png]`, stays local and is never exported.
+
 ## Coverage and evidence
 
 - 237 of the 519 documented monster traits have reviewed native icon mappings.

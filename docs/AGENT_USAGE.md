@@ -107,6 +107,10 @@ saved source. Repeat the gates before delivery and report exact testing gaps.
   in Dominions 6 (enable the mod, start a game in the right era) and reporting back.
 - The catalog is the third-party dom6inspector data (GPL-3.0) that the user supplied. It may differ from
   their game version. Never claim it's official or complete.
+- A project may carry a local reference snapshot (`author_state` kind `reference-snapshot`). Project tools then
+  read it instead of the live catalog; pass `project` to `search_game_data`/`reference_game_data` to search it.
+  Report its state (offline, current, stale or invalid) and sprite coverage (referenced-only is partial). It holds
+  game imagery from the user's own copy of the game: never export, commit or share it.
 - Kosmokrator does not install into the game folder. The user copies `<slug>/` into their `mods` directory.
 
 ## Setup snippets (copy manually; Kosmokrator never edits global config)

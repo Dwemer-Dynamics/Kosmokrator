@@ -1262,8 +1262,11 @@ class ModelCache:
         return model
 
 
-def list_projects(workspace: Path, cache: ModelCache, catalog: Catalog | None) -> dict[str, Any]:
-    """Every directory holding kosmokrator.json; a broken project yields an error entry, not a failure."""
+def list_projects(workspace: Path, cache: ModelCache, catalog: Catalog | None,
+                  catalog_for: Any = None) -> dict[str, Any]:
+    """Every directory holding kosmokrator.json; a broken project yields an error entry, not a failure.
+
+    catalog_for(slug), when given, returns the catalog that project reads (its reference snapshot, if any)."""
     projects = []
     for entry in sorted(workspace.iterdir(), key=lambda p: p.name):
         if is_link(entry) or not entry.is_dir() or not (entry / META_FILE).exists():
@@ -1273,7 +1276,8 @@ def list_projects(workspace: Path, cache: ModelCache, catalog: Catalog | None) -
         try:
             if not SLUG_RE.match(slug):
                 raise KosmoError("bad_slug", "Directory name is not a valid project slug")
-            m = cache.get(workspace, slug, catalog)
+            project_cat = catalog_for(slug) if catalog_for else catalog
+            m = cache.get(workspace, slug, project_cat)
             v = m["validation"]
             lead = m["nations"][0] if m["nations"] else None
             item.update(ok=True, name=m["project"]["name"], mod_name=m["project"]["mod_name"],
@@ -1286,7 +1290,9 @@ def list_projects(workspace: Path, cache: ModelCache, catalog: Catalog | None) -
                         banner_preview=(m["project"].get("banner") or {}).get("preview"),
                         counts=m["counts"],
                         validation={"ok": v["ok"], "counts": v["counts"]} if v else None,
-                        sha256=m["provenance"]["sha256"])
+                        sha256=m["provenance"]["sha256"],
+                        reference_snapshot=((project_cat.meta.get("reference_snapshot") or {}).get("snapshot")
+                                            if project_cat else None))
         except KosmoError as exc:
             item["error"] = exc.to_dict()
         except (OSError, ValueError, UnicodeError) as exc:

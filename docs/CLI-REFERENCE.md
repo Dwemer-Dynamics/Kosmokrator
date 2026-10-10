@@ -17,7 +17,8 @@ For source-folder use without installation, use a verified Python 3.11+ executab
 
 Reference checks and `search` use a local checkout of the third-party
 [dom6inspector](https://github.com/larzm42/dom6inspector) repository (GPL-3.0, by larzm42). Kosmokrator
-does not bundle, copy or download it. Clone it once and point to it:
+does not bundle or download it, and copies from it only into a project's local reference snapshot when you ask
+(see below). Clone it once and point to it:
 
 ```powershell
 git clone https://github.com/larzm42/dom6inspector C:\data\dom6inspector
@@ -29,6 +30,14 @@ catalog path, origin URL, git revision and the dataset version stated in the che
 (e.g. `[ver 6.37]`); when that marker is absent the dataset version is reported as unknown (`null`). The data is community-extracted and can lag behind or differ
 from your installed game. Without a catalog, `validate` still runs, but it reports vanilla references as
 `unverified`.
+
+A project can carry its own **reference snapshot** (`author PROJECT reference-snapshot` shows its status; with a
+`--body-file` of `{"expected_sha256", "expected_snapshot", "sprites": "referenced"|"all", "preview"}` it previews or
+writes one from the live catalog). It holds every catalog table, the catalog licence and the local reference art the
+project needs under `<project>/.kosmokrator/reference/`, with a manifest of sources, versions and hashes. Project
+commands (`validate`, `export`, `allocate`, `author`, and `search`/`reference` with `--project`) then read the
+snapshot instead of `--catalog`, never both. It includes game imagery extracted from your own copy of the game: it is
+local only and is never written into exports. See [WEB-BROWSER.md](WEB-BROWSER.md#reference-snapshot-self-contained-project).
 
 ## Starter demo
 
@@ -65,12 +74,12 @@ copies files into the game folder itself.
 | `patch PROJECT --expected-sha256 H (--old-file F --new-file F \| --insert-line N --text-file F)` | `apply_mod_patch` | One exact replacement or one insertion, with a backup and a diff |
 | `lookup [CMD] [--context]` | `lookup_command` | Curated syntax/context/ranges with manual section and page |
 | `allocate PROJECT KIND [N] [--label] [--dep]` | `allocate_ids` | Reserve free ids in documented ranges |
-| `search QUERY [--category] [--limit]` | `search_game_data` | Offline catalog search by id or name (max 50 results) |
+| `search QUERY [--category] [--limit] [--project]` | `search_game_data` | Offline catalog search by id or name (max 50 results); `--project` searches that project's snapshot if it has one |
 | `validate PROJECT [--dep]` | `validate_mod` | Errors, warnings and unverified items, each with file and line |
 | `export PROJECT [--dest] [--format zip\|folder]` | `export_mod` | Error-free export with a sha256 manifest; never overwrites |
 | `demo [--export zip\|folder]` | (CLI only) | Builds the Hebdomad demo |
-| `author PROJECT KIND [--body-file JSON]` | `author_state`, `author_save` | State or preview/save sites, spells, weapons, armors, heroes:N, equipment:N, playtests |
-| `reference CATEGORY [QUERY] [--id N]` | `reference_game_data` | Inspect spell, site or equipment catalog references |
+| `author PROJECT KIND [--body-file JSON]` | `author_state`, `author_save` | State or preview/save sites, spells, weapons, armors, heroes:N, equipment:N, playtests, reference-snapshot |
+| `reference CATEGORY [QUERY] [--id N] [--project]` | `reference_game_data` | Inspect spell, site or equipment catalog references |
 | `import-dm SOURCE --slug SLUG [--preview]` | `import_mod` | Copy an existing mod and supplied assets into a new project |
 | `tools status\|preview\|run\|history\|receipt` | external tool operations | Fixed optional adapters, fingerprinted previews and diagnostic receipts |
 | `mcp` | n/a | Starts the MCP stdio server |
@@ -87,6 +96,7 @@ destinations), `--catalog` (an explicit, read-only source that may live outside 
   mod/<slug>/<slug>.dm        authoritative source
   mod/<slug>/...              assets referenced by the .dm (relative, forward slashes, case-sensitive)
   .kosmokrator/backups/       pre-patch copies (git-ignored)
+  .kosmokrator/reference/     optional local reference snapshot (git-ignored, never exported)
   exports/                    default export target (git-ignored)
 ```
 
