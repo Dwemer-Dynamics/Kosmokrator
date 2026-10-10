@@ -6,6 +6,64 @@ For the complete seasonal and terrain image matrix, follow [MAP-LAYERS.md](MAP-L
 
 ## 1. Set the brief before painting
 
+### Default discovery flow
+
+For a new map, use the same brief-first flow as nation creation. Ask three short
+rounds of useful questions, with recommended defaults and a "choose for me"
+option. Reuse answers already supplied; do not ask the user to configure every
+terrain percentage. If the user delegates the choices, select and state them.
+
+1. **Players, size and water:** ask total nations including AI, how many need
+   underwater starts, compact/standard/spacious expansion room, and inland lakes,
+   continent and oceans, archipelago or mostly underwater geography. Player count
+   and starting environments drive the province budget; do not silently guess
+   them unless the user delegates. Recommend standard expansion room and continent
+   and oceans, adjusting to the theme and participating nations.
+2. **Geography and playable layers:** ask single continent, several continents,
+   islands or themed geography; surface only, surface plus caves or other verified
+   engine-supported planes; fair natural starts, strict symmetry or deliberately
+   uneven exploration; and supported wrapping. Recommend a single continent, fair
+   natural starts, surface only and no wrapping. Do not add caves just because a
+   theme sounds mystical. Verify requested topology and plane support before
+   promising it.
+3. **Theme and special features:** ask visual theme and defining landmarks or
+   strategic features. Propose coherent terrain distribution, river crossings,
+   mountain passes, special sites and independent difficulty from those answers.
+
+Use these initial design targets, not established vanilla balance rules:
+
+| Expansion room | Provinces per player |
+| --- | --- |
+| Compact | 10-12 |
+| Standard (default) | 15-18 |
+| Spacious | 20-25 |
+
+Show both the ratio and total province count. Budget usable land and underwater
+expansion separately, and state how cave/other-plane provinces contribute to the
+total. Do not count inaccessible water or lower planes as ordinary expansion room
+for every nation. Select water allocation from the participating nations and viable
+routes, not a fixed percentage. Eight land nations and two underwater nations,
+for example, require an explicit underwater budget and connected underwater routes,
+not simply "20% water".
+
+### Concrete proposal before generation
+
+Present one compact brief for review before building: player count and starts by
+environment; total provinces split by land/water and playable plane; expansion
+targets; world shape and wrapping; connectivity and intended chokepoints; theme;
+terrain and independent difficulty; complete required artwork; deliberate
+asymmetry and tradeoffs. Resolve material outstanding choices before generation.
+Proceed with existing authorization when the user has delegated or accepted the
+choices; do not introduce a second mandatory approval step.
+
+For caves or other playable planes, specify their province budget, eligible
+starting nations, entrance count and placement, expansion room, routes between
+entrances, and intentional advantages from controlling an entrance. Distinguish
+these playable planes from artwork variants: summer/winter and terrain looks
+reuse a plane's geography and do not add playable territory. Default to complete
+required original artwork and the supported variant matrix in MAP-LAYERS.md;
+record explicit scope exceptions and bundle limits before promising output.
+
 Record intended player count, land/underwater/cave nation slots, map purpose, province counts by plane,
 wraparound, starts, gateways, special sites and intended movement bottlenecks. Distinguish a small demo
 from a multiplayer map. More image pixels improve readability; more provinces change gameplay.
@@ -72,6 +130,21 @@ landmark positions when changing seasons. Never carry forward an obsolete winter
   visual symmetry, equal province counts or zero validation errors alone.
 
 ## 6. Package and verify
+
+Apply these completion gates in order:
+
+- **Layout before detailed art:** check connected provinces, start eligibility,
+  comparable reachable expansion space, rival distances and deliberate bottlenecks.
+- **Water and plane access:** review land-only, underwater and plane travel
+  separately, including isolated seas, entrances and movement restrictions.
+- **Artwork:** derive readable borders, coasts, crossings and entrances from the
+  approved geography. Inspect every supported requested seasonal/terrain variant
+  for aligned centres, ownership and landmarks.
+- **Delivery:** validate and export the complete bundle, provide a preview and
+  export location, and test loading, starts, connections, plane transitions and
+  visual alignment in-game where available. Report static, artwork, packaging and
+  in-game evidence separately; disclose blocked or skipped checks. Neither an
+  accepted import nor a successful export proves gameplay balance.
 
 1. Back up the bundle and record its revision before changing geography.
 2. Inspect the actual art and coastline, then reconcile the ownership mask to the final silhouette.

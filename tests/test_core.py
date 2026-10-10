@@ -677,5 +677,143 @@ class AuthoringRegressionTests(Base):
         self.assertTrue(result.endswith(b'#end\r\n-- tail\r\n'))
 
 
+class WorkshopTests(Base):
+    """Workshop folders come only from a hashed export of the shown revision; installs never clobber or publish."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.h = sha(self.dm.read_bytes())
+        self.mods = Path(self._tmp.name) / "userdata" / "mods"
+        self.mods.mkdir(parents=True)
+        from kosmokrator.workshop import mods_dir_config
+        self.config = mods_dir_config({"KOSMOKRATOR_DOMINIONS_MODS": str(self.mods)})
+
+    def export(self) -> dict:
+        from kosmokrator.export import export_revision
+        return export_revision(self.ws, "demo_mod", self.h, "zip", self.catalog)
+
+    def prepare(self, export_id: str, **extra):
+        from kosmokrator.workshop import prepare_workshop
+        return prepare_workshop(self.ws, "demo_mod", {"expected_sha256": self.h, "export_id": export_id,
+                                                      "visibility": "Public", **extra})
+
+    def install(self, wid: str, digest: str | None = None, config: dict | None = None):
+        from kosmokrator.workshop import install_workshop
+        return install_workshop(self.ws, "demo_mod", wid, {"expected_sha256": digest or self.h}, config or self.config)
+
+    def code(self, call) -> str:
+        with self.assertRaises(KosmoError) as cm:
+            call()
+        return cm.exception.code
+
+    def test_prepare_allowlist_banner_and_regular_zip_unchanged(self) -> None:
+        from kosmokrator.author import decode_png_rgba
+        from kosmokrator.export import list_exports
+        from kosmokrator.tga import decode_tga
+        from kosmokrator.workshop import fit_banner
+        ex = self.export()
+        zpath = self.ws / "demo_mod" / ex["path"]
+        zbytes = zpath.read_bytes()
+        with zipfile.ZipFile(zpath) as zf:
+            self.assertEqual(sorted(zf.namelist()), ["demo_mod/demo_mod.dm", "demo_mod/mod_banner.tga"])
+        for vis in ("Private", "public", None):
+            self.assertEqual(self.code(lambda: self.prepare(ex["export_id"], visibility=vis)), "bad_visibility")
+        self.assertEqual(self.code(lambda: self.prepare(ex["export_id"], destination="C:/x")), "bad_request")
+        r = self.prepare(ex["export_id"])
+        content = self.ws / "demo_mod" / r["path"]
+        self.assertEqual(sorted(p.name for p in content.iterdir()),
+                         ["banner.png", "demo_mod.dm", "dom6ws.txt", "mod_banner.tga"])
+        self.assertEqual((content / "dom6ws.txt").read_bytes(), b'Visibility = "Public"')
+        self.assertEqual((content / "demo_mod.dm").read_bytes(), self.dm.read_bytes())
+        self.assertEqual(sorted(os.listdir(content.parent)), ["demo_mod"])  # manifest and ZIP live outside
+        with zipfile.ZipFile(self.ws / "demo_mod" / r["archive_path"]) as zf:
+            self.assertEqual(sorted(zf.namelist()), sorted(f"demo_mod/{p.name}" for p in content.iterdir()))
+        w, h, px = decode_png_rgba((content / "banner.png").read_bytes())
+        sw, sh, src = decode_tga((self.dm.parent / "mod_banner.tga").read_bytes())
+        self.assertEqual((w, h, sw, sh), (256, 256, 256, 64))
+        self.assertEqual(px[3], 0)  # transparent letterbox
+        self.assertEqual(px[96 * 256 * 4:160 * 256 * 4], src)  # source pixels unchanged, centred
+        self.assertEqual(r["banner"]["method"], "centred unscaled on a transparent canvas")
+        self.assertEqual(fit_banner(512, 128, bytes(512 * 128 * 4))[1]["placed_size"], [256, 64])
+        self.assertEqual(fit_banner(100, 300, bytes(100 * 300 * 4))[1]["placed_size"], [85, 256])
+        self.assertEqual(zpath.read_bytes(), zbytes)
+        self.assertEqual([x["export_id"] for x in list_exports(self.ws, "demo_mod")], [ex["export_id"]])
+        self.assertEqual(self.code(lambda: self.prepare(ex["export_id"], banner_asset="../kosmokrator.json")),
+                         "banner_missing")
+
+    def test_prepare_refuses_blocked_stale_tampered_and_traversal(self) -> None:
+        self.set_dm(b'#modname "X"\n#newmonster 5000\n')  # unclosed block: export refuses, nothing prepared
+        self.assertEqual(self.code(lambda: self.export()), "sha_mismatch")
+        self.h = sha(self.dm.read_bytes())
+        self.assertEqual(self.code(lambda: self.export()), "validation_failed")
+        self.h = self.set_dm(b'#modname "X"\n#icon "mod_banner.tga"\n')
+        ex = self.export()
+        old = self.h
+        self.h = self.set_dm(b'#modname "X"\n#icon "mod_banner.tga"\n-- changed\n')
+        self.assertEqual(self.code(lambda: self.prepare(ex["export_id"], expected_sha256=old)), "sha_mismatch")
+        self.assertEqual(self.code(lambda: self.prepare(ex["export_id"])), "stale_export")
+        ex = self.export()
+        for bad in ("../x", "demo_mod-ws-x", "", None, "a" * 200):
+            self.assertIn(self.code(lambda: self.prepare(bad)), ("export_missing", "bad_request"))
+        zpath = self.ws / "demo_mod" / ex["path"]
+        zpath.write_bytes(zpath.read_bytes() + b"\x00")
+        self.assertEqual(self.code(lambda: self.prepare(ex["export_id"])), "export_changed")
+        self.assertFalse((self.ws / "demo_mod" / "exports" / "workshop").exists())
+        self.h = self.set_dm(b'#modname "X"\n')  # no #icon and no banner.png
+        self.assertEqual(self.code(lambda: self.prepare(self.export()["export_id"])), "banner_missing")
+        for wid in ("../../x", "demo_mod-ws-20260101T000000Z-zzzzzzzz"):
+            self.assertEqual(self.code(lambda: self.install(wid)), "workshop_missing")
+
+    def test_install_new_identical_managed_conflict_and_pfid(self) -> None:
+        from kosmokrator.workshop import mods_dir_config
+        r1 = self.prepare(self.export()["export_id"])
+        self.assertEqual(self.code(lambda: self.install(r1["workshop_id"], config=mods_dir_config(
+            {"KOSMOKRATOR_DOMINIONS_MODS": "off"}))), "install_unavailable")
+        self.assertFalse(mods_dir_config({"KOSMOKRATOR_DOMINIONS_MODS": "relative/mods"})["available"])
+        from kosmokrator.workshop import install_workshop
+        self.assertEqual(self.code(lambda: install_workshop(self.ws, "demo_mod", r1["workshop_id"], {
+            "expected_sha256": self.h, "destination": str(self.ws)}, self.config)), "bad_request")
+        dest = self.mods / "demo_mod"
+        self.assertEqual(self.install(r1["workshop_id"])["result"], "installed")
+        self.assertEqual(sorted(p.name for p in dest.iterdir()), ["banner.png", "demo_mod.dm", "dom6ws.txt", "mod_banner.tga"])
+        again = self.install(r1["workshop_id"])
+        self.assertEqual((again["result"], again["written"]), ("unchanged", []))
+        (dest / "dom6ws_pfid").write_bytes(b"3141394816")  # written by the game after an upload
+        self.h = self.set_dm(self.dm.read_bytes() + b"-- v2\n")
+        r2 = self.prepare(self.export()["export_id"])
+        self.assertEqual(self.code(lambda: self.install(r1["workshop_id"])), "stale_export")
+        up = self.install(r2["workshop_id"])
+        self.assertEqual((up["result"], up["written"], up["pfid_preserved"]), ("updated", ["demo_mod.dm"], True))
+        self.assertEqual((dest / "dom6ws_pfid").read_bytes(), b"3141394816")
+        self.assertEqual((dest / "demo_mod.dm").read_bytes(), self.dm.read_bytes())
+        (dest / "notes.txt").write_bytes(b"mine")  # an unmanaged file blocks the managed update
+        self.h = self.set_dm(self.dm.read_bytes() + b"-- v3\n")
+        r3 = self.prepare(self.export()["export_id"])
+        snap = {p.name: p.read_bytes() for p in dest.iterdir()}
+        self.assertEqual(self.code(lambda: self.install(r3["workshop_id"])), "install_conflict")
+        self.assertEqual({p.name: p.read_bytes() for p in dest.iterdir()}, snap)
+        prepared = self.ws / "demo_mod" / r3["path"] / "dom6ws.txt"
+        prepared.write_bytes(b'Visibility = "Private"')
+        self.assertEqual(self.code(lambda: self.install(r3["workshop_id"])), "workshop_changed")
+
+    def test_install_preserves_unmanaged_and_linked_destinations(self) -> None:
+        r = self.prepare(self.export()["export_id"])
+        dest = self.mods / "demo_mod"
+        dest.mkdir()
+        (dest / "demo_mod.dm").write_bytes(b"-- someone else's mod\n")
+        (dest / "dom6ws_pfid").write_bytes(b"42")
+        self.assertEqual(self.code(lambda: self.install(r["workshop_id"])), "install_conflict")
+        self.assertEqual(sorted(p.name for p in dest.iterdir()), ["demo_mod.dm", "dom6ws_pfid"])
+        self.assertEqual((dest / "demo_mod.dm").read_bytes(), b"-- someone else's mod\n")
+        outside = Path(self._tmp.name) / "outside"
+        outside.mkdir()
+        for p in dest.iterdir():
+            p.unlink()
+        dest.rmdir()
+        PatchTests._dir_link(self, outside, dest)
+        self.assertEqual(self.code(lambda: self.install(r["workshop_id"])), "symlink_rejected")
+        self.assertEqual(list(outside.iterdir()), [])
+
+
 if __name__ == "__main__":
     unittest.main()

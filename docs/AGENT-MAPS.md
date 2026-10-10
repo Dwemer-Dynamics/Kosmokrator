@@ -6,6 +6,14 @@ the agent's geography/art tools with an interactive paint editor.
 
 ## Workflow
 
+Before creating a map job, follow the three-round discovery and concrete brief in
+[MAP-DESIGN.md](MAP-DESIGN.md#default-discovery-flow). Reuse supplied answers or
+delegated choices. Default to standard expansion room (15-18 provinces per player
+as a design target), fair natural starts, surface only, no wrapping and complete
+required artwork. Budget water from participating nations; distinguish playable
+planes from seasonal/terrain images. Record detailed start, access and fairness
+decisions in the design brief/handoff without inventing unsupported API fields.
+
 1. Read `author_state(project, "map-builds")`, or open Maps in the browser.
 2. Prepare a brief using the returned defaults. Send `author_save` with kind
    `map-builds`, `action: "create"`, `preview: true`, the current `expected_revision`
@@ -25,7 +33,9 @@ the agent's geography/art tools with an interactive paint editor.
    `preview: false` only for the reviewed output. A changed output must be reviewed
    again; a previously imported map is never overwritten.
 7. Open the new map, inspect its images and province geometry, then export through
-   the existing map exporter. Report in-game testing separately.
+   the existing map exporter. Apply MAP-DESIGN.md's completion gates, deliver a
+   preview and export location, and report in-game testing and remaining limits
+   separately.
 
 CLI and MCP use the same operations:
 

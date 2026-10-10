@@ -22,9 +22,48 @@ whole-bundle `expected_revision`, with preview/save and source backups; see [Map
 Before creating or rebuilding a map, read [MAP-DESIGN.md](MAP-DESIGN.md) and apply its geography,
 land/sea, readability, balance and packaging checks. Record the brief and untested limits.
 Generate seasonal and terrain art using [MAP-LAYERS.md](MAP-LAYERS.md), including its complete filename matrix.
+For new maps, follow MAP-DESIGN.md's brief-first discovery flow: players/size/water,
+geography/playable planes/fairness/wrapping, then theme and special features.
+Reuse supplied answers and delegated choices. Show province budgets by environment
+and plane before generation, then apply layout, access, artwork and delivery gates.
 They share the CLI and browser backend. Results use an `ok` envelope; external runs also have a receipt
 status that must be checked. MCP uses stdout for protocol and stderr for logs. Pass the workspace
 explicitly at startup; projects are addressed by slug.
+
+## Default artwork scope
+
+A request to build a new nation includes its complete original artwork by default,
+even when the user describes only a theme. Derive the art direction from that prompt
+and the approved asset rules. Plan idle/attack pairs for every troop, commander,
+summon, hero, pretender and alternate form, plus an original nation flag and custom
+mod banner. Include any additional artwork required by the requested content.
+Every new magic item also requires an original icon, referenced with item `#spr`,
+unless the user explicitly requests reuse or a prototype. Follow the dimensions
+and checks in [ASSET-RULESET.md](ASSET-RULESET.md). Spells require creature/form
+sprites when they introduce those definitions; do not invent unsupported spell
+icons or site texture commands.
+
+Before authoring, record an asset checklist keyed to roster IDs and forms. Generate
+and integrate the complete set; temporary vanilla references and default graphics
+must be replaced before declaring the nation complete. Reusing art or delivering a
+prototype is allowed when the user explicitly requests it. Time or convenience is
+not authorization to narrow the scope. If generation is unavailable, report the
+specific blocker and unfinished assets instead of substituting stock art silently.
+
+Before final export, check that every required asset exists, meets its format and
+pose requirements, is referenced by the saved source, and is present in the export.
+Keep prompts, raw outputs and conversion provenance. Audit sprite commands: remove
+`#copyspr` before setting custom `#spr1`/`#spr2` to avoid changing donor sprites.
+Separate artwork completion from static, engine-load and gameplay evidence.
+
+## Default National Features format
+
+Generated nations must use the vanilla labelled National Features format, not a
+one-sentence summary: **Race, Military, Magic, Priests, Dominion, Buildings**, in
+that order. Put the authored feature lines in nation `#summary`; keep `#descr`
+for lore and `#brief` for the popup. Follow [NATION-DESIGN.md](NATION-DESIGN.md#national-features-vanilla-presentation-format)
+for required detail, truthful mechanics, engine-provided Buildings text and the
+in-game presentation check. Do not duplicate an automatic Buildings line.
 
 ## Required workflow
 For a first-project handoff from the browser, treat its downloaded JSON as a design
@@ -42,6 +81,13 @@ browser. Distinguish completed assets and exports from unresolved or game-untest
 For new nations or balance revisions, first read [NATION-DESIGN.md](NATION-DESIGN.md). Prepare its design
 brief and reference comparisons, audit copied-unit inheritance, and report gameplay evidence separately
 from static validation. Use [HEBDOMAD-REVIEW.md](HEBDOMAD-REVIEW.md) as the current worked review.
+
+Before bulk artwork, apply the generation quality gates in `NATION-DESIGN.md`:
+overlapping recruitment choices, routine support access, full booster progression,
+summon value, creature-specific defaults, national spell purpose and checkpoint
+capture. Include army leadership/movement support, early thematic identity,
+competing gem uses and distinct individual lore. Reconcile final guides with the
+saved source. Repeat the gates before delivery and report exact testing gaps.
 
 1. **Research first.** Use `lookup_command` for syntax, context, documented ranges and the manual
    section/page (manual 6.36). Use `search_game_data` for vanilla ids and names. Prefer numbers over names

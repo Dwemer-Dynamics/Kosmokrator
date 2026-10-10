@@ -66,7 +66,7 @@
   function table(headers, rows, opts = {}) {
     const t = el("table", null,
       opts.caption ? el("caption", { text: opts.caption }) : null,
-      el("thead", null, el("tr", null, headers.map((h) => el("th", { scope: "col", text: h })))),
+      el("thead", null, el("tr", null, headers.map((h) => (h instanceof Node ? el("th", { scope: "col" }, h) : el("th", { scope: "col", text: h }))))),
       el("tbody", null, rows.map((r) => {
         const cells = Array.isArray(r) ? r : r.cells;
         const tr = el("tr", { class: (!Array.isArray(r) && r.class) || null },
@@ -117,6 +117,24 @@
   // Optional trait icon manifest (GET /api/trait-icons): command -> { url, width, height }. A command without an
   // entry has no confirmed icon and stays text-only; a failed or missing manifest just means no icons.
   const traitIcons = new Map();
+  // Native catalog icons by fixed key, following the catalog's own formatter: Gem_<P> for gem amounts (costs,
+  // income), Path_<P> for magic path skill and requirements, Path_U for random picks, abilityicons/holy for sacred.
+  // A key that does not load stays text-only; letters and names are always shown beside the art.
+  const PATH_KEYS = ["F", "A", "W", "E", "S", "D", "N", "G", "B", "H"];
+  const gemIcons = new Map(), skillIcons = new Map(), abilityIcons = new Map();
+  function probeIcon(map, key, url, cls) {
+    return new Promise((done) => {
+      const img = new Image(), timer = setTimeout(() => { img.src = ""; done(); }, 3000);
+      img.onload = () => { clearTimeout(timer); if (img.naturalWidth > 0 && img.naturalWidth <= 64 && img.naturalHeight <= 64) map.set(key, { url, cls, width: img.naturalWidth, height: img.naturalHeight }); done(); };
+      img.onerror = () => { clearTimeout(timer); done(); };
+      img.src = url;
+    });
+  }
+  function loadGemIcons() {
+    return Promise.all([...PATH_KEYS.map((p) => probeIcon(gemIcons, p, `/api/gem-icons/${p}.png`, "gem-ic")),
+      ...[...PATH_KEYS, "U"].map((p) => probeIcon(skillIcons, p, `/api/path-icons/${p}.png`, "path-img")),
+      probeIcon(abilityIcons, "holy", "/api/ability-icons/holy.png", "trait-icon")]);
+  }
   async function loadTraitIcons() {
     const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 3000);
     try {
@@ -138,12 +156,36 @@
   function traitIcon(cmd, value) {
     const key = String(cmd).replace(/^#/, "").toLowerCase();
     const negative = typeof value === "number" ? value < 0 : typeof value === "string" && /^-\d+$/.test(value);
-    const ic = (negative && traitIcons.get(`${key}_negative`)) || traitIcons.get(key);
+    // Without the extracted trait cache, sacred falls back to the catalog's own sacred badge.
+    const ic = (negative && traitIcons.get(`${key}_negative`)) || traitIcons.get(key) || (key === "holy" ? abilityIcons.get("holy") : null);
     if (!ic) return null;
     const img = el("img", { class: "trait-icon", src: ic.url, alt: "", width: ic.width, height: ic.height, decoding: "async", draggable: "false" });
     img.addEventListener("error", () => img.remove(), { once: true });
     return img;
   }
+  // Stat icons, decorative and always beside the visible label. Only verified game art is used: gold, resources and
+  // recruitment/commander points take the misc.trs frames the game itself draws beside those labels (optional local
+  // cache, /api/trait-icons/stat_*). The game draws base stats as text only, so they get no icon. Fixed allowlist.
+  const STAT_NATIVE = { gold: "stat_gold", resources: "stat_resources", recruitment_points: "stat_recpoints", commander_points: "stat_compoints" };
+  // Display labels used across sheets, cards and tables, matched exactly (an "(base)" fallback suffix is ignored).
+  const STAT_KEY_OF_LABEL = new Map([
+    ["hit points", "hp"], ["hp", "hp"], ["size", "size"], ["protection", "prot"], ["natural protection", "prot"],
+    ["magic res", "mr"], ["magic resistance", "mr"], ["morale", "mor"], ["leadership", "leader"], ["strength", "str"],
+    ["attack skill", "att"], ["attack", "att"], ["base attack", "att"], ["defence skill", "def"], ["defence", "def"], ["base defence", "def"],
+    ["precision", "prec"], ["base precision", "prec"], ["combat speed", "ap"], ["comb. speed", "ap"], ["combat speed (ap)", "ap"],
+    ["encumbrance", "enc"], ["base encumbrance", "enc"], ["map move", "mapmove"], ["gold", "gold"], ["resources", "resources"],
+    ["rec points", "recruitment_points"], ["recruitment points", "recruitment_points"]]);
+  const statKeyOf = (label) => STAT_KEY_OF_LABEL.get(String(label).toLowerCase().replace(/ \(base\)$/, "")) || null;
+  // Native cost art or null; a missing cache entry or a failed load leaves the text label alone, with no substitute.
+  function statIcon(key) {
+    const ic = key && Object.hasOwn(STAT_NATIVE, key) ? traitIcons.get(STAT_NATIVE[key]) : null;
+    if (!ic) return null;
+    const img = el("img", { class: "stat-ic stat-ic-native", src: ic.url, alt: "", width: ic.width, height: ic.height, decoding: "async", draggable: "false", "aria-hidden": "true" });
+    img.addEventListener("error", () => img.remove(), { once: true });
+    return img;
+  }
+  // Icon and visible text together; unknown keys return the text alone.
+  const statLabel = (key, text) => { const ic = statIcon(key); return ic ? el("span", { class: "stat-label" }, ic, text) : text; };
   async function model(slug, force) {
     if (force || !state.models.has(slug)) state.models.set(slug, getJSON(`/api/projects/${encodeURIComponent(slug)}`));
     try { return await state.models.get(slug); }
@@ -335,8 +377,8 @@
   // ---------- project shell ----------
   // Section groups shown in the tab bar; keys and routes are unchanged.
   const TAB_GROUPS = [
-    ["browse", "Browse", [["overview", "Overview"], ["nation", "Nation"], ["units", "Units"], ["pretenders", "Pretenders"], ["balance", "Balance"], ["sites", "Sites"], ["maps", "Maps"]]],
-    ["edit", "Edit", [["author", "Create & edit"], ["validation", "Validation"]]],
+    ["browse", "Browse", [["overview", "Overview"], ["nation", "Nation"], ["units", "Units"], ["pretenders", "Pretenders"], ["sites", "Sites"], ["spells", "Spells"], ["items", "Items"], ["maps", "Maps"], ["balance", "Balance"]]],
+    ["edit", "Edit", [["author", "Create & edit"], ["validation", "Validation"], ["export", "Export & Workshop"]]],
     ["files", "Files", [["source", "Source"], ["assets", "Assets"], ["other", "Other definitions"], ["docs", "Docs"]]],
   ];
   const TABS = TAB_GROUPS.flatMap((g) => g[2]);
@@ -357,7 +399,7 @@
     const c = m.counts;
     // Units counts the recruitable roster (and unassigned monsters) of the selected nation; pretender forms are counted under Pretenders.
     return { nation: c.nations, units: nationUnits(m).filter((u) => u.role !== "pretender").length, pretenders: nationPretenderCount(m),
-      sites: nationSites(m).length, other: c.other_definitions, assets: c.asset_files,
+      sites: nationSites(m).length, spells: otherOfKind(m, "spell").length, items: otherOfKind(m, "item").length, other: c.other_definitions, assets: c.asset_files,
       validation: m.validation ? m.validation.counts.errors + m.validation.counts.warnings + m.validation.counts.unverified : null,
       docs: m.project.docs.length + ((state.meta && state.meta.docs.length) || 0) }[key];
   }
@@ -405,11 +447,12 @@
       links[(i + (e.key === "ArrowRight" ? 1 : links.length - 1)) % links.length].focus();
     });
     const head = el("div", { class: "proj-head" }, banner,
-      el("div", null,
+      el("div", { class: "proj-title" },
         el("h1", { tabindex: "-1", id: "page-title", text: m.project.mod_name || m.project.name || slug }),
         el("div", { class: "sub" },
           [n && n.epithet, m.project.era_name, m.project.version && `v${m.project.version}`, `target Dominions ${txt(m.project.target_game_version)}`]
-            .filter(Boolean).join(" · "))));
+            .filter(Boolean).join(" · "))),
+      exportHeadButton(m, active));
     const banners = [];
     if (m.catalog_error) banners.push(stateBox("empty", "No game-data catalog.",
       `${m.catalog_error.message} Donor stats and vanilla references are shown as unresolved.`));
@@ -443,18 +486,12 @@
     const S = R.sprites, V = R.validation, sc = S.counts;
     const unitHref = (u) => route("p", slug, "units", u.id ?? u.uid);
     const unitA = (u) => el("a", { href: unitHref(u) }, `${txt(u.name || "(unnamed)")}${u.id !== null && u.id !== undefined ? ` (#${u.id})` : ""}`);
-    const goExport = () => {
-      const h = document.getElementById("export-h");
-      if (!h) return;
-      h.setAttribute("tabindex", "-1");
-      h.scrollIntoView({ block: "start" });
-      h.focus({ preventScroll: true });
-    };
+    const goExport = () => { location.hash = route("p", slug, "export"); };
     function exportRow() {
       const L = m.latest_export, x = L && L.export;
       if (!L) return ["info", "Not reported by this server.", null];
       if (!L.available) return ["warn", `Export list unreadable (${txt(L.error)}).`, null];
-      if (!x) return ["info", "No exports yet.", "Export below when validation is clean."];
+      if (!x) return ["info", "No exports yet.", "Export when validation is clean."];
       const d = exportTime(x.created_utc), when = d ? agoText(d) : "time unknown";
       const cur = x.sha256 && x.sha256 === p.sha256;
       return [x.error ? "warn" : cur ? "ok" : "warn",
@@ -481,7 +518,7 @@
           text: S.shared_count ? `${S.shared_count} sprite${S.shared_count === 1 ? " is" : "s are"} used by more than one unit (allowed).` : "Each custom sprite is used by one unit.",
           action: null },
         { key: "export", kind: xKind, label: "Latest export", text: xText, detail: xDetail,
-          action: el("button", { type: "button", class: "btn btn-small btn-ghost", onclick: goExport }, "Go to export") },
+          action: el("button", { type: "button", class: "btn btn-small btn-ghost", onclick: goExport }, "Open export") },
       ];
       const attention = R.status !== "ready";
       const kindWord = { ok: "OK", warn: "Check", err: "Fix", info: "Info" };
@@ -561,7 +598,6 @@
         el("div", { class: "tiles" },
           tile(c.nations, "nations", route("p", slug, "nation")), tile(c.monsters, "monster definitions", route("p", slug, "units")),
           tile(c.sites, "site definitions", route("p", slug, "sites")))),
-      exportPanel(m),
       // Validation counts live in the readiness panel above; this panel keeps only what readiness does not show.
       panel("Dependencies and compatibility",
         !v ? stateBox("error", "Validation unavailable", "See diagnostics above.")
@@ -655,9 +691,9 @@
         panel("Start sites and gems",
           n.start_sites.length ? table(["Site", "Gems", "Line"], n.start_sites.map((s) => {
             const g = n.gem_sites.find((x) => x.site === s.site.uid);
-            return [siteLink(slug, s.site), g ? g.gems.map((x) => `${x.amount} ${x.path_name}`).join(", ") : unresolved("no modelled gems"), srcRef(slug, n.source.file, s.line)];
+            return [siteLink(slug, s.site), g ? gemList(g.gems) : unresolved("no modelled gems"), srcRef(slug, n.source.file, s.line)];
           })) : el("p", { class: "muted", text: "No #startsite commands." }),
-          el("p", { class: "panel-note", text: `Gem income from start sites: ${n.gem_sites.flatMap((g) => g.gems).map((x) => `${x.amount} ${x.path_name}`).join(", ") || "none modelled"} per turn (static reading; other income not included).` }))),
+          el("p", { class: "panel-note" }, "Gem income from start sites: ", gemList(n.gem_sites.flatMap((g) => g.gems), "none modelled"), " per turn (static reading; other income not included)."))),
       n.defence.length ? panel("Province defence, walls and guards", table(["Command", "Value", "Line"], n.defence.map((d) =>
         [el("code", { text: d.command }), d.monster ? monsterLink(slug, d.monster) : txt(d.count), srcRef(slug, n.source.file, d.line)]))) : null,
       n.diagnostics.length ? panel(`Diagnostics (${n.diagnostics.length})`, diagnosticsList(slug, n.diagnostics, n.source.file)) : null,
@@ -674,10 +710,29 @@
         panel("JSON", jsonActions(`/api/projects/${encodeURIComponent(slug)}/nations/${encodeURIComponent(n.id)}`, () => n, "Nation JSON"))));
   }
 
-  function unitMatches(u, q, role) {
-    if (role !== "all" && u.role !== role) return false;
+  // Summons come from a nonempty u.summoning; the backend role stays troop/commander. Summon-only units (no direct recruitment) are
+  // grouped under Summons; directly recruited units that can also be summoned keep their role group and still match the Summons filter.
+  // Heroes come only from live national #heroN/#multiheroN ties in u.nations (the backend drops slots overwritten later or
+  // cleared by #clearnation), scoped to the selected nation; never from the unit name or #unique. The backend role stays
+  // commander. Hero-only units (no direct recruitment) are grouped under Heroes, ahead of Summons when both apply.
+  const HERO_VIA = /^#(multi)?hero\d+$/;
+  function heroTies(m, u) {
+    const ties = (u.nations || []).filter((x) => HERO_VIA.test(txt(x.via)));
+    if (state.nation.key === N_ALL) return ties;
+    const n = state.nation.key === N_NONE ? null : selectedNation(m);
+    return n ? ties.filter((x) => x.nation === n.uid) : [];
+  }
+  const isHero = (m, u) => heroTies(m, u).length > 0;
+  const isSummon = (u) => Array.isArray(u.summoning) && u.summoning.length > 0;
+  function unitGroup(m, u) {
+    if (u.role === "pretender" || (u.recruitment || []).length) return u.role;
+    return isHero(m, u) ? "hero" : isSummon(u) ? "summon" : u.role;
+  }
+  function unitMatches(m, u, q, role) {
+    if (role !== "all" && (role === "summon" ? !isSummon(u) : role === "hero" ? !isHero(m, u) : unitGroup(m, u) !== role)) return false;
     if (!q) return true;
-    const hay = [u.name, u.id, u.role, u.uid, u.donor && u.donor.name, u.donor && u.donor.id].map(txt).join(" ").toLowerCase();
+    const heroVia = heroTies(m, u).map((x) => x.via.slice(1));
+    const hay = [u.name, u.id, u.role, heroVia.length ? "hero" : "", ...heroVia, isSummon(u) ? "summon" : "", u.uid, u.donor && u.donor.name, u.donor && u.donor.id].map(txt).join(" ").toLowerCase();
     return q.toLowerCase().split(/\s+/).every((t) => hay.includes(t));
   }
   function viewUnits(m, sel, sub) {
@@ -689,25 +744,27 @@
     const listEl = el("ul", { class: "unit-list", "aria-label": "Units" });
     const search = el("input", { class: "input", type: "search", placeholder: "Search name, id, role, donor  ( / )", "aria-label": "Search units", value: state.unitQuery });
     const roleSel = el("select", { class: "input", "aria-label": "Filter by role" },
-      [["all", "All roles"], ["troop", "Troops"], ["commander", "Commanders"], ["unassigned", "Not recruited"], ["pretender", "Pretender forms"]].map(([v, l]) => {
+      [["all", "All roles"], ["troop", "Troops"], ["commander", "Commanders"], ["hero", "Heroes"], ["summon", "Summons"], ["unassigned", "Not recruited"], ["pretender", "Pretender forms"]].map(([v, l]) => {
         const o = el("option", { value: v, text: l }); if (v === state.unitRole) o.selected = true; return o;
       }));
     // One visible count line doubles as the live status for search and filter changes.
     const status = el("p", { class: "faint", role: "status", "aria-live": "polite" });
     const pool = nationUnits(m);
     function fill() {
-      const shown = pool.filter((u) => unitMatches(u, state.unitQuery, state.unitRole));
+      const shown = pool.filter((u) => unitMatches(m, u, state.unitQuery, state.unitRole));
       listEl.replaceChildren();
-      for (const role of ["troop", "commander", "unassigned", "pretender"]) {
-        const group = shown.filter((u) => u.role === role);
+      // Under the Heroes or Summons filter every match is listed in that group; otherwise each unit appears once, in its own group.
+      const groupOf = (u) => state.unitRole === "summon" || state.unitRole === "hero" ? state.unitRole : unitGroup(m, u);
+      for (const role of ["troop", "commander", "hero", "summon", "unassigned", "pretender"]) {
+        const group = shown.filter((u) => groupOf(u) === role);
         if (!group.length) continue;
-        listEl.append(el("li", { class: "group-label", "aria-hidden": "true", text: { troop: "Troops", commander: "Commanders", unassigned: "Not recruited by a nation", pretender: "Pretender forms (not recruitable)" }[role] }));
+        listEl.append(el("li", { class: "group-label", "aria-hidden": "true", text: { troop: "Troops", commander: "Commanders", hero: "Heroes", summon: "Summons", unassigned: "Not recruited by a nation", pretender: "Pretender forms (not recruitable)" }[role] }));
         for (const u of group) {
           const thumb = el("span", { class: "thumb" });
           if (u.sprites.idle) thumb.append(spriteImg(u.sprites.idle.url, "", 1, el("span", { class: "faint", text: "?" })));
           listEl.append(el("li", null, el("a", { class: "unit-item", href: route("p", slug, "units", u.id ?? u.uid), "aria-current": u === selected ? "true" : null },
             thumb, el("span", null, el("div", { class: "nm", text: u.name || "(unnamed)" }),
-              el("div", { class: "sub", text: [`#${txt(u.id ?? u.selector)}`, u.role].join(" · ") })))));
+              el("div", { class: "sub", text: [`#${txt(u.id ?? u.selector)}`, u.role, isHero(m, u) ? "hero" : null, isSummon(u) ? "summon" : null].filter(Boolean).join(" · ") })))));
         }
       }
       if (!shown.length) listEl.append(el("li", null, stateBox("empty", pool.length ? "No units match." : `No units for ${nationScopeText(m)}.`,
@@ -783,16 +840,38 @@
     return FLAG_ABILITIES.has(k) && (String(v) === "1" || v === true) ? name : `${name} ${txt(v)}`;
   }
   const PATH_NAMES = { F: "Fire", A: "Air", W: "Water", E: "Earth", S: "Astral", D: "Death", N: "Nature", G: "Glamour", B: "Blood", H: "Holy" };
-  // Original CSS-drawn path marker: a coloured disc with the path letter, then the level.
-  const pathChip = (p, level, mod, title) => el("span", { class: "mpath" + (mod ? " mod" : ""), title: title || `${PATH_NAMES[p] || p} ${level}` },
-    el("span", { class: `path-ic path-${p}`, "aria-hidden": "true", text: p }), el("span", { class: "sr-only", text: `${PATH_NAMES[p] || p} ` }), txt(level));
+  const PATH_OF_NUMBER = (n) => (Number.isInteger(Number(n)) && Number(n) >= 0 && Number(n) <= 9 ? PATH_KEYS[Number(n)] : null);
+  // Decorative path marker. kind "gem" (amounts) uses the native gem icon; skill and requirements use the native
+  // path icon, then the gem icon; otherwise the CSS-drawn letter disc. onLetter runs if the art falls back later.
+  function pathIcon(p, kind, onLetter) {
+    const letter = () => (p === "U" ? null : el("span", { class: `path-ic path-${p}`, "aria-hidden": "true", text: p }));
+    const ic = kind === "gem" ? gemIcons.get(p) : skillIcons.get(p) || gemIcons.get(p);
+    if (!ic) return letter();
+    const img = el("img", { class: ic.cls, src: ic.url, alt: "", width: ic.width, height: ic.height, decoding: "async", draggable: "false", "aria-hidden": "true" });
+    img.addEventListener("error", () => { const l = letter(); if (l) img.replaceWith(l); else img.remove(); if (onLetter) onLetter(); }, { once: true });
+    return img;
+  }
+  // Path marker and level; the full name is announced and shown in the tooltip. Letters are a missing-art fallback.
+  function pathChip(p, level, mod, title) {
+    return el("span", { class: "mpath" + (mod ? " mod" : ""), title: title || `${PATH_NAMES[p] || p} ${level}` },
+      pathIcon(p, "path"), el("span", { class: "sr-only", text: `${PATH_NAMES[p] || p} ` }), txt(level));
+  }
+  // Path icon beside its full visible name, with an optional suffix such as a level ("Fire 2").
+  const pathNamed = (p, suffix) => el("span", { class: "mpath mpath-named" }, pathIcon(p), el("span", { text: `${PATH_NAMES[p] || p}${suffix ?? ""}` }));
+  // Gem amount: number, native gem icon and visible path name ("3 [gem] Fire"); unit words stay with the caller.
+  const gemChip = (p, amount, suffix) => el("span", { class: "mpath mpath-named gem-amt", title: `${txt(amount)} ${PATH_NAMES[p] || p} gem${Number(amount) === 1 ? "" : "s"}` },
+    el("span", { text: txt(amount) }), pathIcon(p, "gem"), el("span", { text: `${PATH_NAMES[p] || p}${suffix ?? ""}` }));
+  const gemList = (gems, none) => (gems || []).length ? gems.map((g, i) => [i ? ", " : "", gemChip(g.path, g.amount)]) : (none ?? "none");
+  const joinParts = (xs, sep = " · ") => xs.map((x, i) => [i ? sep : "", x]);
+  // Random magic marker: the catalog's random-path icon before the written text, which stays the label.
+  const randomMark = () => pathIcon("U");
   // One "label: value" stat. Values set by this .dm are marked; the line is in the tooltip.
   function sheetStat(label, f, opts = {}) {
     const has = f && f.value !== null && f.value !== undefined;
     const mod = f && f.source === "authored";
     const where = !f ? "not available" : mod ? `set in this .dm${f.line ? ` (line ${f.line})` : ""}` : f.source === "donor" ? `from donor${f.line ? ` (#copystats line ${f.line})` : ""}` : txt(f.source).replace(/_/g, " ");
     const shown = opts.text !== undefined ? opts.text : has ? (Array.isArray(f.value) ? f.value.join(", ") || "none" : txt(f.value)) : "?";
-    return [el("dt", { text: label + (opts.mark || "") }),
+    return [el("dt", null, statIcon(opts.stat || statKeyOf(label)), label + (opts.mark || "")),
       el("dd", { class: [mod ? "mod" : "", has || opts.text !== undefined ? "" : "unknown"].join(" ").trim() || null, title: [where, f && f.note, opts.note].filter(Boolean).join(". ") },
         shown, mod ? el("span", { class: "sr-only", text: " (set in this mod)" }) : null)];
   }
@@ -853,7 +932,7 @@
     return el("p", { class: "sheet-line" }, el("span", { class: "sheet-k", text: "Magic paths:" }), " ",
       keys.map((p) => [pathChip(p, paths[p].value ?? paths[p].level, paths[p].source === "authored"), " "]),
       (random || []).map((x) => el("span", { class: "path-rand" + (x.source === "authored" ? " mod" : ""), title: `Random pick, mask ${x.mask}; probabilities not expanded` },
-        `+${txt(x.levels ?? "?")} random ${x.paths.join("/")}${x.chance !== 100 ? ` (${x.chance}%)` : ""} `)));
+        randomMark(), `+${txt(x.levels ?? "?")} random ${x.paths.join("/")}${x.chance !== 100 ? ` (${x.chance}%)` : ""} `)));
   }
   function costText(f) {
     if (!f || f.authored_value === null || f.authored_value === undefined) return "—";
@@ -1206,10 +1285,10 @@
     const p = eq.protection, atk = eq.attack || [], out = [];
     const flag = (s) => s && s !== "resolved" ? ` (${String(s).replace(/_/g, " ")})` : "";
     if (p && [p.body, p.head, p.average].some((x) => x !== null && x !== undefined))
-      out.push(el("p", { class: "sheet-line", title: txt(p.note) || null }, el("span", { class: "sheet-k", text: "Protection:" }),
+      out.push(el("p", { class: "sheet-line", title: txt(p.note) || null }, el("span", { class: "sheet-k" }, statIcon("prot"), "Protection:"),
         ` body ${v(p.body)} · head ${v(p.head)}${p.average !== null && p.average !== undefined ? ` · average ${p.average}` : ""}${flag(p.status)}`));
     if (atk.length > 1 || (atk.length === 1 && !eqVal(atk[0])))
-      out.push(el("p", { class: "sheet-line" }, el("span", { class: "sheet-k", text: "Attack by weapon:" }), " ",
+      out.push(el("p", { class: "sheet-line" }, el("span", { class: "sheet-k" }, statIcon("att"), "Attack by weapon:"), " ",
         atk.map((a, i) => [i ? " · " : "", el("span", { title: [a.status, a.note].filter(Boolean).join(": ") || null, text: `${txt(a.name || "?")} ${eqShow(a)}` })])));
     if ((eq.mounts || []).length) out.push(el("p", { class: "sheet-line" }, el("span", { class: "sheet-k", text: "Mount:" }), " ",
       eq.mounts.map((x, i) => [i ? ", " : "", el("span", { title: [x.origin, x.note].filter(Boolean).join(". ") || null, text: `${txt(x.name || "?")}${x.id !== null && x.id !== undefined ? ` (#${x.id})` : ""}${flag(x.status)}` })])));
@@ -1219,12 +1298,12 @@
     return out;
   }
   function equippedPanel(eq) {
-    const row = (label, e) => [label, el("strong", { text: eqShow(e) }), e ? badge(txt(e.status || "unresolved").replace(/_/g, " "), e.status === "resolved" ? "ok" : e.status === "estimated" ? "info" : "warn") : badge("not reported", "warn"), txt(e && e.note)];
+    const row = (label, e, key) => [statLabel(key || statKeyOf(label), label), el("strong", { text: eqShow(e) }), e ? badge(txt(e.status || "unresolved").replace(/_/g, " "), e.status === "resolved" ? "ok" : e.status === "estimated" ? "info" : "warn") : badge("not reported", "warn"), txt(e && e.note)];
     const p = eq.protection || {}, c = eq.costs || {};
     const rows = [
-      row("Protection, body", { value: p.body, status: p.status, note: p.note }), row("Protection, head", { value: p.head, status: p.status }),
-      row("Protection, average", { value: p.average, status: p.status }),
-      ...(eq.attack || []).map((a) => row(`Attack with ${txt(a.name || "?")}`, a)),
+      row("Protection, body", { value: p.body, status: p.status, note: p.note }, "prot"), row("Protection, head", { value: p.head, status: p.status }, "prot"),
+      row("Protection, average", { value: p.average, status: p.status }, "prot"),
+      ...(eq.attack || []).map((a) => row(`Attack with ${txt(a.name || "?")}`, a, "att")),
       row("Defence", eq.defence), row("Encumbrance", eq.encumbrance),
       row("Gold", c.gold), row("Resources", c.resources), row("Recruitment points", c.recruitment_points)];
     return panel("With equipment",
@@ -1245,7 +1324,8 @@
     const cols = SHEET_COLS.map((col) => col.map(([k, label]) => eq ? equippedStat(k, label, stat(k), eq) : [label, stat(k)]));
     const costCell = (label, k) => {
       const comp = [label, r.costs[k], { mark: "†", text: costText(r.costs[k]), note: r.costs[k] && r.costs[k].note }];
-      return eq && eqVal(ec[k]) ? eqCell(label, ec[k], null) : comp;
+      const out = eq && eqVal(ec[k]) ? eqCell(label, ec[k], null) : comp;
+      return k === "recruitment_points" && u.role === "commander" ? [out[0], out[1], { ...(out[2] || {}), stat: "commander_points" }] : out;
     };
     cols.push([["Map move", r.stats.mapmove], costCell("Gold", "gold"), costCell("Resources", "resources"), costCell("Rec points", "recruitment_points")]);
     const roleType = { troop: "Troop", commander: "Commander", pretender: "Pretender form", unassigned: "Not recruited" }[u.role] || txt(u.role);
@@ -1295,20 +1375,20 @@
 
     // Stats
     const statRows = Object.entries(r.stats).map(([k, f]) => ({ class: f.source === "authored" ? "override" : null,
-      cells: [STAT_LABELS[k] || k, el("code", { text: `#${k}` }), ...fieldCell(slug, file, f, row[k])] }));
+      cells: [statLabel(k, STAT_LABELS[k] || k), el("code", { text: `#${k}` }), ...fieldCell(slug, file, f, row[k])] }));
     const ld = r.leadership;
-    statRows.push({ class: ld.source === "authored" ? "override" : null, cells: ["Leadership", el("code", { text: "leader" }), ...fieldCell(slug, file, ld, row.leader)] });
+    statRows.push({ class: ld.source === "authored" ? "override" : null, cells: [statLabel("leader", "Leadership"), el("code", { text: "leader" }), ...fieldCell(slug, file, ld, row.leader)] });
     tech.push(el("div", { class: "grid-2" },
       panel("Base stats (unequipped)", table(["Field", "Key", "Value", "Source"], statRows),
         el("p", { class: "panel-note", text: "Base values before equipment. Natural protection excludes armour; attack, defence, precision and encumbrance exclude weapon and armour modifiers. Equipment-derived combat totals are not calculated." })),
       el("div", { class: "stack" },
         panel("Magic",
-          Object.keys(r.magic.paths).length ? table(["Path", "Level", "Source"], Object.entries(r.magic.paths).map(([p, f]) => ({ class: f.source === "authored" ? "override" : null, cells: [`${f.path_name} (${p})`, ...fieldCell(slug, file, f, row[p])] })))
+          Object.keys(r.magic.paths).length ? table(["Path", "Level", "Source"], Object.entries(r.magic.paths).map(([p, f]) => ({ class: f.source === "authored" ? "override" : null, cells: [pathNamed(p, ` (${p})`), ...fieldCell(slug, file, f, row[p])] })))
             : el("p", { class: "muted", text: "No fixed magic paths." }),
-          r.magic.random.length ? table(["Random pick", "Chance", "Levels", "Source"], r.magic.random.map((x) => [x.paths.join("/") + ` (mask ${x.mask})`, `${x.chance}%`, txt(x.levels ?? "?"),
+          r.magic.random.length ? table(["Random pick", "Chance", "Levels", "Source"], r.magic.random.map((x) => [el("span", { class: "path-rand" }, randomMark(), x.paths.join("/") + ` (mask ${x.mask})`), `${x.chance}%`, txt(x.levels ?? "?"),
             el("span", null, badge(x.source, x.source === "authored" ? "authored" : "copper"), " ", srcRef(slug, file, x.line))]), { caption: "Random magic (listed as written; probabilities not expanded)" }) : null),
         panel("Costs",
-          table(["Cost", "Component", "Final cost", "Source"], Object.entries(r.costs).map(([k, f]) => [k.replace(/_/g, " "),
+          table(["Cost", "Component", "Final cost", "Source"], Object.entries(r.costs).map(([k, f]) => [statLabel(k, k.replace(/_/g, " ")),
             f.authored_value === null ? el("span", { class: "muted", text: "none" })
               : el("span", null, el("code", { text: `${f.source === "donor" ? f.column : f.command} ${f.authored_value}` }), " ", badge(f.interpretation.replace(/_/g, " "), "info")),
             unresolved("not computed"),
@@ -1579,7 +1659,7 @@
       });
       const range = `${s.min}–${s.max}${s.zero ? "" : ", not 0"}${s.range_source && s.range_source !== "manual" ? " (sanity bound)" : ""}`;
       return el("div", { class: "edit-field" + (opts.wide ? " wide" : "") },
-        el("label", { for: input.id, text: opts.label || s.label }),
+        el("label", { for: input.id }, s.group === "stats" ? statIcon(key) : null, opts.label || s.label),
         el("div", { class: "edit-control" }, input,
           f.authored && !opts.noRevert ? el("button", { type: "button", class: "btn btn-small btn-ghost", title: `Delete the authored line ${f.authored.line}; the review shows what the value falls back to`,
             onclick: () => { ed.raw[key] = ""; draw(`[data-key="${key}"]`); } }, "Remove override") : null),
@@ -1599,7 +1679,7 @@
         sel.classList.toggle("changed", !!sel.value); ed.msg = null; updateCount();
       });
       if (op) sel.classList.add("changed");
-      return el("div", { class: "edit-field wide" }, el("label", { for: sel.id, text: "Leadership" }), el("div", { class: "edit-control" }, sel),
+      return el("div", { class: "edit-field wide" }, el("label", { for: sel.id }, statIcon("leader"), "Leadership"), el("div", { class: "edit-control" }, sel),
         el("div", { class: "field-meta" }, sourceTag(f), el("span", { class: "faint", text: " · #poorleader … #superiorleader" })));
     }
     // Full trait catalogue (traits.py, Modding Manual 6.36). Only traits present on this monster are listed; the
@@ -2470,6 +2550,7 @@
         m.latest_export = { available: true, export: { export_id: r.export_id, format: r.format, sha256: r.sha256,
           created_utc: man.created_utc, files: (man.files || []).length } };
         if (ui.redrawReadiness) ui.redrawReadiness();
+        if (ui.redrawWorkshop) ui.redrawWorkshop();
       }
       const h = holder.querySelector("#export-outcome"); if (h) h.focus();
     }
@@ -2573,6 +2654,211 @@
         list].filter(Boolean));
     }
     draw();
+    ui.redrawPanel = draw;
+    return holder;
+  }
+
+  // ---------- export entry point (project header, every section) ----------
+  function exportHeadButton(m, active) {
+    const v = m.validation, fresh = !!v && v.sha256 === m.provenance.sha256;
+    const status = !v ? ["validation unavailable", "err"] : !fresh ? ["re-validate", "warn"]
+      : !v.ok ? [`${v.counts.errors} error${v.counts.errors === 1 ? "" : "s"}`, "err"] : ["ready", "ok"];
+    return el("div", { class: "proj-actions" },
+      el("a", { class: "btn btn-export", href: route("p", m.project.slug, "export"), "aria-current": active === "export" ? "page" : null,
+        "aria-describedby": "export-head-status" }, "Export mod"),
+      el("span", { class: `badge ${status[1]}`, id: "export-head-status", text: status[0] }));
+  }
+  function viewExport(m) {
+    return el("div", { class: "stack" },
+      el("p", { class: "panel-note", text: "Package the saved revision first. Then optionally turn that export into a folder the Dominions 6 Workshop uploader accepts. Kosmokrator never uploads or publishes anything." }),
+      exportPanel(m), workshopPanel(m));
+  }
+
+  // ---------- Steam Workshop preparation ----------
+  // Builds <project>/exports/workshop/<id>/<slug>/ from an export of the revision this page shows (the server re-hashes
+  // it under the project lock), adds dom6ws.txt and a 256x256 banner.png, and can copy it into the mods folder the
+  // server was started with. The game's own Mods menu does the upload; this page only links to Steam.
+  function workshopUi(slug) {
+    if (!state.workshop) state.workshop = new Map();
+    if (!state.workshop.has(slug)) state.workshop.set(slug, { data: null, loadError: null, visibility: "", busy: null,
+      result: null, error: null, install: null, installError: null, focus: null });
+    return state.workshop.get(slug);
+  }
+  function workshopPanel(m) {
+    const slug = m.project.slug, p = m.provenance, v = m.validation, ui = workshopUi(slug), xui = exportUi(slug);
+    const base = `/api/projects/${encodeURIComponent(slug)}`;
+    const holder = el("section", { class: "panel workshop-panel", "aria-labelledby": "ws-h" });
+    const fresh = !!v && v.sha256 === p.sha256;
+    // An export of exactly this revision, if the page knows one (the last export here, or the newest on disk).
+    const currentExport = () => {
+      const r = xui.result, L = m.latest_export && m.latest_export.export;
+      if (r && r.sha256 === p.sha256) return { export_id: r.export_id, format: r.format };
+      if (L && L.sha256 === p.sha256 && !L.error) return { export_id: L.export_id, format: L.format };
+      return null;
+    };
+    async function load() {
+      try { ui.data = (await getJSON(`${base}/workshop`)).result; ui.loadError = null; } catch (e) { ui.loadError = e; }
+      draw();
+    }
+    async function prepare() {
+      ui.busy = "prepare"; ui.error = null; ui.result = null; ui.install = null; ui.installError = null; draw();
+      try {
+        let src = currentExport();
+        if (!src) {
+          // No export of this revision yet: make the regular one first (same route, same checks as the panel above).
+          const r = await postJSON(`${base}/export`, { expected_sha256: p.sha256, format: "zip" });
+          xui.result = r; xui.list = null;
+          const man = r.manifest || {};
+          m.latest_export = { available: true, export: { export_id: r.export_id, format: r.format, sha256: r.sha256,
+            created_utc: man.created_utc, files: (man.files || []).length } };
+          src = { export_id: r.export_id, format: r.format };
+          if (xui.redrawPanel) xui.redrawPanel();
+        }
+        ui.result = await postJSON(`${base}/workshop/prepare`, { expected_sha256: p.sha256, export_id: src.export_id, visibility: ui.visibility });
+        ui.data = null;
+      } catch (e) { ui.error = e; }
+      ui.busy = null; ui.focus = "#ws-outcome";
+      if (!ui.data) await load(); else draw();
+    }
+    async function install(wid) {
+      ui.busy = "install"; ui.install = null; ui.installError = null; draw();
+      try { ui.install = await postJSON(`${base}/workshop/${encodeURIComponent(wid)}/install`, { expected_sha256: p.sha256 }); }
+      catch (e) { ui.installError = e; }
+      ui.busy = null; ui.focus = "#ws-install-outcome";
+      await load();
+    }
+    const errTitle = (code, fallback) => ({
+      sha_mismatch: "The saved .dm changed since this page loaded.", stale_export: "That export is from an older .dm revision.",
+      validation_failed: "Validation reported errors.", project_locked: "Another save or export holds the project lock.",
+      export_changed: "The export no longer matches its manifest.", workshop_changed: "The prepared folder was changed after it was made.",
+      banner_missing: "No banner image to reuse.", banner_unsupported: "The banner image cannot be read.", banner_conflict: "The mod's own banner.png cannot be used.",
+      export_conflict: "The export already holds Workshop control files.", bad_visibility: "Choose a visibility first.",
+      install_conflict: "a different mod folder is already there.", install_unavailable: "local install is not available.",
+      symlink_rejected: "Refused: a link or junction is in the way.", bad_csrf: "The page token is out of date.", bad_origin: "Request was not from this page.",
+    }[code] || fallback);
+    function failure(e, id, what) {
+      const err = e.error || {}, d = err.details || {};
+      const reload = ["sha_mismatch", "stale_export", "changed_during_export", "bad_csrf"].includes(err.code);
+      return el("div", { class: "state state-error", role: "alert" },
+        el("strong", { id, tabindex: "-1", text: `${what}: ${errTitle(err.code, "the request failed.").replace(/^[A-Z](?=[a-z ])/, (c) => c.toLowerCase())}` }),
+        el("div", null, el("span", { class: "code", text: `[${txt(err.code)}] ` }), txt(err.message)),
+        Array.isArray(d.problems) && d.problems.filter(Boolean).length ? el("ul", { class: "plain-list ws-problems" },
+          d.problems.filter(Boolean).map((x) => el("li", null, el("code", { text: x })))) : null,
+        err.code === "validation_failed" && Array.isArray(d.errors) ? diagnosticsList(slug, d.errors.slice(0, 20), p.file) : null,
+        el("div", { class: "btn-row" },
+          reload ? el("button", { type: "button", class: "btn btn-small", onclick: async () => { state.models.delete(slug); await loadProjects(true); await render(); } }, "Reload saved revision") : null,
+          err.code === "validation_failed" ? el("a", { class: "btn btn-small", href: route("p", slug, "validation") }, "Open validation report") : null),
+        el("p", { class: "panel-note", text: err.code === "install_conflict" ? "Nothing in the mods folder was changed. Kosmokrator only replaces a folder it installed itself and never renames one, because a renamed copy would upload as a second Workshop item."
+          : "Nothing was changed by this request." }));
+    }
+    const folderText = (r) => r.folder_abs || `${slug}/${r.path}`;
+    function preparedView(r, open) {
+      const wbase = `${base}/workshop/${encodeURIComponent(r.workshop_id)}`;
+      const cur = r.sha256 === p.sha256, b = r.banner || {};
+      return el("div", { class: "ws-result stack" },
+        el("div", { class: "ws-result-head" },
+          el("img", { class: "ws-banner", src: `${wbase}/banner.png`, width: 96, height: 96, alt: `banner.png for ${slug} (256 by 256)` }),
+          el("div", null,
+            el("p", null, el("strong", { id: open ? "ws-outcome" : null, tabindex: open ? "-1" : null, text: open ? "Workshop folder ready." : r.workshop_id }), " ",
+              cur ? badge("revision shown on this page", "ok") : badge("older revision", "warn"), " ", badge(`Visibility = "${txt(r.visibility)}"`, "info")),
+            el("p", { class: "panel-note", text: `banner.png from ${txt(b.source)}: ${txt(b.method)}.` }))),
+        el("dl", { class: "kv" },
+          el("dt", { text: "Content folder" }), el("dd", null, el("span", { class: "mono", text: folderText(r) }), " ",
+            el("button", { type: "button", class: "btn btn-small btn-ghost", onclick: () => copy(folderText(r), "Folder path") }, "Copy path")),
+          el("dt", { text: "From export" }), el("dd", { class: "mono", text: `${txt((r.source_export || {}).export_id)}` }),
+          el("dt", { text: ".dm SHA-256" }), el("dd", { class: "hash", text: txt(r.sha256) }),
+          el("dt", { text: "ZIP SHA-256" }), el("dd", { class: "hash", text: txt(r.archive_sha256) })),
+        open ? el("details", { class: "raw" }, el("summary", null, `Files in the Workshop folder (${(r.files || []).length}): all of them are uploaded`),
+          el("div", { class: "inner" }, table(["File", "Bytes", "SHA-256"], (r.files || []).map((f) => [el("code", { text: f.path }), txt(f.bytes), el("span", { class: "hash", text: f.sha256 })]),
+            { caption: "The manifest and ZIP sit beside this folder, not inside it." }))) : null,
+        el("div", { class: "btn-row" },
+          el("a", { class: open ? "btn" : "btn btn-small", href: `${wbase}/archive`, download: "" }, "Download Workshop ZIP"),
+          el("a", { class: "btn btn-small btn-ghost", href: `${wbase}/manifest`, target: "_blank", rel: "noopener" }, "Manifest JSON")));
+    }
+    function installView(latest) {
+      const I = ui.data && ui.data.install;
+      if (!I) return null;
+      const words = { absent: ["not installed yet", "info"], managed: ["installed by Kosmokrator", "ok"], identical: ["identical", "ok"],
+        conflict: ["another folder is there", "err"], unavailable: ["unavailable", "warn"] }[I.state] || [I.state, "info"];
+      const can = I.available && latest && latest.sha256 === p.sha256 && I.state !== "conflict" && CSRF;
+      const why = !I.available ? I.reason : !latest ? "Prepare a Workshop folder first." : latest.sha256 !== p.sha256 ? "Prepare the current revision first."
+        : I.state === "conflict" ? "A mod folder with this name already exists and was not installed from this project. It is left untouched." : null;
+      const R = ui.install;
+      return el("div", { class: "ws-step stack" },
+        el("h4", { id: "ws-install-h", text: "3. Install locally (optional)" }),
+        el("dl", { class: "kv" },
+          el("dt", { text: "Mods folder" }), el("dd", null, I.mods_dir ? el("span", { class: "mono", text: I.mods_dir }) : el("span", { class: "muted", text: "none" }),
+            " ", el("span", { class: "faint", text: I.source === "environment" ? `(server setting ${I.env})` : I.source === "appdata" ? "(%APPDATA%\\Dominions6\\mods)" : "" })),
+          el("dt", { text: "Destination" }), el("dd", null, I.destination ? el("span", { class: "mono", text: I.destination }) : "—", " ", badge(words[0], words[1]),
+            I.pfid_present ? [" ", badge("dom6ws_pfid kept", "info")] : null)),
+        I.state === "conflict" && (I.unmanaged || []).length ? el("details", { class: "raw" }, el("summary", null, `Files not from this project (${I.unmanaged_count})`),
+          el("div", { class: "inner" }, el("ul", { class: "plain-list ws-problems" }, I.unmanaged.map((f) => el("li", null, el("code", { text: f })))))) : null,
+        el("div", { class: "btn-row" },
+          el("button", { type: "button", class: "btn", disabled: !can || ui.busy ? true : null, "aria-describedby": why ? "ws-install-why" : null,
+            onclick: () => install(latest.workshop_id) }, ui.busy === "install" ? "Installing…" : I.state === "managed" ? "Update installed copy" : "Install into mods folder")),
+        why ? el("p", { class: "panel-note", id: "ws-install-why", text: why }) : null,
+        el("div", { role: "status", "aria-live": "polite" }, ui.busy === "install" ? stateBox("loading", "Checking hashes and copying...") : null),
+        ui.installError ? failure(ui.installError, "ws-install-outcome", "Not installed") : R ? el("div", { class: "state state-ok" },
+          el("strong", { id: "ws-install-outcome", tabindex: "-1", text: { installed: "Installed.", unchanged: "Already installed; nothing to copy.", updated: "Installed copy updated." }[R.result] || "Done." }),
+          el("div", { class: "mono", text: R.destination }),
+          el("div", { class: "faint", text: [R.written.length ? `${R.written.length} file(s) written` : "no files written", R.removed.length ? `${R.removed.length} old file(s) removed` : null,
+            R.pfid_preserved ? "dom6ws_pfid kept unchanged" : null].filter(Boolean).join(" · ") })) : null,
+        el("p", { class: "panel-note", text: `Copies only the prepared files into <mods>/${slug}. The folder is fixed by the server, not this page. An existing folder is replaced only if this project installed it and nobody changed it; dom6ws_pfid is never touched.` }));
+    }
+    function draw() {
+      const D = ui.data, latest = ui.result || (D && D.prepared.find((x) => !x.error)) || null;
+      const src = currentExport();
+      const blocked = !CSRF ? "No editor token from this server; restart `kosmokrator serve` and reload."
+        : !v ? "Validation could not run for this revision."
+        : !fresh ? "Validation describes a different revision; re-validate first."
+        : !v.ok ? `${v.counts.errors} validation error(s) must be fixed first.`
+        : !ui.visibility ? "Choose the dom6ws.txt visibility first." : null;
+      const banner = m.project.banner;
+      const vis = el("select", { class: "input", id: "ws-visibility", disabled: ui.busy ? true : null, "aria-describedby": "ws-vis-note" },
+        el("option", { value: "", text: "Choose…" }),
+        ((D && D.visibility_values) || ["Public"]).map((x) => el("option", { value: x, text: `${x} (documented)` })));
+      vis.value = ui.visibility;
+      vis.addEventListener("change", () => { ui.visibility = vis.value; draw(); const s = holder.querySelector("#ws-visibility"); if (s) s.focus(); });
+      const earlier = D ? D.prepared.filter((x) => !latest || x.workshop_id !== latest.workshop_id) : [];
+      const steps = (D && D.upload_steps) || [];
+      holder.replaceChildren(...[
+        el("div", { class: "ws-head" },
+          el("h3", { id: "ws-h" }, "Steam Workshop folder ", badge("prepare only", "info")),
+          el("span", { class: "faint", text: "Upload happens inside Dominions 6." })),
+        ui.loadError ? errorBox(ui.loadError, "Workshop status") : !D ? stateBox("loading", "Reading Workshop status...") : null,
+        el("div", { class: "ws-step stack" },
+          el("h4", { text: "1. Choose what goes in" }),
+          el("dl", { class: "kv" },
+            el("dt", { text: "Source" }), el("dd", null, src ? [el("span", { class: "mono", text: src.export_id }), " ", badge("current revision", "ok")]
+              : el("span", { class: "muted", text: `No export of revision ${p.sha256.slice(0, 8)} yet; a ZIP export is made first.` })),
+            el("dt", { text: "Banner" }), el("dd", null, banner && banner.status === "ok"
+              ? [el("code", { text: banner.path }), el("span", { class: "faint", text: " → banner.png 256×256, centred on transparency, pixels unchanged" })]
+              : el("span", { class: "muted", text: "No #icon image found; add one (or a 256×256 banner.png) before preparing." })),
+            el("dt", null, el("label", { for: "ws-visibility", text: "dom6ws.txt" })), el("dd", null, vis,
+              el("p", { class: "panel-note", id: "ws-vis-note", text: "The creator guide documents only Visibility = \"Public\" for this file. To keep the item private, friends-only or unlisted, change it on its Workshop page after the upload." }))),
+          el("div", { class: "btn-row" },
+            el("button", { type: "button", class: "btn btn-export", disabled: blocked || ui.busy ? true : null, "aria-describedby": blocked ? "ws-blocked" : null, onclick: prepare },
+              ui.busy === "prepare" ? "Preparing…" : "Prepare Workshop folder")),
+          blocked ? el("p", { class: "panel-note", id: "ws-blocked", text: blocked }) : null,
+          el("div", { role: "status", "aria-live": "polite" }, ui.busy === "prepare" ? stateBox("loading", "Checking the export and writing the Workshop folder...") : null)),
+        ui.error ? failure(ui.error, "ws-outcome", "Not prepared") : null,
+        latest ? el("div", { class: "ws-step stack" }, el("h4", { text: "2. Prepared folder" }), preparedView(latest, !!ui.result)) : null,
+        D ? installView(latest) : null,
+        el("div", { class: "ws-step stack" },
+          el("h4", { text: `${D ? 4 : 3}. Upload from the game` }),
+          el("ol", { class: "ws-steps" }, (steps.length ? steps : ["Start Dominions 6, open Mods, right-click the local entry and choose \"Upload to Steam Workshop\"."]).map((t) => el("li", { text: t }))),
+          el("div", { class: "btn-row" },
+            el("a", { class: "btn", href: (D && D.steam_run_url) || "steam://run/2511500" }, "Launch Dominions 6 in Steam"),
+            D ? el("a", { class: "btn btn-small btn-ghost", href: D.guide, target: "_blank", rel: "noopener noreferrer" }, "Creator guide (Steam)") : null),
+          el("p", { class: "panel-note", text: "The game uploads the mod folder in its mods directory. Without a local install, copy the content folder there yourself (or unzip the Workshop ZIP into it) first. Kosmokrator holds no Steam login and sends nothing to Steam." })),
+        earlier.length ? el("details", { class: "raw" }, el("summary", null, `Earlier Workshop folders (${earlier.length})`),
+          el("div", { class: "inner stack" }, earlier.map((x) => x.error ? el("p", null, el("code", { text: x.workshop_id }), " ", badge(x.error, "warn")) : preparedView(x, false)))) : null,
+      ].filter(Boolean));
+      if (ui.focus) { const t = holder.querySelector(ui.focus); ui.focus = null; if (t) t.focus(); }
+    }
+    draw();
+    xui.redrawWorkshop = draw;
+    if (!ui.data) load();
     return holder;
   }
 
@@ -2673,11 +2959,27 @@
     const row = (label, cell, note) => rows.push(el("tr", null, el("th", { scope: "row" }, label, note ? el("div", { class: "faint", text: note }) : null),
       cols.map((c, i) => el("td", null, c.kind === "error" ? (rows.length <= 1 ? errorBox(c.e, `unit #${c.id}`) : "—") : cell(c, i)))));
     group("Sprites (native size)");
-    row("Idle / attack", (c) => el("div", { class: "cmp-sprites" }, ["idle", "attack"].map((k) => c.sprites && c.sprites[k]
-      ? el("div", { class: "sprite-box" }, spriteImg(c.sprites[k].url, `${txt(c.name)} ${k} sprite`, 1)) : el("div", { class: "preview-missing", text: `no ${k}` }))));
+    // The APIs give no image dimensions, so every stage in this row grows to the largest loaded canvas (at least
+    // 64x64). Images stay 1x, bottom-centred, never scaled or cropped; only this row's stages are touched.
+    const stages = [], sprImgs = [];
+    const fitStages = () => {
+      let w = 64, h = 64;
+      for (const im of sprImgs) if (im.isConnected && im.naturalWidth) { w = Math.max(w, im.naturalWidth); h = Math.max(h, im.naturalHeight); }
+      for (const s of stages) { s.style.minWidth = `${w}px`; s.style.minHeight = `${h}px`; }
+    };
+    row("Idle / attack", (c) => el("div", { class: "cmp-sprites" }, ["idle", "attack"].map((k) => {
+      if (!(c.sprites && c.sprites[k])) return el("div", { class: "preview-missing", text: `no ${k}` });
+      const lbl = k === "idle" ? "Idle" : "Attack", cap = el("figcaption", { class: "cap", text: lbl });
+      const img = spriteImg(c.sprites[k].url, `${txt(c.name)} ${k} sprite`, 1);
+      img.addEventListener("load", () => { cap.textContent = `${lbl} ${img.naturalWidth}×${img.naturalHeight} px, 1x`; fitStages(); });
+      img.addEventListener("error", () => { cap.textContent = `${lbl}: not loaded`; fitStages(); });
+      const stage = el("div", { class: "cmp-stage" }, img);
+      stages.push(stage); sprImgs.push(img);
+      return el("figure", { class: "cmp-sprite" }, el("div", { class: "sprite-box" }, stage), cap);
+    })), "Equal stages include transparent padding; figures stay at native 1x.");
     group("Base values (unequipped)");
     for (const [k, label] of CMP_STATS) {
-      row(label, (c, i) => {
+      row(statLabel(k, label), (c, i) => {
         const f = statOf(c, k), v = val(f);
         if (v === null) return unknown(f && f.note);
         const base = val(statOf(cols[0], k));
@@ -2717,7 +3019,7 @@
     }, "Vanilla: raw inspector nation tables; capital-only vanilla recruitment is not shown.");
     group("Cost components (not final costs)");
     for (const [k, label] of [["gold", "Gold component (#gcost / basecost)"], ["resources", "Resource component (#rcost)"], ["recruitment_points", "Recruitment points (#rpcost)"]]) {
-      row(label, (c) => { const f = c.r.costs[k];
+      row(statLabel(k, label), (c) => { const f = c.r.costs[k];
         if (!f || f.authored_value === null || f.authored_value === undefined) return unknown(f && f.interpretation === "unknown" ? "unknown (donor unresolved)" : "unset");
         return el("span", { title: f.note || "" }, el("code", { text: String(f.authored_value) }), " ", badge(txt(f.interpretation).replace(/_/g, " "), "info"),
           f.interpretation === "autocalc_encoded" ? el("span", { class: "faint", text: ` base ${f.base}` }) : null); });
@@ -2874,7 +3176,7 @@
         missing: a && a.status === "missing" ? "sprite file missing" : "no thumbnail",
         origin: a ? (a.origin === "catalog" ? "catalog sprite (read-only)" : a.status === "available" ? "project asset" : (a.note || a.status)) : null };
     };
-    const statRows = Object.entries(g.physical).map(([k, f]) => [STAT_LABELS[k] || (k === "leader" ? "Leadership" : k), el("code", { text: k }),
+    const statRows = Object.entries(g.physical).map(([k, f]) => [statLabel(k, STAT_LABELS[k] || (k === "leader" ? "Leadership" : k)), el("code", { text: k }),
       f.value === null || f.value === undefined ? unresolved(f.note || "unknown") : el("strong", { text: f.value }), godSource(slug, file, f)]);
     const dp = g.design_points;
     const ab = g.abilities;
@@ -2932,7 +3234,7 @@
                 dp.line ? [" ", srcRef(slug, file, dp.line)] : null, el("div", { class: "faint", text: dp.note })),
               el("dt", { text: "Home realm" }), el("dd", null, Array.isArray(g.homerealm.value) ? homerealm : unresolved("unknown"), " ", godSource(slug, file, g.homerealm)))),
           panel("Starting magic",
-            Object.keys(g.starting_magic.paths).length ? table(["Path", "Level", "Source"], Object.entries(g.starting_magic.paths).map(([p, v]) => [`${v.path_name} (${p})`, el("strong", { text: v.level }), godSource(slug, file, v)]))
+            Object.keys(g.starting_magic.paths).length ? table(["Path", "Level", "Source"], Object.entries(g.starting_magic.paths).map(([p, v]) => [pathNamed(p, ` (${p})`), el("strong", { text: v.level }), godSource(slug, file, v)]))
               : el("p", { class: "muted", text: "No fixed starting magic." }),
             el("p", { class: "panel-note", text: "Magic the god starts with before the player buys more paths at the new path cost." }))),
         el("div", { class: "grid-2" },
@@ -2959,15 +3261,15 @@
       inSelectedNation(m, list[0].start_site_of) ? null : [" ", badge("outside filter", "warn"), el("span", { class: "faint", text: ` not a start site of ${nationScopeText(m)}` })])
       : el("p", { class: "faint", text: `${list.length} of ${m.sites.length} site definitions for ${nationScopeText(m)}. A site belongs to a nation through that nation's #startsite.` });
     if (!list.length) return el("div", { class: "stack" }, head, stateBox("empty", `No sites for ${nationScopeText(m)}.`, "Choose another nation, \"Not tied to a nation\" or \"All nations\" above."));
-    return el("div", { class: "stack" }, head, list.map((s) => el("div", { class: "stack", id: `site-${s.id}` },
+    const body = (s) => [
       panel(`${txt(s.name || "(unnamed site)")}`,
         el("div", { class: "btn-row" }, el("code", { text: `${s.new ? "#newsite" : "#selectsite"} ${txt(s.id ?? s.selector)}` }), srcRef(slug, s.source.file, s.source.line),
           s.start_site_of.length ? badge("start site", "copper") : null),
         el("dl", { class: "kv" },
-          el("dt", { text: "Path" }), el("dd", { text: s.path_name ? `${s.path_name} (${s.path})` : "—" }),
+          el("dt", { text: "Path" }), el("dd", null, s.path ? pathNamed(s.path, ` (${s.path})`) : "—"),
           el("dt", { text: "Level" }), el("dd", { text: txt(s.level ?? "—") }),
           el("dt", { text: "Rarity" }), el("dd", { text: txt(s.rarity ?? "—") }),
-          el("dt", { text: "Gems" }), el("dd", { text: s.gems.length ? s.gems.map((g) => `${g.amount} ${g.path_name}`).join(", ") : "none" }),
+          el("dt", { text: "Gems" }), el("dd", null, gemList(s.gems)),
           el("dt", { text: "Start site of" }), el("dd", null, s.start_site_of.length ? s.start_site_of.map((n, i) => [i ? ", " : "", el("a", { href: route("p", slug, "nation", n.split(":")[1]), text: nationNames(m, [n])[0] })]) : "not a start site (tied to no nation)")),
         s.units.length ? table(["Recruits", "Command", "Role", "Line"], s.units.map((x) => [monsterLink(slug, x.monster), el("code", { text: x.command }), x.role, srcRef(slug, s.source.file, x.line)])) : null,
         s.unsupported.length ? el("p", { class: "panel-note" }, `${s.unsupported.length} command(s) not modelled: `, s.unsupported.map((x) => el("code", { text: x.command + " " }))) : null,
@@ -2978,7 +3280,24 @@
       panel("Authored commands", authoredTable(slug, s)),
       sel ? sourcePanel(slug, s, "Site") : null,
       sel ? panel("JSON", jsonActions(`/api/projects/${encodeURIComponent(slug)}/sites/${encodeURIComponent(s.id)}`, () => s, "Site JSON"))
-        : el("p", null, el("a", { href: route("p", slug, "sites", s.id) }, "Open site detail, source and JSON")))));
+        : el("p", null, el("a", { href: route("p", slug, "sites", s.id) }, "Open site detail, source and JSON"))];
+    if (sel) return el("div", { class: "stack" }, head, list.map((s) => el("div", { class: "stack", id: `site-${s.id}` }, body(s))));
+    // The list is a card grid; each card keeps the complete site panels in its disclosure.
+    const card = (s) => {
+      const name = txt(s.name || "(unnamed site)");
+      const facts = [s.path ? pathNamed(s.path, ` ${s.level ?? "?"}`) : (s.level != null ? `Level ${s.level}` : null),
+        s.rarity != null ? `Rarity ${s.rarity}` : null].filter(Boolean);
+      return el("article", { class: "item-card", id: `site-${s.id}` },
+        el("div", { class: "item-card-head" },
+          el("div", null, el("h2", null, el("a", { href: route("p", slug, "sites", s.id) }, name)),
+            el("p", { class: "faint" }, facts.length ? joinParts(facts) : "Path, level and rarity not authored"),
+            el("p", { class: "muted" }, s.gems.length ? ["Income: ", gemList(s.gems)] : "No gem income"),
+            s.start_site_of.length ? el("p", null, badge("start site", "copper")) : null)),
+        el("details", { class: "raw" },
+          el("summary", null, `${s.new ? "#newsite" : "#selectsite"} ${txt(s.id ?? s.selector)} - site panels and authored commands`),
+          el("div", { class: "inner stack" }, body(s))));
+    };
+    return el("div", { class: "stack" }, head, el("div", { class: "item-grid" }, list.map(card)));
   }
 
   // "Edit this site" appears only once the Create & edit site list confirms an editable block with this id.
@@ -2995,16 +3314,130 @@
     return box;
   }
 
-  function viewOther(m) {
+  // One parsed-only block from other_definitions: summary, source line, authored commands, verbatim source and JSON.
+  function otherDefDetails(m, d, extra) {
     const slug = m.project.slug;
+    return el("details", { class: "raw" },
+      el("summary", null, `${d.opener} ${txt(d.id ?? d.selector ?? "")} ${d.name ? "- " + d.name : ""}  `, badge(d.kind, "info"), " ", badge("parsed only", "warn")),
+      el("div", { class: "inner stack" }, el("p", { class: "panel-note" }, d.status, " · ", srcRef(slug, d.source.file, d.source.line)),
+        extra || null, authoredTable(slug, d), codeBlock(d.source.text, d.source.line),
+        jsonActions(`/api/projects/${encodeURIComponent(slug)}/other_definitions/${encodeURIComponent(d.uid.split(":")[1])}`, () => d, "Definition JSON")));
+  }
+  function viewOther(m) {
     if (!m.other_definitions.length) return stateBox("empty", "No other definitions.", "Weapons, armour, spells, items and uncurated blocks would be listed here (parsed only, not interpreted).");
     return el("div", { class: "stack" },
       el("p", { class: "muted", text: "These blocks are parsed and listed verbatim. The browser does not interpret or verify them." }),
-      m.other_definitions.map((d) => el("details", { class: "raw" },
-        el("summary", null, `${d.opener} ${txt(d.id ?? d.selector ?? "")} ${d.name ? "- " + d.name : ""}  `, badge(d.kind, "info"), " ", badge("parsed only", "warn")),
-        el("div", { class: "inner stack" }, el("p", { class: "panel-note" }, d.status, " · ", srcRef(slug, d.source.file, d.source.line)),
-          authoredTable(slug, d), codeBlock(d.source.text, d.source.line),
-          jsonActions(`/api/projects/${encodeURIComponent(slug)}/other_definitions/${encodeURIComponent(d.uid.split(":")[1])}`, () => d, "Definition JSON")))));
+      m.other_definitions.map((d) => otherDefDetails(m, d)));
+  }
+
+  // ---------- spells and items (read-only, parsed only) ----------
+  // A block belongs to a kind by its parsed kind, or by its #new<kind>/#select<kind> opener.
+  const otherOfKind = (m, kind) => (m.other_definitions || []).filter((d) =>
+    String(d.kind).toLowerCase() === kind || new RegExp(`^#(new|select)${kind}$`, "i").test(txt(d.opener)));
+  // Project asset files whose server-reported used_by points at a #spr command inside this item's block.
+  function itemSpriteAssets(m, d) {
+    const first = d.source.line, last = first + d.source.text.split(/\r?\n/).length - 1;
+    return (m.assets || []).filter((a) => (a.used_by || []).some((x) => x.uid === d.uid
+      || (/^#?spr$/i.test(txt(x.command)) && Number(x.line) >= first && Number(x.line) <= last)));
+  }
+  function itemArtwork(m, d) {
+    const assets = itemSpriteAssets(m, d);
+    if (!assets.length) return null;
+    return el("div", { class: "btn-row" }, el("span", { class: "muted", text: "Sprite asset:" }), assets.map((a) => [
+      a.status !== "missing" && a.browser_preview ? spriteImg(a.browser_preview, a.path, 1, el("span", { class: "faint", text: "preview unavailable" })) : null,
+      el("code", { text: a.path }), a.status === "missing" ? badge("referenced but missing", "err") : null]),
+      el("a", { class: "btn btn-small btn-ghost", href: route("p", m.project.slug, "assets") }, "Open Assets"));
+  }
+  // Last authored value of one item command (quotes stripped), or null.
+  const itemArg = (d, cmd) => {
+    const c = (d.authored || []).filter((x) => txt(x.command).toLowerCase() === `#${cmd}`).pop();
+    return c && c.args.length ? String(c.args[0]).replace(/^"|"$/g, "") : null;
+  };
+  const ITEM_TYPES = { 1: "One-handed weapon", 2: "Two-handed weapon", 3: "Missile weapon", 4: "Helmet", 5: "Body armour", 6: "Shield", 7: "Boots", 8: "Miscellaneous" };
+  const itemType = (d) => itemArg(d, "type") === null ? null : ITEM_TYPES[itemArg(d, "type")] || `Slot type #${itemArg(d, "type")}`;
+  // Item cards show authored metadata, leaving full parsed source in the existing disclosure.
+  function itemCard(m, d) {
+    const arg = (cmd) => itemArg(d, cmd);
+    const { assets, a, cat } = itemIcon(m, d);
+    const preview = a ? spriteImg(a.browser_preview, d.name || a.path, 2, el("span", { text: "Preview unavailable" }))
+      : cat ? (() => {
+        const img = spriteImg(cat.url, `${d.name || "item"} catalog icon`, 2, el("span", { class: "muted", text: "No custom icon" }));
+        const cap = el("span", { class: "faint item-icon-src", text: `Catalog icon #${cat.id}` });
+        img.addEventListener("error", () => cap.remove(), { once: true });
+        return [img, cap];
+      })()
+      : el("span", { class: "muted", text: assets.length ? "Missing icon" : "No custom icon" });
+    const facts = [...itemForging(d), itemType(d)].filter(Boolean);
+    return el("article", { class: "item-card" },
+      el("div", { class: "item-card-head" }, el("div", { class: "item-card-icon" }, preview),
+        el("div", null, el("h2", { text: d.name || `${d.opener} ${d.id ?? d.selector ?? ""}` }),
+          el("p", { class: "faint" }, facts.length ? joinParts(facts) : "Authored metadata unavailable"))),
+      arg("descr") ? el("p", { class: "item-card-description", text: arg("descr") }) : null,
+      otherDefDetails(m, d, itemArtwork(m, d)));
+  }
+  // Spell cards share the item-card layout and show only what the block itself authors.
+  const SPELL_SCHOOLS = { "-1": "Unresearchable", 0: "Conjuration", 1: "Alteration", 2: "Evocation", 3: "Construction", 4: "Enchantment", 5: "Thaumaturgy", 6: "Blood", 7: "Divine" };
+  const spellPathName = (p) => Number(p) === 9 ? "Holy" : Number(p) === -1 ? "No path" : gemName([], p);
+  function spellCard(m, d) {
+    const cmds = (cmd) => (d.authored || []).filter((x) => x.command === `#${cmd}`);
+    const arg = (cmd) => {
+      const c = cmds(cmd).pop();
+      return c && c.args.length ? String(c.args[0]).replace(/^"|"$/g, "") : null;
+    };
+    // #path <slot> <path> and #pathlevel <slot> <level>; slot 0 is primary, 1 secondary.
+    const slots = {};
+    cmds("path").forEach((c) => { if (c.args.length >= 2) (slots[c.args[0]] ||= {}).path = c.args[1]; });
+    cmds("pathlevel").forEach((c) => { if (c.args.length >= 2) (slots[c.args[0]] ||= {}).level = c.args[1]; });
+    const paths = Object.keys(slots).sort().map((k) => slots[k])
+      .filter((s) => s.path !== undefined && Number(s.path) !== -1)
+      .map((s) => (PATH_OF_NUMBER(s.path) ? pathNamed(PATH_OF_NUMBER(s.path), ` ${s.level ?? "?"}`) : `${spellPathName(s.path)} ${s.level ?? "?"}`));
+    const school = arg("school"), research = arg("researchlevel"), fatigue = arg("fatiguecost");
+    const fat = fatigue !== null && Number.isFinite(Number(fatigue)) ? Number(fatigue) : null;
+    const gemPath = Object.keys(slots).sort().map((k) => slots[k]).find((s) => s.path !== undefined && Number(s.path) >= 0);
+    const gems = Math.floor(fat / 100), gemWord = `gem${gems === 1 ? "" : "s"}`, gemLetter = gemPath ? PATH_OF_NUMBER(gemPath.path) : null;
+    const cost = fat === null ? (fatigue !== null ? `Fatigue ${fatigue}` : null)
+      : fat >= 100 ? (gemLetter ? gemChip(gemLetter, gems, ` ${gemWord}`) : `${gems} ${gemPath ? spellPathName(gemPath.path) + " " : ""}${gemWord}`)
+      : `${fat} fatigue`;
+    const facts = [school !== null ? (SPELL_SCHOOLS[school] || `School #${school}`) : null,
+      research !== null && school !== "-1" ? `Research ${research}` : null].filter(Boolean);
+    const reqs = [paths.length ? joinParts(paths, " + ") : null, cost].filter(Boolean);
+    return el("article", { class: "item-card" },
+      el("div", { class: "item-card-head" },
+        el("div", null, el("h2", { text: d.name || `${d.opener} ${d.id ?? d.selector ?? ""}` }),
+          el("p", { class: "faint", text: facts.join(" · ") || "School and research not authored" }),
+          reqs.length ? el("p", { class: "muted" }, joinParts(reqs)) : null)),
+      arg("descr") ? el("p", { class: "item-card-description", text: arg("descr") }) : null,
+      otherDefDetails(m, d));
+  }
+  const BROWSE_KINDS = {
+    spell: { label: "Spells", one: "spell", plural: "spells", openers: "#newspell / #selectspell" },
+    item: { label: "Items", one: "item", plural: "items", openers: "#newitem / #selectitem" },
+  };
+  const browseQuery = {};
+  function viewKindBrowse(m, kind) {
+    const K = BROWSE_KINDS[kind], all = otherOfKind(m, kind), slug = m.project.slug;
+    const note = el("p", { class: "muted" }, `${K.label} blocks (${K.openers}) parsed from this project's .dm and listed verbatim. `,
+      "The browser does not interpret their effects or verify them, and they are project-wide: not filtered by nation. To change one, use ",
+      el("a", { href: route("p", slug, "author", K.plural) }, `Create & edit → ${K.label}`), ".");
+    if (!all.length) return el("div", { class: "stack" }, note,
+      stateBox("empty", `No ${K.plural} in this project.`, `No ${K.openers} blocks were parsed from the .dm. Other definitions lists every parsed-only block.`));
+    const key = `${slug}:${kind}`;
+    const search = el("input", { class: "input", type: "search", id: `browse-q-${kind}`, placeholder: "Search name, id, selector or command",
+      "aria-label": `Search ${K.plural}`, value: browseQuery[key] || "", autocomplete: "off" });
+    const status = el("p", { class: "faint", role: "status", "aria-live": "polite" });
+    const listEl = el("div", { class: "item-grid" });
+    const hay = (d) => [d.name, d.id, d.selector, d.opener, ...(d.authored || []).map((c) => c.command)].map((v) => txt(v).toLowerCase()).join(" ");
+    const fill = () => {
+      const q = search.value.trim().toLowerCase();
+      const shown = q ? all.filter((d) => hay(d).includes(q)) : all;
+      status.textContent = q ? `${shown.length} of ${all.length} ${K.plural} match.` : `${all.length} ${all.length === 1 ? K.one : K.plural}.`;
+      fillKids(listEl, shown.length ? shown.map((d) => kind === "item" ? itemCard(m, d) : spellCard(m, d))
+        : stateBox("empty", `No ${K.plural} match "${search.value.trim()}".`, "Clear the search to see them all."));
+    };
+    search.addEventListener("input", () => { browseQuery[key] = search.value; fill(); });
+    search.addEventListener("keydown", (e) => { if (e.key === "Escape" && search.value) { search.value = ""; browseQuery[key] = ""; fill(); } });
+    fill();
+    return el("div", { class: "stack" }, note, el("div", { class: "unit-filter" }, search), status, listEl);
   }
 
   function viewAssets(m) {
@@ -4460,8 +4893,278 @@
     return details;
   }
 
+  // ---------- preview cards (one shared, bounded hover / focus card) ----------
+  // Mouse hover (after a short delay) or keyboard focus on a trigger shows a compact card; the pointer can cross into it.
+  // A Preview button pins the card for touch and keyboard users and moves focus into it. Escape, the close button or a
+  // click elsewhere dismisses it and returns focus. One card element with fixed ids is reused, so previews never add
+  // duplicate ids; every opening takes a new token and builders drop asynchronous results whose token is stale.
+  const PREVIEW_ID = "kosmo-preview";
+  const pv = { card: null, trigger: null, pinned: false, token: 0, showTimer: 0, hideTimer: 0, suppress: null };
+  function previewCard() {
+    if (pv.card) return pv.card;
+    const c = el("div", { class: "preview-pop unit-sheet", id: PREVIEW_ID, role: "dialog", "aria-labelledby": `${PREVIEW_ID}-title`, tabindex: "-1", hidden: true });
+    c.addEventListener("pointerenter", () => clearTimeout(pv.hideTimer));
+    c.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse" && !pv.pinned) schedHidePreview(); });
+    c.addEventListener("load", placePreview, true);
+    c.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); hidePreview(true); return; }
+      if (e.key !== "Tab") return;
+      // Tabbing past either end of the card closes it and returns to the trigger, so focus never strands at the page end.
+      const f = [...c.querySelectorAll("a[href], button:not([disabled])")];
+      const atEnd = !f.length || (e.shiftKey ? document.activeElement === f[0] || document.activeElement === c : document.activeElement === f[f.length - 1]);
+      if (atEnd) { e.preventDefault(); hidePreview(true); }
+    });
+    c.addEventListener("focusout", (e) => { if (!c.hidden && !c.contains(e.relatedTarget) && e.relatedTarget !== pv.trigger) hidePreview(false); });
+    pv.card = c;
+    document.body.append(c);
+    return c;
+  }
+  function placePreview() {
+    const c = pv.card, t = pv.trigger;
+    if (!c || c.hidden || !t) return;
+    if (!t.isConnected) { hidePreview(false); return; }
+    const r = t.getBoundingClientRect(), de = document.documentElement, vw = de.clientWidth, vh = de.clientHeight, gap = 8;
+    // A hover card follows its trigger; once the trigger scrolls out of view it closes (a pinned card stays, clamped).
+    if (!pv.pinned && (r.bottom < 0 || r.top > vh)) { hidePreview(false); return; }
+    c.style.maxWidth = `${Math.max(0, vw - 2 * gap)}px`;
+    c.style.maxHeight = `${Math.max(120, vh - 2 * gap)}px`;
+    const w = c.offsetWidth, h = c.offsetHeight;
+    const left = Math.max(gap, Math.min(r.left, vw - w - gap));
+    let top = r.bottom + 6;
+    if (top + h > vh - gap) top = r.top - h - 6 >= gap ? r.top - h - 6 : Math.max(gap, vh - h - gap);
+    c.style.left = `${Math.round(left)}px`; c.style.top = `${Math.round(top)}px`;
+  }
+  function schedHidePreview() { clearTimeout(pv.hideTimer); pv.hideTimer = setTimeout(() => hidePreview(false), 250); }
+  function hidePreview(returnFocus) {
+    clearTimeout(pv.showTimer); clearTimeout(pv.hideTimer);
+    pv.token++;
+    const c = pv.card, t = pv.trigger;
+    pv.trigger = null; pv.pinned = false;
+    if (t && t.hasAttribute("aria-expanded")) t.setAttribute("aria-expanded", "false");
+    if (!c || c.hidden) return;
+    const hadFocus = c.contains(document.activeElement);
+    c.hidden = true;
+    c.replaceChildren();
+    if ((returnFocus || hadFocus) && t && t.isConnected) { pv.suppress = t; t.focus({ preventScroll: true }); }
+  }
+  // build(isCurrent) returns the card body; asynchronous parts must check isCurrent() before touching the DOM.
+  function showPreview(trigger, name, build, pinned) {
+    clearTimeout(pv.showTimer); clearTimeout(pv.hideTimer);
+    if (pv.trigger && pv.trigger !== trigger && pv.trigger.hasAttribute("aria-expanded")) pv.trigger.setAttribute("aria-expanded", "false");
+    const c = previewCard(), token = ++pv.token;
+    const isCurrent = () => pv.token === token && !c.hidden && pv.trigger === trigger;
+    pv.trigger = trigger; pv.pinned = !!pinned;
+    if (trigger.hasAttribute("aria-expanded")) trigger.setAttribute("aria-expanded", "true");
+    let body;
+    try { body = build(isCurrent); } catch (e) { body = stateBox("error", "Preview unavailable.", String(e && e.message || e)); }
+    c.setAttribute("aria-label", `Preview: ${name}`);
+    fillKids(c, el("button", { type: "button", class: "btn btn-small btn-ghost preview-close", "aria-label": "Close preview", title: "Close (Esc)",
+      onclick: () => hidePreview(true) }, "×"), body);
+    c.removeAttribute("aria-labelledby");
+    if (c.querySelector(`#${PREVIEW_ID}-title`)) { c.removeAttribute("aria-label"); c.setAttribute("aria-labelledby", `${PREVIEW_ID}-title`); }
+    c.hidden = false;
+    c.scrollTop = 0;
+    placePreview();
+    if (pinned) c.focus({ preventScroll: true });
+  }
+  // Hover and focus preview on an existing name element (link or text). A pinned card is not replaced by hovering elsewhere.
+  function attachPreview(trigger, name, build) {
+    previewCard();
+    trigger.classList.add("has-preview");
+    trigger.addEventListener("pointerenter", (e) => {
+      if (e.pointerType !== "mouse" || pv.pinned) return;
+      clearTimeout(pv.hideTimer);
+      if (pv.trigger === trigger) return;
+      clearTimeout(pv.showTimer);
+      pv.showTimer = setTimeout(() => { if (trigger.isConnected && !pv.pinned) showPreview(trigger, name, build, false); }, 350);
+    });
+    trigger.addEventListener("pointerleave", (e) => {
+      if (e.pointerType !== "mouse") return;
+      clearTimeout(pv.showTimer);
+      if (pv.trigger === trigger && !pv.pinned) schedHidePreview();
+    });
+    trigger.addEventListener("focus", () => {
+      if (pv.suppress === trigger) { pv.suppress = null; return; }
+      if (!pv.pinned && trigger.matches(":focus-visible")) showPreview(trigger, name, build, false);
+    });
+    trigger.addEventListener("blur", (e) => {
+      clearTimeout(pv.showTimer);
+      if (pv.trigger === trigger && !pv.pinned && !(pv.card && pv.card.contains(e.relatedTarget))) hidePreview(false);
+    });
+    return trigger;
+  }
+  // Explicit, touch- and keyboard-friendly control: toggles a pinned card and moves focus into it.
+  function previewButton(name, build) {
+    previewCard();
+    const b = el("button", { type: "button", class: "btn btn-small btn-ghost preview-btn", "aria-expanded": "false", "aria-controls": PREVIEW_ID,
+      "aria-label": `Preview ${name}`, text: "Preview" });
+    b.addEventListener("click", () => { if (pv.trigger === b && pv.card && !pv.card.hidden) hidePreview(true); else showPreview(b, name, build, true); });
+    return b;
+  }
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && pv.card && !pv.card.hidden && !pv.card.contains(e.target)) hidePreview(false); });
+  document.addEventListener("pointerdown", (e) => {
+    if (!pv.card || pv.card.hidden || pv.card.contains(e.target) || (pv.trigger && pv.trigger.contains(e.target))) return;
+    hidePreview(false);
+  });
+  window.addEventListener("scroll", placePreview, { capture: true, passive: true });
+  window.addEventListener("resize", placePreview, { passive: true });
+  window.addEventListener("hashchange", () => hidePreview(false));
+
+  // Small sprite thumbnail on the sheet stage colour; a missing or failed sprite shows a labelled placeholder.
+  function previewThumb(src, missing) {
+    const box = el("span", { class: "pv-thumb" });
+    const none = (why) => el("span", { class: "pv-thumb-none", title: why, "aria-hidden": "true", text: "–" });
+    if (!src) { box.append(none(missing)); return box; }
+    const img = el("img", { src, alt: "", loading: "lazy", decoding: "async", draggable: "false" });
+    img.addEventListener("error", () => img.replaceWith(none("Sprite unavailable")), { once: true });
+    box.append(img);
+    return box;
+  }
+  // Sprite shown crisp: pixel art at or under 48 px is doubled, larger art stays native (CSS caps the width).
+  function previewSprite(src, alt, missing) {
+    const stage = el("div", { class: "sheet-stage preview-stage" });
+    if (!src) { stage.append(el("div", { class: "preview-missing", text: missing })); return stage; }
+    const img = spriteImg(src, alt, 0, el("div", { class: "preview-missing", text: "sprite unavailable" }));
+    img.addEventListener("load", () => { const s = img.naturalWidth <= 48 && img.naturalHeight <= 48 ? 2 : 1; img.width = img.naturalWidth * s; img.height = img.naturalHeight * s; });
+    stage.append(img);
+    return stage;
+  }
+  const projectMonster = (m, bu) => m.monsters.find((x) => x.uid === bu.uid) || (Number.isInteger(bu.id) ? m.monsters.find((x) => x.id === bu.id) : null) || null;
+  const catalogSprite = (slug, id, frame) => `${apiBase(slug)}/catalog-units/${id}/sprite/${frame || "idle"}`;
+  // Idle sprite URL for a balance unit: the project's #spr asset or the catalog's sprite; null when there is none to ask for.
+  function unitSpriteSrc(m, bu, project) {
+    if (!project) return Number.isInteger(bu.id) ? catalogSprite(m.project.slug, bu.id) : null;
+    const mo = projectMonster(m, bu);
+    return mo && mo.sprites && mo.sprites.idle ? mo.sprites.idle.url : null;
+  }
+  const unitThumb = (m, bu, project) => previewThumb(unitSpriteSrc(m, bu, project), project ? "No sprite command" : "No catalog id");
+  const clip = (s, n) => { const t = txt(s).trim(); return t.length > n ? `${t.slice(0, n - 1).trimEnd()}…` : t; };
+  // Compact unit card from a balance unit (bu); project units add their full resolved block. Values are the report's own:
+  // "?" marks a value the static model did not resolve, never a guessed one.
+  function unitPreview(m, bu, project, isCurrent) {
+    const slug = m.project.slug, mo = project ? projectMonster(m, bu) : null, r = mo ? mo.resolved : null;
+    const st = bu.stats || {}, name = txt(bu.name) || "(unnamed)";
+    const cols = [[["HP", st.hp], ["Protection", st.prot], ["Magic res", st.mr], ["Morale", st.mor]],
+      [["Strength", st.str], ["Attack", st.att], ["Defence", st.def], ["Precision", st.prec]],
+      [["Size", st.size], ["Comb. speed", st.ap], ["Map move", st.mapmove]]];
+    const lead = project ? sheetStat("Leadership", r ? r.leadership : null) : sheetStat("Leadership", null, { text: "…", note: "Reading catalog data" });
+    if (!project && Number.isInteger(bu.id)) {
+      catalogUnit(slug, bu.id).then((cu) => { if (isCurrent()) lead[1].replaceWith(sheetStat("Leadership", cu.resolved && cu.resolved.leadership)[1]); },
+        () => { if (isCurrent()) lead[1].replaceWith(sheetStat("Leadership", null)[1]); });
+    }
+    const unknown = Object.values(st).filter((f) => !f || f.value === null || f.value === undefined).length;
+    const cost = (k, label) => {
+      const raw = (bu.raw_costs || {})[k], e = estText((bu.cost_estimates || {})[k]);
+      return el("span", { title: [raw && raw.note, (bu.cost_estimates || {})[k] && bu.cost_estimates[k].note].filter(Boolean).join(". ") || null },
+        el("span", { class: "sheet-k" }, statIcon(k === "recruitment_points" && bu.role === "commander" ? "commander_points" : k), `${label} `), `${costText(raw)}†`, e ? el("span", { class: "bal-est", text: ` ${e}` }) : null);
+    };
+    const prot = estText(bu.protection);
+    const abil = [...Object.entries((r ? r.specials : bu.specials) || {}), ...Object.entries((r ? r.creature_traits : bu.creature_traits) || {})];
+    const eq = bu.equipment || {};
+    const gearUnresolved = (eq.weapons_status && eq.weapons_status.status === "unresolved") || (eq.armor_status && eq.armor_status.status === "unresolved");
+    const gaps = [
+      unknown ? `${unknown} base stat${unknown === 1 ? "" : "s"} unresolved` : null,
+      gearUnresolved ? "equipment list unresolved" : null,
+      mo && mo.donor && mo.donor.resolved === false ? "donor unresolved: inherited values incomplete" : null,
+      mo && (mo.unsupported || []).length ? `${mo.unsupported.length} command(s) not modelled` : null].filter(Boolean);
+    const sprite = unitSpriteSrc(m, bu, project);
+    const role = { troop: "Troop", commander: "Commander" }[bu.role] || txt(bu.role);
+    return [
+      el("header", { class: "sheet-head" },
+        el("div", { class: "sheet-title" }, el("h3", { id: `${PREVIEW_ID}-title`, text: name }), el("span", { class: "sheet-type", text: role })),
+        el("div", { class: "sheet-sub" }, `#${txt(bu.id ?? bu.uid)} · `, project ? "this project" : "catalog (read-only)", ` · ${balWhere(bu)}`)),
+      el("div", { class: "sheet-body" },
+        el("div", { class: "sheet-main" },
+          el("div", { class: "sheet-stats preview-stats" }, cols.map((col, i) => el("dl", null, col.map(([l, f]) => sheetStat(l, f)), i === 2 ? lead : null))),
+          el("p", { class: "sheet-line preview-costs" }, cost("gold", "Gold"), " · ", cost("resources", "Res"), " · ", cost("recruitment_points", "RP")),
+          prot ? el("p", { class: "sheet-line", title: txt(bu.protection.note) || null }, el("span", { class: "sheet-k" }, statIcon("prot"), "Protection with gear:"), ` ${prot}`) : null,
+          el("div", { class: "sheet-line" }, el("span", { class: "sheet-k", text: "Equipment: " }), balGear(bu)),
+          r ? sheetMagic(r.magic.paths, r.magic.random) || el("p", { class: "sheet-line" }, el("span", { class: "sheet-k", text: "Magic paths:" }), " none")
+            : el("p", { class: "sheet-line" }, el("span", { class: "sheet-k", text: "Magic paths:" }), " ", balMagic(bu)),
+          abil.length ? [sheetAbilities(abil.slice(0, 10)), abil.length > 10 ? el("p", { class: "sheet-line faint", text: `+${abil.length - 10} more on the full sheet` }) : null] : null),
+        previewSprite(sprite, `${name} idle sprite`, project ? "no sprite command" : "no catalog id")),
+      mo && mo.description ? el("div", { class: "sheet-descr" }, el("p", { text: clip(mo.description, 280) })) : null,
+      gaps.length ? el("p", { class: "sheet-note preview-gaps" }, badge("incomplete", "warn"), ` ${gaps.join("; ")}.`) : null,
+      el("p", { class: "sheet-note", text: `Base values before equipment; "?" is unresolved, not zero. † raw cost component; ≈ estimate.${project ? " Underlined = set in this .dm." : " Catalog data via the browser resolver; it may differ from the installed game."}` }),
+      el("footer", { class: "sheet-foot" },
+        project && mo ? el("a", { class: "btn btn-small", href: route("p", slug, "units", mo.id ?? mo.uid) }, "Open full unit sheet")
+          : Number.isInteger(bu.id) ? [el("a", { class: "btn btn-small btn-ghost", href: `${apiBase(slug)}/catalog-units/${bu.id}`, target: "_blank", rel: "noopener" }, "Catalog unit JSON"),
+            el("span", { class: "faint", text: "Catalog units have no sheet page; compare one from a project unit." })] : null)];
+  }
+
+  // Project magic items: forging requirements and description from authored commands; other commands are listed as written.
+  const ITEM_META_CMDS = new Set(["#newitem", "#selectitem", "#name", "#descr", "#spr", "#constlevel", "#mainpath", "#mainlevel", "#secondarypath", "#secondarylevel", "#type", "#end"]);
+  const itemEffects = (d) => (d.authored || []).filter((c) => !ITEM_META_CMDS.has(txt(c.command).toLowerCase()));
+  function itemForging(d) {
+    const out = [], c = itemArg(d, "constlevel");
+    if (c !== null) out.push(`Construction ${c}`);
+    // Required paths carry the native path icon when the path number is a known 0-9 path; the name stays visible.
+    const req = (path, level) => { const p = PATH_OF_NUMBER(path); return p ? pathNamed(p, ` ${level ?? "?"}`) : `${gemName([], path)} ${level ?? "?"}`; };
+    if (itemArg(d, "mainpath") !== null) out.push(req(itemArg(d, "mainpath"), itemArg(d, "mainlevel")));
+    if (itemArg(d, "secondarypath") !== null && Number(itemArg(d, "secondarypath")) >= 0) out.push(req(itemArg(d, "secondarypath"), itemArg(d, "secondarylevel")));
+    return out;
+  }
+  // Why some values are not shown: #selectitem keeps unchanged vanilla values, #copyitem copies another item's.
+  function itemInherits(d) {
+    const copy = itemArg(d, "copyitem");
+    if (copy !== null) return `Copies item ${copy}: copied effects are not reconstructed here.`;
+    if (/^#selectitem$/i.test(txt(d.opener))) return "Modifies an existing item: unchanged vanilla values are not shown.";
+    return null;
+  }
+  // Vanilla icon from the catalog (images/items/item<id>.png, as the catalog's item view resolves it), used only
+  // when the block sets no #spr: #selectitem keeps its item's icon and #copyspr <id> copies another item's.
+  function catalogItemIcon(d) {
+    if (itemArg(d, "spr") !== null) return null;
+    const c = itemArg(d, "copyspr");
+    const id = c !== null ? (/^\d{1,4}$/.test(c) ? Number(c) : null) : /^#selectitem$/i.test(txt(d.opener)) && Number.isInteger(d.id) ? d.id : null;
+    return id && id > 0 && id < 10000 ? { url: `/api/item-icons/${id}.png`, id } : null;
+  }
+  const itemIcon = (m, d) => { const assets = itemSpriteAssets(m, d); return { assets, a: assets.find((x) => x.status !== "missing" && x.browser_preview) || null, cat: assets.length ? null : catalogItemIcon(d) }; };
+  const itemIconMissing = (assets) => assets.length ? "icon file missing" : "no custom icon (#spr)";
+  function itemPreview(m, d) {
+    const slug = m.project.slug, name = txt(d.name) || `${d.opener} ${txt(d.id ?? d.selector)}`;
+    const { assets, a, cat } = itemIcon(m, d), forge = itemForging(d), fx = itemEffects(d), inh = itemInherits(d), descr = itemArg(d, "descr");
+    return [
+      el("header", { class: "sheet-head" },
+        el("div", { class: "sheet-title" }, el("h3", { id: `${PREVIEW_ID}-title`, text: name }), el("span", { class: "sheet-type", text: itemType(d) || "Slot not authored" })),
+        el("div", { class: "sheet-sub" }, el("code", { text: `${d.opener} ${txt(d.id ?? d.selector ?? "")}` }))),
+      el("div", { class: "sheet-body" },
+        el("div", { class: "sheet-main" },
+          el("p", { class: "sheet-line" }, el("span", { class: "sheet-k", text: "Forging:" }), " ", forge.length ? joinParts(forge) : el("span", { class: "muted", text: "not authored" })),
+          fx.length ? el("div", null, el("p", { class: "sheet-line" }, el("span", { class: "sheet-k", text: "Authored effects " }), badge("as written, not interpreted", "info")),
+            el("ul", { class: "preview-effects" }, fx.slice(0, 12).map((c) => el("li", null, el("code", { text: `${c.command} ${(c.args || []).join(" ")}`.trim() }), " ", statusBadge(c.status)))),
+            fx.length > 12 ? el("p", { class: "sheet-line faint", text: `+${fx.length - 12} more in the source block` }) : null)
+            : el("p", { class: "sheet-line muted", text: "No effect commands authored in this block." })),
+        previewSprite(a ? a.browser_preview : cat ? cat.url : null, `${name} ${a || !cat ? "icon" : `catalog icon #${cat.id}`}`, itemIconMissing(assets))),
+      descr ? el("div", { class: "sheet-descr" }, el("p", { text: clip(descr, 320) })) : null,
+      inh ? el("p", { class: "sheet-note preview-gaps" }, badge("incomplete", "warn"), ` ${inh}`) : null,
+      el("p", { class: "sheet-note", text: "Effects are the block's own commands; the browser does not verify what they do in game." }),
+      el("footer", { class: "sheet-foot" }, srcRef(slug, d.source.file, d.source.line, true),
+        el("a", { class: "btn btn-small btn-ghost", href: route("p", slug, "items") }, "Open Items"))];
+  }
+  function balItems(m) {
+    const items = otherOfKind(m, "item"), slug = m.project.slug;
+    const note = el("p", { class: "panel-note", text: "Project-wide, not filtered by nation. Forging and effects are the authored commands as written; the browser does not interpret them, and values inherited by #selectitem or #copyitem are not reconstructed." });
+    if (!items.length) return panel("Project magic items", stateBox("empty", "No magic items in this project.", "No #newitem / #selectitem blocks were parsed from the .dm."), note);
+    return panel(`Project magic items (${items.length})`,
+      table(["Item", "Slot", "Forging", "Authored effects", "Source"], items.map((d) => {
+        const name = txt(d.name) || `${d.opener} ${txt(d.id ?? d.selector ?? "")}`, { assets, a, cat } = itemIcon(m, d), fx = itemEffects(d), inh = itemInherits(d);
+        const build = () => itemPreview(m, d);
+        return [
+          el("div", { class: "bal-unit" }, attachPreview(previewThumb(a ? a.browser_preview : cat ? cat.url : null, itemIconMissing(assets)), name, build),
+            el("span", { class: "bal-name" }, attachPreview(el("strong", { text: name }), name, build), d.id != null || d.selector != null ? el("span", { class: "faint", text: `#${txt(d.id ?? d.selector)}` }) : null,
+              previewButton(name, build))),
+          itemType(d) || el("span", { class: "muted", text: "—" }),
+          itemForging(d).length ? el("span", { class: "bal-inline" }, joinParts(itemForging(d))) : el("span", { class: "muted", text: "not authored" }),
+          el("span", null, fx.length ? el("code", { class: "bal-fx", title: fx.map((c) => `${c.command} ${(c.args || []).join(" ")}`).join("\n"),
+            text: fx.slice(0, 3).map((c) => txt(c.command)).join(", ") + (fx.length > 3 ? ` +${fx.length - 3}` : "") }) : el("span", { class: "muted", text: "none" }),
+            inh ? [" ", el("span", { title: inh }, badge("inherits", "warn"))] : null),
+          srcRef(slug, d.source.file, d.source.line)];
+      })), note);
+  }
+
   // ---------- balance comparison (kosmokrator.balance/1, read-only) ----------
-  // Tables only: raw cost components beside labelled estimates, magic access, summons and gem sites. No score is computed.
+  // Charts and tables: resolved report values, labelled estimates, magic access, summons and gem sites. No score is computed.
   // Reference nations live in the address (?r=5,6), so a comparison can be bookmarked; without it the model's default is used.
   const balUrl = (slug, refs) => `${apiBase(slug)}/balance${refs ? `?references=${refs.join(",")}` : ""}`;
   const modelCache = new WeakMap();
@@ -4492,7 +5195,7 @@
     const rnd = u.random_magic || [];
     if (!fixed.length && !rnd.length) return el("span", { class: "muted", text: "—" });
     return el("span", null, fixed.map(([p, v]) => [pathChip(p, v), " "]),
-      rnd.map((x) => el("span", { class: "path-rand", title: txt(x.probability_note) },
+      rnd.map((x) => el("span", { class: "path-rand", title: txt(x.probability_note) }, randomMark(),
         `+${txt(x.levels ?? "?")} ${(x.paths || []).join("/")} ${txt(x.chance)}%${x.per_path_probability ? ` (${Object.entries(x.per_path_probability).map(([p, v]) => `${p} ${Math.round(v * 100)}%`).join(", ")})` : ""} `)));
   }
   function balGear(u) {
@@ -4507,21 +5210,74 @@
   function balWhere(u) {
     return (u.recruitment || []).map((r) => txt(r.where === "fort" || r.where === "nonfort" || r.where === "coast" ? `${r.where}` : r.site || r.site_name ? `${r.where} (${r.site || r.site_name})` : r.where)).filter(Boolean).join("; ") || "—";
   }
+  // Nation identity shared by the summary table and every chart: a fixed colour order (adjacent pairs validated for
+  // colour-vision separation on the panel surface) plus a shape. Project nations are all squares; reference nations
+  // cycle circle, triangle, diamond, ... so several project nations, or more than five references, share a shape and
+  // differ by colour only; every legend, row label and the chart data table name the nation in text.
+  const BAL_COLORS = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"];
+  const BAL_SHAPES = ["circle", "triangle", "diamond", "triangle-down", "plus"];
+  function balSeries(all) {
+    let r = 0;
+    return all.map((x, i) => ({ ...x, color: BAL_COLORS[i % BAL_COLORS.length], shape: x.project ? "square" : BAL_SHAPES[r++ % BAL_SHAPES.length],
+      name: txt(x.n.name), src: `${x.project ? "project" : "catalog"} #${txt(x.n.id)}`, label: `${txt(x.n.name)} (${x.project ? "project" : "catalog"} #${txt(x.n.id)})` }));
+  }
+  // One series mark centred on (cx, cy) with half-size s.
+  function balMark(shape, cx, cy, s, color) {
+    const pts = (xs) => svgEl("path", { d: `M${xs.map(([a, b]) => `${(cx + a * s).toFixed(1)},${(cy + b * s).toFixed(1)}`).join("L")}Z`, fill: color });
+    if (shape === "square") return svgEl("rect", { x: cx - s * .9, y: cy - s * .9, width: s * 1.8, height: s * 1.8, rx: 1, fill: color });
+    if (shape === "circle") return svgEl("circle", { cx, cy, r: s, fill: color });
+    if (shape === "triangle") return pts([[0, -1.2], [1.1, .8], [-1.1, .8]]);
+    if (shape === "triangle-down") return pts([[0, 1.2], [1.1, -.8], [-1.1, -.8]]);
+    if (shape === "diamond") return pts([[0, -1.25], [1.15, 0], [0, 1.25], [-1.15, 0]]);
+    const w = .38;
+    return pts([[-w, -1.1], [w, -1.1], [w, -w], [1.1, -w], [1.1, w], [w, w], [w, 1.1], [-w, 1.1], [-w, w], [-1.1, w], [-1.1, -w], [-w, -w]]);
+  }
+  const balKey = (p) => svgEl("svg", { width: 14, height: 14, viewBox: "0 0 14 14", "aria-hidden": "true", focusable: "false" }, balMark(p.shape, 7, 7, 5, p.color));
+  // Legend / row label: mark, nation name and its source.
+  const balSeriesLabel = (p, strong) => el("span", { class: "bal-series" }, balKey(p),
+    el("span", null, strong ? el("strong", { text: p.name }) : p.name, " ", el("span", { class: "src", text: p.src })));
+  // Round axis steps (1, 2, 2.5, 5 x 10^k) so ticks read as whole values rather than fractions of the maximum.
+  function niceStep(max, n) {
+    const raw = Math.max(max, 1e-9) / n, p = 10 ** Math.floor(Math.log10(raw)), f = raw / p;
+    return p * (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10);
+  }
+  // Right-align the given header columns of a table() so headings sit over their numbers.
+  const numHeads = (wrap, cols) => { const ths = wrap.querySelectorAll("thead th"); cols.forEach((i) => ths[i] && ths[i].classList.add("num")); return wrap; };
+  const numCell = (content, cls) => el("td", { class: `num${cls ? ` ${cls}` : ""}` }, content);
+  const BAL_STATS = [["hp", "HP", "Hit points"], ["prot", "Prt", "Natural protection"], ["mr", "MR", "Magic resistance"], ["mor", "Mor", "Morale"], ["att", "Att", "Attack skill"], ["def", "Def", "Defence skill"]];
   function balUnits(m, units, project) {
     if (!units.length) return el("p", { class: "muted", text: "No recruitable units in this reading." });
     const order = { commander: 0, troop: 1 };
-    const rows = [...units].sort((a, b) => (order[a.role] ?? 2) - (order[b.role] ?? 2)).map((u) => {
-      const st = u.stats || {}, s = (k) => (st[k] && st[k].value !== undefined && st[k].value !== null ? st[k].value : "?");
-      return [
-        el("span", null, project && Number.isInteger(u.id) && m.monsters.some((x) => x.id === u.id) ? el("a", { href: route("p", m.project.slug, "units", u.id) }, txt(u.name)) : el("strong", { text: txt(u.name) }),
-          el("span", { class: "faint", text: ` #${txt(u.id)}` }), el("div", { class: "faint", text: `${txt(u.role)} · ${balWhere(u)}` })),
-        el("span", { class: "bal-stats", title: "HP / protection (natural) / MR / morale / attack / defence, base unequipped" }, `${s("hp")}/${s("prot")}/${s("mr")}/${s("mor")}/${s("att")}/${s("def")}`),
-        balCost((u.raw_costs || {}).gold, (u.cost_estimates || {}).gold),
-        balCost((u.raw_costs || {}).resources, (u.cost_estimates || {}).resources),
-        balCost((u.raw_costs || {}).recruitment_points, (u.cost_estimates || {}).recruitment_points),
-        balGear(u), balMagic(u)];
-    });
-    return table(["Unit", "HP/Prt/MR/Mor/Att/Def", "Gold", "Resources", "Rec. pts", "Equipment (estimate)", "Magic"], rows);
+    const sorted = [...units].sort((a, b) => (order[a.role] ?? 2) - (order[b.role] ?? 2));
+    const row = (u) => {
+      const st = u.stats || {}, has = (k) => st[k] && st[k].value !== undefined && st[k].value !== null;
+      const build = (isCurrent) => unitPreview(m, u, project, isCurrent), name = txt(u.name) || "(unnamed)";
+      return el("tr", null,
+        el("td", null, el("div", { class: "bal-unit" }, attachPreview(unitThumb(m, u, project), name, build),
+          el("span", null,
+            el("span", { class: "bal-name" }, attachPreview(project && Number.isInteger(u.id) && m.monsters.some((x) => x.id === u.id) ? el("a", { href: route("p", m.project.slug, "units", u.id) }, name) : el("strong", { text: name }), name, build),
+              el("span", { class: "faint", text: `#${txt(u.id)}` }), previewButton(name, build)),
+            el("span", { class: "bal-where", text: `${txt(u.role)} · ${balWhere(u)}` })))),
+        BAL_STATS.map(([k, , full], i) => el("td", { class: `num stat${i ? "" : " stat-first"}${has(k) ? "" : " q"}`, title: `${full}, base unequipped${has(k) ? "" : ": unresolved, not zero"}` }, has(k) ? txt(st[k].value) : "?")),
+        numCell(balCost((u.raw_costs || {}).gold, (u.cost_estimates || {}).gold), "cost-first"),
+        numCell(balCost((u.raw_costs || {}).resources, (u.cost_estimates || {}).resources)),
+        numCell(balCost((u.raw_costs || {}).recruitment_points, (u.cost_estimates || {}).recruitment_points)),
+        el("td", null, balGear(u)), el("td", null, el("span", { class: "bal-magic-cell" }, balMagic(u))));
+    };
+    const roleRow = (role, n) => el("tr", { class: "bal-role-row" }, el("th", { scope: "rowgroup", colspan: 12 }, `${{ commander: "Commanders", troop: "Troops" }[role] || txt(role)} (${n})`));
+    const roles = [...new Set(sorted.map((u) => u.role))];
+    const th = (content, attrs) => el("th", { scope: "col", ...(attrs || {}) }, content);
+    return el("div", { class: "table-wrap" }, el("table", { class: "bal-table" },
+      el("caption", { class: "sr-only", text: "Recruitable units: base stats, cost components with estimates, equipment and magic" }),
+      el("thead", null,
+        el("tr", null, th("Unit", { rowspan: 2 }),
+          th(el("span", { text: "Base stats, unequipped" }), { colspan: 6, scope: "colgroup", class: "bal-group stat-first" }),
+          th(el("span", { text: "Cost: raw † · estimate ≈" }), { colspan: 3, scope: "colgroup", class: "bal-group cost-first" }),
+          th("Equipment (estimate)", { rowspan: 2 }), th("Magic", { rowspan: 2 })),
+        el("tr", null, BAL_STATS.map(([, a, full], i) => th(el("abbr", { title: full, text: a }), { class: `num${i ? "" : " stat-first"}` })),
+          th(statLabel("gold", "Gold"), { class: "num cost-first" }), th(statLabel("resources", "Resources"), { class: "num" }),
+          th(statLabel("recruitment_points", "Rec. pts"), { class: "num" }))),
+      roles.map((r) => { const us = sorted.filter((u) => u.role === r); return el("tbody", null, roleRow(r, us.length), us.map(row)); })));
   }
   function balMaxima(ma) {
     const mx = Object.entries((ma && ma.fixed_maxima) || {}).filter(([, v]) => v);
@@ -4529,32 +5285,49 @@
   }
   function balSummons(m, xs) {
     if (!xs.length) return null;
-    return el("div", null, el("h4", { text: `National summons (${xs.length})` }),
-      table(["Ritual", "Requires", "Target", "Count", "Gems", "Gems / unit"], xs.map((x) => [
+    // Summon targets use their resolved project block because they are outside the recruitable balance roster.
+    const targetCard = (t) => {
+      if (!t || t.status !== "known") return unresolved(`target ${txt(t && t.id)}`);
+      const mo = projectMonster(m, t);
+      if (!mo) return el("span", null, unitThumb(m, t, false), ` ${txt(t.name)} (#${txt(t.id)})`);
+      const r = mo.resolved, eq = r.equipped || {};
+      const bu = { ...mo, stats: r.stats, raw_costs: r.costs, cost_estimates: eq.costs,
+        equipment: r.equipment, protection: eq.protection };
+      const build = (isCurrent) => unitPreview(m, bu, true, isCurrent), name = txt(mo.name);
+      return el("div", { class: "bal-unit" }, attachPreview(unitThumb(m, bu, true), name, build),
+        el("span", { class: "bal-name" }, attachPreview(el("a", { href: route("p", m.project.slug, "units", mo.id), text: name }), name, build), previewButton(name, build)));
+    };
+    return el("div", null, el("h4", { class: "bal-sub", text: `National summons (${xs.length})` }),
+      numHeads(table(["Ritual", "Requires", "Target", "Count", "Gems", "Gems / unit"], xs.map((x) => [
         el("span", null, el("strong", { text: txt(x.name) }), " ", x.source && x.source.line ? srcRef(m.project.slug, x.source.file, x.source.line) : null,
           el("div", { class: "faint", text: `${txt(x.effect_label)}${x.researchlevel !== null && x.researchlevel !== undefined ? ` · research ${x.researchlevel}` : ""}` })),
         (x.requirements || []).length ? el("span", null, x.requirements.map((r) => [pathChip(r.path, r.level), " "])) : el("span", { class: "muted", text: "—" }),
-        x.target && x.target.status === "known" ? `${txt(x.target.name)} (#${txt(x.target.id)})` : unresolved(`target ${txt(x.target && x.target.id)}`),
-        x.count !== null && x.count !== undefined ? txt(x.count) : el("span", null, txt(x.raw_count ?? "?"), " ", badge("raw", "warn")),
-        x.gem_cost !== null && x.gem_cost !== undefined ? el("span", null, `${x.gem_cost} `, x.gem_path ? pathChip(x.gem_path, "") : null) : unresolved("not derived"),
-        x.gems_per_unit !== null && x.gems_per_unit !== undefined ? `≈ ${Math.round(x.gems_per_unit * 100) / 100}` : unresolved("no per-unit estimate")])),
+        targetCard(x.target),
+        numCell(x.count !== null && x.count !== undefined ? txt(x.count) : el("span", null, txt(x.raw_count ?? "?"), " ", badge("raw", "warn"))),
+        x.gem_cost !== null && x.gem_cost !== undefined ? (x.gem_path ? gemChip(x.gem_path, x.gem_cost) : txt(x.gem_cost)) : unresolved("not derived"),
+        numCell(x.gems_per_unit !== null && x.gems_per_unit !== undefined ? `≈ ${Math.round(x.gems_per_unit * 100) / 100}` : unresolved("no per-unit estimate"))])), [3, 5]),
       el("p", { class: "panel-note", text: txt(((xs[0] || {}).notes || []).slice(-1)[0]) || "Gems are fatigue / 100 for simple rituals; boosters and discounts are not simulated." }));
   }
   function balGemSites(gs) {
     if (!(gs || []).length) return null;
     return el("p", { class: "sheet-line" }, el("span", { class: "sheet-k", text: "Start-site gems:" }), " ",
-      gs.map((g, i) => [i ? "; " : "", txt(g.name), " ", (g.gems || []).map((x) => `${x.amount} ${x.path_name || x.path}`).join(", ") || "none"]));
+      gs.map((g, i) => [i ? "; " : "", txt(g.name), " ", gemList(g.gems)]));
   }
   function balNationBlock(m, n, project) {
     const units = n.units || [];
+    const count = (v, word) => [el("strong", { text: v }), ` ${word}`];
     return [
-      el("p", { class: "faint", text: `${units.filter((u) => u.role === "troop").length} troop(s) · ${units.filter((u) => u.role === "commander").length} commander(s) · ${((n.magic_access || {}).recruitable_mages || []).length} recruitable mage(s)` }),
+      el("p", { class: "bal-nation-meta" },
+        el("span", null, count(units.filter((u) => u.role === "troop").length, "troop(s)")),
+        el("span", null, count(units.filter((u) => u.role === "commander").length, "commander(s)")),
+        el("span", null, count(((n.magic_access || {}).recruitable_mages || []).length, "recruitable mage(s)"))),
       balUnits(m, units, project),
-      el("p", { class: "sheet-line" }, el("span", { class: "sheet-k", text: "Fixed magic maxima:" }), " ", balMaxima(n.magic_access),
-        el("span", { class: "faint", text: ` ${txt((n.magic_access || {}).note)}` })),
-      project ? balGemSites(n.gem_sites) : null,
+      el("div", { class: "bal-facts" },
+        el("p", { class: "sheet-line" }, el("span", { class: "sheet-k", text: "Fixed magic maxima:" }), " ", balMaxima(n.magic_access),
+          el("span", { class: "faint", text: ` ${txt((n.magic_access || {}).note)}` })),
+        project ? balGemSites(n.gem_sites) : null),
       project ? balSummons(m, n.summons || []) : null,
-      n.note ? el("p", { class: "panel-note", text: txt(n.note) }) : null];
+      n.note ? el("p", { class: "panel-note bal-panel-note", text: txt(n.note) }) : null];
   }
   function balPicker(m, rep, refs) {
     const slug = m.project.slug, sel = rep.selection || {}, avail = sel.available_nations || [];
@@ -4577,32 +5350,224 @@
     }
     sync();
     const go = (ids) => { location.hash = balHref(slug, ids); };
-    return el("details", { class: "raw tech bal-picker", open: refs ? null : true },
-      el("summary", null, `Reference nations: ${(rep.reference_nations || []).map((n) => txt(n.name)).join(", ") || "none"}${sel.mode === "first_three_per_era" ? " (default)" : ""}`),
+    return el("details", { class: "raw tech bal-picker" },
+      el("summary", null, "Reference nations: ", el("span", { class: "bal-refs", text: (rep.reference_nations || []).map((n) => txt(n.name)).join(", ") || "none" }),
+        sel.mode === "first_three_per_era" ? el("span", { class: "faint", text: " (default)" }) : null),
       el("form", { class: "inner stack", onsubmit: (e) => { e.preventDefault(); go([...chosen]); } },
         el("p", { class: "panel-note", text: txt(sel.note) || "Same-era catalog nations. Choose up to 12." }), boxes,
         el("div", { class: "btn-row" }, el("button", { type: "submit", class: "btn", disabled: null }, "Compare selected"),
           el("button", { type: "button", class: "btn btn-ghost", onclick: () => go(null) }, "Default selection"), status)));
+  }
+  const balControl = (id, label, select) => el("div", { class: "bal-control" }, el("label", { for: id, text: label }), select);
+  const balHead = (title, note, ...extra) => el("div", { class: "bal-section-head" }, el("h3", { text: title }), note ? el("p", { text: note }) : null, extra);
+  // Charts use resolved report values only; source tables remain the detailed audit trail.
+  function balanceDashboard(m, nations) {
+    if (!nations.length) return null;
+    const numeric = (x) => x !== null && x !== undefined && Number.isFinite(Number(x));
+    const value = (e) => e && ["resolved", "estimated"].includes(e.status) && numeric(e.value) ? Number(e.value) : null;
+    const metricSelect = el("select", { class: "input", id: "balance-count-metric" },
+      [["troop", "Recruitable troops"], ["commander", "Recruitable commanders"], ["mage", "Recruits with magic / holy paths"]]
+        .map(([v, t]) => el("option", { value: v, text: t })));
+    const bars = el("div", { class: "balance-bars", role: "group", "aria-label": "Roster comparison" });
+    const drawBars = () => {
+      const rows = nations.map((x) => ({ ...x, count: metricSelect.value === "mage" ? ((x.n.magic_access || {}).recruitable_mages || []).length
+        : (x.n.units || []).filter((u) => u.role === metricSelect.value).length }));
+      const max = Math.max(1, ...rows.map((x) => x.count));
+      fillKids(bars, rows.map((x) => {
+        const fill = el("span", { class: "balance-bar-fill" });
+        fill.style.width = `${x.count / max * 100}%`; fill.style.backgroundColor = x.color;
+        return el("div", { class: "balance-bar-row" }, balSeriesLabel(x),
+          el("div", { class: "balance-bar-track", "aria-hidden": "true" }, fill), el("strong", { text: x.count }));
+      }));
+    };
+    metricSelect.addEventListener("change", drawBars); drawBars();
+    const magicTable = table(["Nation", ...PATH_KEYS.map((p) => el("span", { class: "balance-magic-head" }, pathChip(p, "", false, PATH_NAMES[p])))], nations.map((x) => [
+      balSeriesLabel(x), ...PATH_KEYS.map((p) => {
+        const v = (x.n.magic_access || {}).fixed_maxima?.[p];
+        const known = numeric(v), n = known ? Number(v) : null;
+        const cell = el("span", { class: `balance-magic-level${!known ? " unknown" : n === 0 ? " zero" : ""}`, title: `${PATH_NAMES[p]}: ${known ? v : "unknown"}`, text: known ? v : "—" });
+        // Shade steps keep the number at >= 4.5:1: light text on levels 1-2, dark ink on 3 and above.
+        if (known && n > 0) { const lv = Math.min(5, Math.max(1, Math.round(n))); cell.style.setProperty("--shade", [.18, .4, .72, .82, .92][lv - 1]); cell.style.color = lv >= 3 ? "var(--accent-ink)" : "var(--text)"; }
+        return cell;
+      })]));
+    magicTable.classList.add("balance-magic");
+    const role = el("select", { class: "input", id: "balance-chart-role" },
+      el("option", { value: "troop", text: "Troops" }), el("option", { value: "commander", text: "Commanders" }));
+    const stat = el("select", { class: "input", id: "balance-chart-stat" },
+      [["protection", "Estimated protection"], ["hp", "Hit points"], ["mr", "Magic resistance"], ["mapmove", "Map movement"], ["resources", "Estimated resources"]]
+        .map(([v, t]) => el("option", { value: v, text: t })));
+    const costAxis = el("select", { class: "input", id: "balance-chart-cost" },
+      el("option", { value: "gold", text: "Fixed gold component" }), el("option", { value: "resources", text: "Estimated resources" }),
+      el("option", { value: "recruitment_points", text: "Recruitment points" }));
+    costAxis.value = "resources";
+    const plot = el("div", { class: "balance-plot" }), summary = el("p", { class: "panel-note", role: "status", "aria-live": "polite" });
+    const artNote = el("p", { class: "panel-note bal-art-note", hidden: true });
+    const dataTable = el("div");
+    let points = [], drawnWidth = 0;
+    // The plot is drawn at its rendered width so labels stay at a readable pixel size on every screen.
+    const drawSvg = () => {
+      const W = Math.max(300, Math.round(plot.clientWidth || 760)), narrow = W < 520;
+      drawnWidth = W;
+      if (!points.length) return;
+      const H = Math.round(Math.min(400, Math.max(250, W * .42)));
+      const L = narrow ? 40 : 52, R = 14, T = 34, B = 46, pw = W - L - R, ph = H - T - B;
+      const yLabel = stat.options[stat.selectedIndex].text, xLabel = costAxis.options[costAxis.selectedIndex].text;
+      const xs = niceStep(Math.max(...points.map((p) => p.gold)) * 1.04, narrow ? 4 : 6), ys = niceStep(Math.max(...points.map((p) => p.y)) * 1.04, 5);
+      const xMax = Math.max(xs, Math.ceil(Math.max(...points.map((p) => p.gold)) * 1.04 / xs) * xs), yMax = Math.max(ys, Math.ceil(Math.max(...points.map((p) => p.y)) * 1.04 / ys) * ys);
+      const x = (v) => L + v / xMax * pw, y = (v) => T + ph - v / yMax * ph;
+      const fmt = (v) => String(Number(v.toFixed(2)));
+      const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img", "aria-label": `${xLabel} versus ${yLabel}. ${points.length} units plotted. Exact values in the chart data table.` },
+        svgEl("title", { text: `${xLabel} versus ${yLabel}` }));
+      for (let v = 0; v <= yMax + 1e-9; v += ys) {
+        svg.append(svgEl("line", { x1: L, y1: y(v), x2: L + pw, y2: y(v), class: v ? "balance-gridline" : "balance-axis" }),
+          svgEl("text", { x: L - 8, y: y(v) + 4, "text-anchor": "end", text: fmt(v) }));
+      }
+      for (let v = 0; v <= xMax + 1e-9; v += xs) {
+        if (v) svg.append(svgEl("line", { x1: x(v), y1: T, x2: x(v), y2: T + ph, class: "balance-gridline" }));
+        svg.append(svgEl("text", { x: x(v), y: T + ph + 17, "text-anchor": "middle", text: fmt(v) }));
+      }
+      svg.append(svgEl("text", { x: L, y: T - 12, class: "axis-title", text: `↑ ${yLabel}` }),
+        svgEl("text", { x: L + pw, y: H - 6, "text-anchor": "end", class: "axis-title", text: `${xLabel} →` }));
+      // Each unit is its idle sprite, centred on its exact value (never nudged apart), framed in its nation colour with
+      // the nation's shape in the corner. Missing or failed art falls back to the plain shape mark. Units whose markers
+      // mostly cover one another list each other on their card. The SVG is drawn 1:1, so marker pixels match its axes.
+      // A redraw (resize, axis change) replaces the markers; an open card follows its unit to the new marker if it is still plotted.
+      const was = pv.trigger && plot.contains(pv.trigger) ? { k: pv.trigger.dataset.k, pinned: pv.pinned, focused: document.activeElement === pv.trigger } : null;
+      if (was) hidePreview(false);
+      const S = narrow ? 26 : 32, near = S * .7;
+      const pos = points.map((p) => ({ p, cx: x(p.gold), cy: y(p.y), name: txt(p.u.name) || "(unnamed)" }));
+      pos.forEach((a) => { a.near = pos.filter((b) => b !== a && Math.abs(b.cx - a.cx) < near && Math.abs(b.cy - a.cy) < near); });
+      // Keyboard order runs along the horizontal axis, then top to bottom; one tab stop, arrow keys move between units.
+      const order = [...pos].sort((a, b) => a.cx - b.cx || a.cy - b.cy);
+      // Project markers stack above catalog ones, later markers above earlier; only the uppermost of a stack carries the +N badge.
+      const rank = (q) => (q.p.project ? order.length : 0) + order.indexOf(q);
+      order.forEach((q) => { q.badge = q.near.length && q.near.every((o) => rank(o) < rank(q)); });
+      let noArt = 0;
+      const showArt = () => { artNote.hidden = !noArt; artNote.textContent = `${noArt} unit${noArt === 1 ? " has" : "s have"} no loadable sprite and show${noArt === 1 ? "s" : ""} the nation mark instead.`; };
+      const axes = (q) => `${xLabel} ${q.p.xt}, ${yLabel} ${q.p.yt}`;
+      order.forEach((q, i) => {
+        const p = q.p, src = unitSpriteSrc(m, p.u, p.project);
+        const b = el("button", { type: "button", class: `bal-pt${p.project ? " project" : ""}`, tabindex: i ? "-1" : "0", "aria-haspopup": "dialog",
+          "aria-expanded": "false", "aria-controls": PREVIEW_ID,
+          "aria-label": `${q.name}, ${p.label}: ${axes(q)}.${q.near.length ? ` Overlaps ${q.near.length} other unit${q.near.length === 1 ? "" : "s"}.` : ""}` });
+        b.dataset.k = `${p.index}:${txt(p.u.uid ?? p.u.id)}:${txt(p.u.name)}`;
+        b.style.left = `${q.cx.toFixed(1)}px`; b.style.top = `${q.cy.toFixed(1)}px`; b.style.setProperty("--c", p.color);
+        const noSprite = () => {
+          b.classList.add("no-art");
+          fillKids(b, svgEl("svg", { width: 18, height: 18, viewBox: "0 0 18 18", "aria-hidden": "true", focusable: "false" }, balMark(p.shape, 9, 9, 6.5, p.color)));
+          if (q.badge) b.append(el("span", { class: "bal-pt-n", "aria-hidden": "true", text: `+${q.near.length}` }));
+          noArt++; showArt();
+        };
+        if (src) {
+          const img = el("img", { src, alt: "", decoding: "async", draggable: "false" });
+          img.addEventListener("error", noSprite, { once: true });
+          b.append(img, el("span", { class: "bal-pt-key", "aria-hidden": "true" }, balKey(p)));
+          if (q.badge) b.append(el("span", { class: "bal-pt-n", "aria-hidden": "true", text: `+${q.near.length}` }));
+        } else noSprite();
+        q.btn = b;
+        q.build = (isCurrent) => {
+          const parts = unitPreview(m, p.u, p.project, isCurrent);
+          parts.splice(1, 0, el("div", { class: "pv-chart" },
+            el("p", { class: "sheet-line" }, el("span", { class: "sheet-k", text: "On this chart: " }), balSeriesLabel(p)),
+            el("p", { class: "sheet-line pv-axes" }, el("span", null, `${xLabel} `, el("strong", { text: p.xt })), el("span", null, `${yLabel} `, el("strong", { text: p.yt }))),
+            q.near.length ? el("div", { class: "sheet-line pv-near" }, el("span", { class: "sheet-k", text: `Overlapping here (${q.near.length}):` }),
+              q.near.map((o) => el("button", { type: "button", class: "btn btn-small btn-ghost", "aria-label": `Show ${o.name}, ${o.p.label}: ${axes(o)}`,
+                onclick: () => showPreview(o.btn, o.name, o.build, true) }, balKey(o.p), ` ${o.name}`))) : null));
+          return parts;
+        };
+        attachPreview(b, q.name, q.build);
+        b.addEventListener("click", () => { if (pv.trigger === b && pv.pinned && !pv.card.hidden) hidePreview(true); else showPreview(b, q.name, q.build, true); });
+        b.addEventListener("focus", () => { for (const o of order) o.btn.tabIndex = o.btn === b ? 0 : -1; });
+      });
+      const layer = el("div", { class: "bal-pts", role: "group", "aria-label": `${points.length} plotted units, left to right by ${xLabel}. Arrow keys move between units; Enter pins a unit card.` },
+        order.map((q) => q.btn));
+      layer.addEventListener("keydown", (e) => {
+        const k = order.findIndex((q) => q.btn === e.target);
+        if (k < 0) return;
+        const to = { ArrowRight: k + 1, ArrowDown: k + 1, ArrowLeft: k - 1, ArrowUp: k - 1, Home: 0, End: order.length - 1 }[e.key];
+        if (to === undefined) return;
+        e.preventDefault();
+        order[Math.max(0, Math.min(order.length - 1, to))].btn.focus();
+      });
+      showArt();
+      fillKids(plot, svg, layer);
+      const again = was && order.find((q) => q.btn.dataset.k === was.k);
+      if (again && was.pinned) showPreview(again.btn, again.name, again.build, true);
+      else if (again && was.focused) again.btn.focus({ preventScroll: true });
+    };
+    const drawPlot = () => {
+      let omitted = 0;
+      points = nations.flatMap((x, i) => (x.n.units || []).filter((u) => u.role === role.value).flatMap((u) => {
+        const gold = value(u.cost_estimates?.[costAxis.value]);
+        const y = stat.value === "protection" ? value({ ...u.protection, value: u.protection?.average }) : stat.value === "resources" ? value(u.cost_estimates?.resources) : value(u.stats?.[stat.value]);
+        if (gold === null || y === null || gold < 0 || y < 0) { omitted++; return []; }
+        // Display text keeps the report's estimate mark (≈); gold / y are the plotted numbers.
+        const xt = estText(u.cost_estimates?.[costAxis.value]), yt = estText(stat.value === "protection" ? { ...u.protection, value: u.protection?.average }
+          : stat.value === "resources" ? u.cost_estimates?.resources : u.stats?.[stat.value]);
+        return [{ ...x, u, gold, y, xt: xt ?? String(gold), yt: yt ?? String(y), index: i }];
+      }));
+      const yLabel = stat.options[stat.selectedIndex].text, xLabel = costAxis.options[costAxis.selectedIndex].text;
+      if (points.length) drawSvg();
+      else { artNote.hidden = true; fillKids(plot, stateBox("empty", "No resolved values for this chart.", "Choose another metric or reference nation. Unknown values are not plotted as zero.")); }
+      summary.textContent = `${points.length} units plotted; ${omitted} omitted because the selected cost or metric is unresolved. Each unit is its sprite at its exact value, framed in its nation colour; the corner mark is the nation's shape (squares: project, other shapes: catalog). A +N badge means N other units overlap there; their cards list one another and the data table has every value. Costs and equipment values are components or estimates, not guaranteed final in-game prices.`;
+      fillKids(dataTable, table(["Nation / source", "Unit", statLabel(costAxis.value, xLabel), statLabel(stat.value === "protection" ? "prot" : stat.value, yLabel)], points.map((p) => [balSeriesLabel(p),
+        p.project ? attachPreview(el("a", { href: route("p", m.project.slug, "units", p.u.id), text: p.u.name }), txt(p.u.name), (isCurrent) => unitPreview(m, p.u, true, isCurrent))
+          : attachPreview(el("span", { text: p.u.name }), txt(p.u.name), (isCurrent) => unitPreview(m, p.u, false, isCurrent)), numCell(p.gold), numCell(p.y)])));
+    };
+    role.addEventListener("change", drawPlot); stat.addEventListener("change", drawPlot); costAxis.addEventListener("change", drawPlot); drawPlot();
+    if (typeof ResizeObserver === "function") {
+      // Released once the plot leaves the document (route change or re-render).
+      const ro = new ResizeObserver(() => { if (!plot.isConnected) { ro.disconnect(); return; } if (Math.abs((plot.clientWidth || 0) - drawnWidth) > 8) drawSvg(); });
+      ro.observe(plot);
+    }
+    return el("section", { class: "stack", "aria-label": "Balance charts" },
+      el("div", { class: "balance-dashboard" },
+        el("section", { class: "panel" }, balHead("Roster comparison"),
+          el("div", { class: "bal-controls" }, balControl("balance-count-metric", "Compare", metricSelect)), bars,
+          el("p", { class: "panel-note bal-panel-note", text: "Counts reflect recruitment links the static model resolves. Terrain recruitment may be incomplete. Counts measure variety, not army strength." })),
+        el("section", { class: "panel" }, balHead("Fixed magic access"), magicTable,
+          el("p", { class: "panel-note bal-panel-note", text: "Highest fixed path per recruit; maxima can belong to different units. Randoms, boosters and recruitment time are excluded. H includes priests. Shading uses a five-level scale; numbers are authoritative." }))),
+      el("section", { class: "panel" }, balHead("Cost and capability"),
+        el("div", { class: "bal-controls" }, balControl("balance-chart-role", "Roster", role),
+          balControl("balance-chart-cost", "Horizontal axis", costAxis), balControl("balance-chart-stat", "Vertical axis", stat)),
+        el("ul", { class: "balance-legend", "aria-label": "Nations" }, nations.map((p) => el("li", null, balSeriesLabel(p)))),
+        plot,
+        el("div", { class: "bal-chart-foot" }, summary, artNote),
+        el("details", { class: "raw tech" }, el("summary", { text: "Chart data — exact values" }), el("div", { class: "inner" }, dataTable))));
   }
   function viewBalance(m) {
     const slug = m.project.slug, refs = balRefs();
     const draw = (rep) => {
       const pn = (rep.project_nations || []).filter((n) => state.nation.key === N_ALL || state.nation.key === N_NONE || (selectedNation(m) && selectedNation(m).uid === n.uid));
       const refsN = rep.reference_nations || [];
-      const all = [...pn.map((n) => ({ n, project: true })), ...refsN.map((n) => ({ n, project: false }))];
+      const all = balSeries([...pn.map((n) => ({ n, project: true })), ...refsN.map((n) => ({ n, project: false }))]);
       return [
-        el("p", { class: "panel-note prose", text: "Side-by-side tables for design review. Gold, resources and recruitment points show the raw component as written († ; auto+N is an autocalc base) and, where supported, a labelled estimate (≈). There is no power score; test in Dominions 6." }),
+        el("div", { class: "bal-intro" },
+          el("div", null, el("h2", { text: "Balance comparison" }),
+            el("p", { class: "muted", text: "Charts and source tables for design review, against same-era reference nations. There is no power score; test in Dominions 6." })),
+          el("dl", { class: "bal-key", "aria-label": "How to read costs and values" },
+            el("dt", { text: "†" }), el("dd", { text: "Raw cost component as written (gold, resources, recruitment points); auto+N is an autocalc base." }),
+            el("dt", { class: "est", text: "≈" }), el("dd", { text: "Labelled estimate, where supported." }),
+            el("dt", { text: "?" }), el("dd", { text: "Not resolved by the static model; never zero." }))),
         balPicker(m, rep, refs),
-        (rep.warnings || []).length ? el("ul", { class: "diag" }, rep.warnings.map((w) => el("li", null, badge("check", "warn"), " ", el("span", { text: txt(w) })))) : null,
+        (rep.warnings || []).length ? el("ul", { class: "diag bal-warnings" }, rep.warnings.map((w) => el("li", null, badge("check", "warn"), " ", el("span", { text: txt(w) })))) : null,
         state.nation.key === N_NONE ? stateBox("empty", "Balance is per nation.", "Showing every project nation; choose one above to focus.") : null,
-        all.length ? panel("At a glance",
-          table(["Nation", "Source", "Era", "Troops", "Commanders", "Mages", "Fixed magic maxima"], all.map(({ n, project }) => [
-            el("strong", { text: txt(n.name) }), project ? badge("this project", "authored") : badge("catalog", "copper"), txt(n.era),
-            txt((n.units || []).filter((u) => u.role === "troop").length), txt((n.units || []).filter((u) => u.role === "commander").length),
-            txt(((n.magic_access || {}).recruitable_mages || []).length), balMaxima(n.magic_access)])),
-          el("p", { class: "panel-note", text: "Counts are recruitable entries in this static reading. Maxima can belong to different recruits; random access and capital-only units are listed per unit below." })) : null,
-        pn.length ? pn.map((n) => panel(`${txt(n.name)} (this project${n.era ? `, era ${n.era}` : ""})`, balNationBlock(m, n, true)))
+        all.length ? el("section", { class: "panel" }, balHead("At a glance"),
+          el("div", { class: "table-wrap" }, el("table", { class: "bal-glance" },
+            el("thead", null, el("tr", null, ["Nation", "Source"].map((h) => el("th", { scope: "col", text: h })),
+              ["Era", "Troops", "Commanders", "Mages"].map((h) => el("th", { scope: "col", class: "num", text: h })), el("th", { scope: "col", text: "Fixed magic maxima" }))),
+            el("tbody", null, all.map((p) => el("tr", null,
+              el("td", null, el("span", { class: "bal-series" }, balKey(p), el("strong", { text: p.name }))),
+              el("td", null, p.project ? badge("this project", "authored") : badge("catalog", "copper")),
+              numCell(txt(p.n.era)),
+              numCell(txt((p.n.units || []).filter((u) => u.role === "troop").length)), numCell(txt((p.n.units || []).filter((u) => u.role === "commander").length)),
+              numCell(txt(((p.n.magic_access || {}).recruitable_mages || []).length)), el("td", null, balMaxima(p.n.magic_access))))))),
+          el("p", { class: "panel-note bal-panel-note", text: "Counts are recruitable entries in this static reading. Maxima can belong to different recruits; random access and capital-only units are listed per unit below." })) : null,
+        balanceDashboard(m, all),
+        pn.length ? pn.map((n) => el("section", { class: "panel" },
+          balHead(`${txt(n.name)}`, `This project${n.era ? `, era ${n.era}` : ""} · recruitable roster`), balNationBlock(m, n, true)))
           : stateBox("empty", "No project nation in this selection."),
+        balItems(m),
         refsN.map((n) => el("details", { class: "raw tech" }, el("summary", null, `${txt(n.name)}${n.epithet ? `, ${txt(n.epithet)}` : ""} (catalog #${n.id}, era ${txt(n.era)}) - ${(n.units || []).length} unit(s)`),
           el("div", { class: "inner stack" }, balNationBlock(m, n, false)))),
         (rep.limitations || []).length ? techSection("What this does not show", false, el("ul", null, rep.limitations.map((t) => el("li", { text: txt(t) })))) : null,
@@ -6222,10 +7187,13 @@
       else if (tab === "sites") body.append(viewSites(m, arg));
       else if (tab === "balance") body.append(viewBalance(m));
       else if (tab === "maps") body.append(viewMaps(m, arg));
+      else if (tab === "spells") body.append(viewKindBrowse(m, "spell"));
+      else if (tab === "items") body.append(viewKindBrowse(m, "item"));
       else if (tab === "other") body.append(viewOther(m));
       else if (tab === "author") body.append(viewAuthoring(m, arg, parts.slice(4)));
       else if (tab === "assets") body.append(viewAssets(m));
       else if (tab === "validation") body.append(viewValidation(m));
+      else if (tab === "export") body.append(viewExport(m));
       else if (tab === "source") await viewSource(m, arg, body);
       else if (tab === "docs") await viewDocs(body, slug, parts.slice(3).join("/") || null);
       else body.append(stateBox("error", "Unknown section.", tab));
@@ -6281,10 +7249,12 @@
     toast("Re-read from disk");
   });
   window.addEventListener("hashchange", render);
+  // The skip link targets #main, which the hash router would read as a route; move focus without changing the page.
+  $(".skip").addEventListener("click", (e) => { e.preventDefault(); ($("#page-title", main) || main).focus(); });
 
   (async () => {
     // The icon manifest loads alongside meta so the first render can already show icons; it never blocks on failure.
-    const icons = loadTraitIcons();
+    const icons = Promise.all([loadTraitIcons(), loadGemIcons()]);
     try { state.meta = await getJSON("/api/meta"); } catch (e) { state.meta = null; }
     await icons;
     renderCatalogStatus();

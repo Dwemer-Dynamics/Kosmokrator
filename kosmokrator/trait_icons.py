@@ -17,6 +17,16 @@ from .trait_icon_data import ICON_SPECS, RES_SHA256
 CACHE_NAME = ".kosmokrator-trait-icons"
 MAX_ARCHIVE_BYTES = 8 * 1024 * 1024
 MAX_ICON_BYTES = 64 * 1024
+# Optional stat/cost art from data/misc.trs, reviewed against the same 6.37 executable as ICON_SPECS. The unit and
+# recruitment info boxes call 0x4ad630 with sheet 27 (misc.trs) and the frame index directly before drawing the
+# label text below; the call address is recorded. Base stats (hit points ... leadership) are drawn as text only.
+MISC_SHA256 = "140bcfaf36f2238ad5496baf1271abf8bdcf16a32a1cdc226862b966942a2ce1"
+STAT_ICON_SPECS = {
+    "stat_gold": (160, "Gold", "0x1075e2"),
+    "stat_resources": (161, "Resources", "0x107658"),
+    "stat_recpoints": (162, "Recruitment points", "0x1074c7"),
+    "stat_compoints": (166, "Commander Points", "0x158c94"),
+}
 
 
 def decode_native_icon(data: bytes, index: int) -> tuple[int, int, bytes]:
@@ -80,7 +90,7 @@ def decode_native_icon(data: bytes, index: int) -> tuple[int, int, bytes]:
 
 
 def install_native_icons(workspace: str | None, game: str) -> dict[str, Any]:
-    """Read only the user's res.trs and atomically populate the workspace's private icon cache."""
+    """Read only the user's res.trs (and optional misc.trs) and atomically populate the private icon cache."""
     root = resolve_workspace(workspace)
     game_root = Path(game).expanduser().absolute()
     if is_link(game_root) or not game_root.is_dir():
@@ -101,18 +111,39 @@ def install_native_icons(workspace: str | None, game: str) -> dict[str, Any]:
             decoded[index] = (w, h, encode_png(w, h, rgba))
     except (ValueError, struct.error) as exc:
         raise KosmoError("icons_decode", str(exc)) from exc
+    # Stat art is optional: a missing, changed or undecodable misc.trs leaves those labels text-only.
+    misc_decoded: dict[int, tuple[int, int, bytes]] = {}
+    misc_sha = None
+    misc = contained(game_root.resolve(), "data/misc.trs", what="native graphics")
+    if misc.is_file() and misc.stat().st_size <= MAX_ARCHIVE_BYTES:
+        misc_raw = misc.read_bytes()
+        misc_sha = hashlib.sha256(misc_raw).hexdigest()
+        if misc_sha == MISC_SHA256:
+            try:
+                for index in sorted({spec[0] for spec in STAT_ICON_SPECS.values()}):
+                    w, h, rgba = decode_native_icon(misc_raw, index)
+                    misc_decoded[index] = (w, h, encode_png(w, h, rgba))
+            except (ValueError, struct.error):
+                misc_decoded = {}
     cache = contained(root, CACHE_NAME, what="native icon cache")
     cache.mkdir(exist_ok=True)
     entries = {}
     for index, (w, h, png) in decoded.items():
         atomic_write_bytes(contained(cache, f"{index}.png", what="native icon"), png)
         entries[str(index)] = {"width": w, "height": h, "sha256": hashlib.sha256(png).hexdigest()}
+    misc_entries = {}
+    for index, (w, h, png) in misc_decoded.items():
+        atomic_write_bytes(contained(cache, f"misc-{index}.png", what="native icon"), png)
+        misc_entries[str(index)] = {"width": w, "height": h, "sha256": hashlib.sha256(png).hexdigest()}
     manifest = {"schema": 1, "archive_sha256": sha, "sprites": entries}
+    if misc_entries:
+        manifest.update({"misc_archive_sha256": MISC_SHA256, "misc_sprites": misc_entries})
     atomic_write_bytes(contained(cache, "manifest.json", what="icon manifest"),
                        (json.dumps(manifest, indent=2) + "\n").encode("utf-8"))
     from .traits import TRAITS
     return {"cache": str(cache), "mapped_traits": len(set(ICON_SPECS) & set(TRAITS)),
             "icon_keys": len(ICON_SPECS), "unique_icons": len(decoded), "archive_sha256": sha,
+            "stat_icons": len(misc_entries), "misc_archive_sha256": misc_sha,
             "note": "Restart the browser server to load this cache. Mod files and exports were not changed."}
 
 
@@ -131,23 +162,28 @@ def load_icon_cache(workspace: Path) -> tuple[dict[str, Any], dict[str, bytes]]:
         records = manifest.get("sprites")
         if not isinstance(records, dict):
             return icons, images
-        decoded = {}
-        for index in {spec[0] for spec in ICON_SPECS.values()}:
-            record = records.get(str(index))
+
+        def verified(record: Any, name: str) -> tuple[int, int, bytes] | None:
             if not isinstance(record, dict):
-                continue
-            path = contained(cache, f"{index}.png", what="native icon")
+                return None
+            path = contained(cache, name, what="native icon")
             if not path.is_file() or path.stat().st_size > MAX_ICON_BYTES:
-                continue
+                return None
             png = path.read_bytes()
             if len(png) < 33 or png[:16] != b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR":
-                continue
+                return None
             w, h = struct.unpack_from(">II", png, 16)
             if not 0 < w <= 64 or not 0 < h <= 64 or record.get("width") != w or record.get("height") != h:
-                continue
+                return None
             if hashlib.sha256(png).hexdigest() != record.get("sha256"):
-                continue
-            decoded[index] = (w, h, png)
+                return None
+            return w, h, png
+
+        decoded = {}
+        for index in {spec[0] for spec in ICON_SPECS.values()}:
+            found = verified(records.get(str(index)), f"{index}.png")
+            if found:
+                decoded[index] = found
         for key, (index, label, _call) in ICON_SPECS.items():
             if index not in decoded or not re.fullmatch(r"[a-z0-9_]+", key):
                 continue
@@ -155,6 +191,15 @@ def load_icon_cache(workspace: Path) -> tuple[dict[str, Any], dict[str, bytes]]:
             icons[key] = {"url": f"/api/trait-icons/{key}.png", "width": w, "height": h,
                           "label": label, "sprite": index}
             images[key] = png
+        # Stat art loads only from the reviewed misc.trs; its keys never collide with trait commands.
+        misc_records = manifest.get("misc_sprites")
+        if manifest.get("misc_archive_sha256") == MISC_SHA256 and isinstance(misc_records, dict):
+            for key, (index, label, _call) in STAT_ICON_SPECS.items():
+                found = verified(misc_records.get(str(index)), f"misc-{index}.png")
+                if found:
+                    icons[key] = {"url": f"/api/trait-icons/{key}.png", "width": found[0], "height": found[1],
+                                  "label": label, "sprite": index, "archive": "misc.trs"}
+                    images[key] = found[2]
     except (OSError, ValueError, UnicodeError, KosmoError):
         return {}, {}
     return icons, images

@@ -20,6 +20,12 @@ Bounded content authoring (content.py, playtest.py, importdm.py) uses the same c
 (sites, spells, weapons, armors), .../nations/<id>/heroes, .../playtests, and POST /api/import, which creates a NEW
 project from an uploaded .dm and assets (never overwrites). GET /api/tools only reports administrator-configured
 external tool status; nothing is executed from the browser.
+
+Workshop preparation (workshop.py): POST .../workshop/prepare turns one existing export of the shown revision into
+<project>/exports/workshop/<id>/<slug>/ (exported files plus dom6ws.txt and banner.png) with a ZIP and a manifest
+beside it, and POST .../workshop/<id>/install copies that folder into the Dominions 6 mods folder fixed by the server
+(KOSMOKRATOR_DOMINIONS_MODS or %APPDATA%/Dominions6/mods), refusing any existing folder it did not install. Nothing
+is uploaded or published; the game's own Mods menu uploads to Steam.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ import hmac
 import ipaddress
 import json
 import mimetypes
+import os
 import re
 import secrets
 import sys
@@ -52,6 +59,8 @@ from .playtest import add_playtest, list_playtests
 from .edit import apply_edit, editor_state
 from .nation_edit import apply_nation_edit, editor_state as nation_editor_state
 from .export import export_revision, find_export, list_exports, read_export_manifest
+from .workshop import (MODS_ENV, install_workshop, mods_dir_config, prepare_workshop, workshop_archive,
+                       workshop_banner, workshop_manifest, workshop_state)
 from .pretenders import SPRITE_FRAMES, catalog_sprite_path
 from .errors import KosmoError
 from .paths import SLUG_RE, contained, is_link, resolve_workspace
@@ -73,9 +82,21 @@ SECTIONS = ("nations", "monsters", "sites", "other_definitions", "assets", "vali
 # /pretenders/<god>: "project-5011", "catalog-3416" or the full uid "god:catalog:3416".
 GOD_REF_RE = re.compile(r"^(?:god:)?(project|catalog)[-:](\d{1,6})$")
 MONSTER_ID_RE = re.compile(r"^\d{1,6}$")
+# Native magic-path gem icons from the configured catalog: the file name is rebuilt from this fixed set only.
+GEM_ICON_PATHS = frozenset("FAWESDNGBH")
+# Catalog magic-path skill icons (images/magicicons/Path_<P>.png). The catalog's own formatter uses them for unit
+# paths and requirements, and Path_U for random paths; Path_R (its research total) is not served.
+PATH_ICON_PATHS = frozenset("FAWESDNGBHU")
+# Catalog ability icons used by its formatter; only the sacred badge exists there.
+ABILITY_ICON_NAMES = frozenset({"holy"})
+# Catalog item icons are images/items/item<id>.png for a vanilla item id (or its #copyspr id).
+ITEM_ICON_RE = re.compile(r"^([1-9]\d{0,3})\.png$")
+MAX_CATALOG_ICON_BYTES = 64 * 1024
 EDIT_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/monsters/(\d{1,6})/edit")
 NATION_EDIT_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/nations/(\d{1,3})/edit")
 EXPORT_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/export")
+WORKSHOP_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/workshop/(?:(prepare)|"
+                               r"([a-z][a-z0-9_]{1,47}-ws-\d{8}T\d{6}Z-[0-9a-f]{8})/(install))")
 CREATE_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/create/(monster|nation)")
 ART_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/monsters/(\d{1,6})/art")
 CONTENT_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/content/(sites|spells|weapons|armors)")
@@ -96,6 +117,10 @@ EDIT_STATUS = {"sha_mismatch": HTTPStatus.CONFLICT, "project_locked": HTTPStatus
                "write_failed": HTTPStatus.INTERNAL_SERVER_ERROR,
                "write_failed_reservation_kept": HTTPStatus.INTERNAL_SERVER_ERROR,
                "changed_during_export": HTTPStatus.CONFLICT, "dest_exists": HTTPStatus.CONFLICT,
+               "stale_export": HTTPStatus.CONFLICT, "install_conflict": HTTPStatus.CONFLICT,
+               "export_changed": HTTPStatus.CONFLICT, "workshop_changed": HTTPStatus.CONFLICT,
+               "export_missing": HTTPStatus.NOT_FOUND, "workshop_missing": HTTPStatus.NOT_FOUND,
+               "install_unavailable": HTTPStatus.CONFLICT,
                "project_exists": HTTPStatus.CONFLICT,
                "validation_failed": HTTPStatus.UNPROCESSABLE_ENTITY,
                "object_missing": HTTPStatus.NOT_FOUND, "project_missing": HTTPStatus.NOT_FOUND}
@@ -130,6 +155,11 @@ class BrowserState:
         self.cache = ModelCache()
         self.trait_icons, self.trait_icon_images = load_icon_cache(self.workspace)
         self.csrf = secrets.token_urlsafe(32)  # per server process; only ever sent inside index.html
+        # The Workshop install destination is fixed when the server starts; requests can never name a path.
+        self.mods_env = {k: v for k, v in os.environ.items() if k in (MODS_ENV, "APPDATA")}
+
+    def mods_config(self) -> dict[str, Any]:
+        return mods_dir_config(self.mods_env)
 
     def catalog(self) -> tuple[Any, dict[str, Any] | None]:
         """(catalog or None, status) - a missing or broken catalog is reported, never fatal."""
@@ -209,11 +239,12 @@ class Handler(BaseHTTPRequestHandler):
             mi = self.path == IMPORT_ROUTE
             mt = TOOLS_ROUTE_RE.fullmatch(self.path)
             me = EQUIPMENT_ROUTE_RE.fullmatch(self.path)
+            mw = WORKSHOP_ROUTE_RE.fullmatch(self.path)
             mg = re.fullmatch(r'/api/projects/([a-z][a-z0-9_]{1,47})/commands', self.path)
             md = re.fullmatch(r'/api/projects/([a-z][a-z0-9_]{1,47})/dependencies', self.path)
             mb = re.fullmatch(r'/api/projects/([a-z][a-z0-9_]{1,47})/map-builds', self.path)
             mm = re.fullmatch(r'/api/projects/([a-z][a-z0-9_]{1,47})/maps/(import|[A-Za-z][A-Za-z0-9_]{0,47}/(?:edit|export))', self.path)
-            if not (m or mx or mc or ma or mn or mco or mh or mp or mi or mt or me or mg or md or mm or mb):
+            if not (m or mx or mc or ma or mn or mco or mh or mp or mi or mt or me or mg or md or mm or mb or mw):
                 return self._reject_write()
             limit = 180 * 1024 * 1024 if mm and mm.group(2) == 'import' else MAX_ART_BODY_BYTES if ma else MAX_IMPORT_BODY_BYTES if mi else MAX_EDIT_BYTES
             host = (self.headers.get("Host") or "").strip()
@@ -239,6 +270,13 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(int(length)).decode("utf-8"))
             except (UnicodeDecodeError, ValueError):
                 return self._error(HTTPStatus.BAD_REQUEST, "bad_json", "Body is not valid UTF-8 JSON.")
+            if mw:
+                slug = mw.group(1)
+                if mw.group(2):
+                    res = prepare_workshop(self.state.workspace, slug, body)
+                else:
+                    res = install_workshop(self.state.workspace, slug, mw.group(3), body, self.state.mods_config())
+                return self._json({"ok": True, "result": res})
             cat, _err = self.state.catalog()
             if mb:
                 from .map_builds import save_map_build
@@ -374,6 +412,17 @@ class Handler(BaseHTTPRequestHandler):
             if png is None:
                 return self._error(HTTPStatus.NOT_FOUND, "icon_missing", "No confirmed native icon for this trait.")
             return self._send(200, png, "image/png")
+        if len(api) == 2 and api[0] == "gem-icons":
+            return self._gem_icon(api[1])
+        if len(api) == 2 and api[0] == "path-icons":
+            key = api[1][:-4] if api[1].endswith(".png") else ""
+            return self._catalog_icon("magicicons", f"Path_{key}.png" if key in PATH_ICON_PATHS else None)
+        if len(api) == 2 and api[0] == "ability-icons":
+            key = api[1][:-4] if api[1].endswith(".png") else ""
+            return self._catalog_icon("abilityicons", f"{key}.png" if key in ABILITY_ICON_NAMES else None)
+        if len(api) == 2 and api[0] == "item-icons":
+            mi = ITEM_ICON_RE.match(api[1])
+            return self._catalog_icon("items", f"item{int(mi.group(1))}.png" if mi else None)
         if api == ["tools", "runs"]:
             return self._json({"ok": True, "result": list_tool_runs(st.workspace)})
         if len(api) in (3, 4) and api[:2] == ["tools", "runs"]:
@@ -476,6 +525,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._asset(slug, "/".join(rest[1:]), q, dl)
         if head == "exports":
             return self._export(slug, rest[1:])
+        if head == "workshop":
+            if len(rest) == 1:
+                return self._json({"ok": True, "result": workshop_state(ws, slug, self.state.mods_config())})
+            if len(rest) == 3 and rest[2] == "manifest":
+                return self._json({"ok": True, "manifest": workshop_manifest(ws, slug, rest[1])})
+            if len(rest) == 3 and rest[2] == "banner.png":
+                return self._send(200, workshop_banner(ws, slug, rest[1]), "image/png")
+            if len(rest) == 3 and rest[2] == "archive":
+                name, raw = workshop_archive(ws, slug, rest[1])
+                return self._send(200, raw, "application/zip", {"Content-Disposition": f'attachment; filename="{name}"'})
+            return self._error(HTTPStatus.NOT_FOUND, "not_found", "Unknown Workshop route.")
         if head == "donors" and len(rest) == 1:
             open_project(ws, slug)
             cat, _err = self.state.catalog()
@@ -544,6 +604,26 @@ class Handler(BaseHTTPRequestHandler):
         if path is None:
             return self._error(HTTPStatus.NOT_FOUND, "sprite_missing", "No catalog sprite for this pretender.")
         self._send(200, path.read_bytes(), "image/png")
+
+    def _gem_icon(self, name: str) -> None:
+        """One catalog gem icon (images/magicicons/Gem_<P>.png) for a path letter from GEM_ICON_PATHS only."""
+        key = name[:-4] if name.endswith(".png") else ""
+        self._catalog_icon("magicicons", f"Gem_{key}.png" if key in GEM_ICON_PATHS else None)
+
+    def _catalog_icon(self, folder: str, fname: str | None) -> None:
+        """One small PNG from the catalog's images/<folder>; callers rebuild fname from a fixed allow-list or an id."""
+        cat, _err = self.state.catalog()
+        if fname is None or cat is None:
+            return self._error(HTTPStatus.NOT_FOUND, "icon_missing", "No native catalog icon for this key.")
+        base = cat.gamedata.parent / "images" / folder
+        path = base / fname
+        if any(is_link(part) for part in (base.parent, base, path)) or not path.is_file() \
+                or path.stat().st_size > MAX_CATALOG_ICON_BYTES:
+            return self._error(HTTPStatus.NOT_FOUND, "icon_missing", "No native catalog icon for this key.")
+        data = path.read_bytes()
+        if data[:8] != b"\x89PNG\r\n\x1a\n":
+            return self._error(HTTPStatus.NOT_FOUND, "icon_missing", "No native catalog icon for this key.")
+        self._send(200, data, "image/png")
 
     def _catalog_unit(self, slug: str, mid: int, rest: list[str]) -> None:
         """Read-only comparison data for one catalog unit, or its sprite rebuilt from the integer id."""
