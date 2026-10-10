@@ -15,8 +15,57 @@ Duplicate**, **New nation**, and **Artwork: upload or replace frames**. **Export
 into a new file under `<project>/exports/` (see [Build and export](#build-and-export)). Catalog definitions
 are read-only; choosing a catalog donor creates a separate project definition.
 
+**Spells** and **Items** have dedicated read-only Browse tabs with project-wide
+counts and search by name, ID, selector or command. Expand a definition to see its
+authored commands, saved source and JSON. These views list parsed blocks; they do
+not interpret effects or prove engine behavior. Item artwork appears when its
+saved sprite reference is associated with an asset. **Other definitions** still
+includes these blocks alongside the other definition types.
+
+**Items** uses a responsive icon-card grid with authored construction, path and slot metadata,
+descriptions, search and expandable source details. **Balance** opens with a reading key (†, ≈, ?)
+and an at-a-glance summary, then roster comparison bars, a fixed-magic heatmap and an interactive
+cost-versus-capability scatter plot. Each nation keeps one colour and shape across the summary and
+every chart. Project nations are all squares and reference nations cycle through five shapes, so with
+several project nations or more than five references some nations share a shape and differ by colour
+only; the legend, row labels and chart data table always name each nation. With forced colours the
+plot marks lose their colour, so use the data table to tell nations apart. Choose troops or
+commanders, a cost axis and a stat axis; chart data is also available as a table.
+
+In the scatter plot each unit is drawn as its idle sprite, centred exactly on its value; points are never
+nudged apart. The sprite comes from the project's `#spr` asset or the catalog. The sprite box has the
+nation's colour, with the nation's legend shape in its corner. A unit with no sprite, or whose sprite fails
+to load, shows the plain nation shape, and a note under the chart counts them. Hover or keyboard focus opens
+the same unit card used in the tables: sprite, base stats, raw and estimated costs, equipment, magic, and
+the unit's two plotted values with their estimate marks. Click, tap or Enter pins the card, and Escape or ×
+closes it. The plot is one Tab stop; arrow keys, Home and End move between units in horizontal-axis order.
+Each unit's accessible name gives its nation, source and both values. Markers that mostly cover one another
+are still all reachable. The uppermost marker in a stack shows a +N badge. Each unit's card lists the units
+overlapping it as buttons that open their cards. The chart data table lists every value. Unresolved values
+are omitted, estimates are labelled, and original comparison tables remain below. These are
+static design comparisons, not simulated win rates or campaign charts.
+
 Optional [native trait icons](TRAIT-ICONS.md) are extracted locally from your installed game. Unit and
 pretender sheets and the trait editor keep their text labels when no verified icon is available.
+
+With a configured catalog, small native icons from its `images/` folder sit beside (never replace)
+the text, using the same keys as the catalog's own formatter: `Path_<P>` for magic path skill and
+spell, item and ritual requirements; `Gem_<P>` for gem amounts (site income, spell and ritual gem
+costs); `Path_U` for random magic picks; the catalog's sacred badge when the trait cache is absent;
+and `items/item<id>.png` for a `#selectitem` or `#copyspr <id>` item without its own `#spr`. Each
+route rebuilds the file name from a fixed letter set or an integer id; nothing is bundled.
+
+Stat labels use only verified native game icons. Gold, Resources and Recruitment points show the game's
+own `misc.trs` art (frames 160, 161, 162; 166 for commanders) beside the unchanged text when the optional
+local cache holds it; the game draws exactly these beside those labels (see
+[native trait icons](TRAIT-ICONS.md#stat-and-cost-art)). This applies on unit and pretender sheets, unit
+hover cards, the equipment panel, the cost tables, comparisons and the Balance roster. The game draws base
+stats as text, so Hit points, Size, Protection, Magic resistance, Morale, Leadership, Strength, Attack,
+Defence, Precision, Combat speed, Encumbrance and Map move are text labels with no icon; the browser does
+not draw substitute pictograms or borrow unrelated trait icons for them. Without the cache, or if an image
+fails to load, the cost labels are plain text too.
+Icons are hidden from assistive technology; the text label is what is read. Weapon and armour rows,
+raw commands, source and JSON stay text-only.
 
 **Create & edit** also includes Items, Mercenaries, Events and Advanced commands. Unit and definition details
 show references; sheets show supported equipped estimates with ≈; the compatibility section includes
@@ -26,7 +75,7 @@ command coverage, safe editing and calculation limits.
 ## Nation selection
 
 Projects with several nations get a **Nation** selector above the section tabs. Overview, Nation, Units, Sites
-and Pretenders all follow it (including the tab counts); Other definitions, Assets, Source, Validation and Docs
+and Pretenders all follow it (including the tab counts); Spells, Items, Other definitions, Assets, Source, Validation and Docs
 are always project-wide and say so. Choices:
 
 - one nation; **Not tied to a nation** (units and sites no nation references, and custom gods no nation lists);
@@ -64,14 +113,17 @@ counts are fixed in the page. Each row links to the existing view that fixes it:
 - **Shared sprites** (informational): one image file used by several units, or byte-identical files under
   different names. Sharing is allowed and never counts as a problem.
 - **Latest export:** the newest entry in `<project>/exports`, read fresh with the project (the model cache does not
-  cover exports), its age, and whether it was built from the saved `.dm` shown on the page. **Go to export** moves
-  to the Build and export panel; a new export updates this row.
+  cover exports), its age, and whether it was built from the saved `.dm` shown on the page. **Open export** goes
+  to the Export & Workshop section; a new export updates this row.
 
 The panel says **needs attention** only for validation errors, missing referenced files and units without a sprite.
 
 ## Build and export
 
-The **Build and export** panel on the Overview (project-wide) works on the saved `.dm` only:
+**Export mod**, at the right of the project heading on every section (full width on narrow screens), opens the
+**Export & Workshop** section (`#/p/<slug>/export`, also in the Edit tab group). Its badge shows **ready**, the
+validation error count, or **re-validate**. The **Build and export** panel there (project-wide) works on the saved
+`.dm` only:
 
 - It shows the saved revision (`.dm` path and SHA-256) and the validation result for that exact revision.
   **Re-validate saved .dm** re-reads the file from disk. Export is disabled, with the reason shown, when
@@ -95,6 +147,27 @@ The **Build and export** panel on the Overview (project-wide) works on the saved
   up to 20 exports in that folder with the revision each one records.
 - Nothing is installed into the game, published or uploaded. Validation is static: it does not prove that the mod
   loads, plays or is balanced.
+
+## Steam Workshop folder
+
+The **Steam Workshop folder** panel below Build and export prepares an export for the game's own uploader. See
+[WORKSHOP.md](WORKSHOP.md) for the folder rules, the install safety rules and the manual upload steps.
+
+1. **Choose what goes in.** The source is the export of the revision on the page; when there is none, a ZIP export is
+   made first through the same `/export` route. The banner is the `#icon` image. **dom6ws.txt** starts on
+   **Choose…**, and **Prepare Workshop folder** stays disabled, with the reason shown, until a visibility is chosen.
+   Only `Public` is offered, because it is the only value the creator guide documents for this file.
+2. **Prepared folder.** It shows the banner preview, the absolute content folder path (**Copy path**), the source
+   export, the hashes and a collapsed list of every file. **Download Workshop ZIP** and **Manifest JSON** fetch it back.
+3. **Install locally (optional).** It shows the mods folder fixed by the server, the destination and its state:
+   not installed yet, installed by Kosmokrator, identical, another folder is there, or unavailable. The button is
+   disabled, with the reason, for a conflict or a missing mods folder. A refused install lists the files that are
+   not from this project and says that nothing was changed.
+4. **Upload from the game.** It lists the in-game upload steps, with **Launch Dominions 6 in Steam**
+   (`steam://run/2511500`, opened only when you click it) and a link to the creator guide.
+
+Earlier Workshop folders (newest 10) are listed under a disclosure. Results and errors move focus to their outcome
+heading, and every step works with the keyboard.
 
 ## Editing
 
@@ -253,7 +326,8 @@ expected SHA-256, with a backup. A stale page gets 409 and keeps the draft.
 **Compare with vanilla units** on a unit sheet, and **Compare** next to project units in a nation's roster, open
 `#/p/<slug>/units/<id>/compare?c=<id>[,<id>]`: the project unit beside one or two catalog units, found with the
 donor search (prefilled with the unit's catalog donor). Read-only; it never changes the unit. Rows: native-size idle
-and attack sprites; base hp, strength, attack, defence, precision, natural protection, size, MR, morale,
+and attack sprites, bottom-centred on equal stages (at least 64x64, else the largest canvas in the row; the stage
+adds transparent padding, the figures stay 1x); base hp, strength, attack, defence, precision, natural protection, size, MR, morale,
 encumbrance, AP, map move and leadership (with the project unit's raw difference); weapons and armour; fixed and
 random magic; modelled abilities; recruitment (project fort, capital-only and shared, or the inspector's fort and
 non-fort nation tables for vanilla units); cost components with their interpretation, and an explicit "not
@@ -308,8 +382,12 @@ is kept in the address as `?r=8,13`.
 - **Reference nations:** same-era catalog nations as checkboxes grouped by age (at most 12). **Compare selected**
   updates the address; **Default selection** returns to the server's first three per era (a reproducible convenience).
   An invalid id shows the server error with a link back to the default.
-- **At a glance:** troops, commanders, recruitable mages and fixed magic maxima per project and reference nation.
-- Per nation, a unit table: base HP/protection/MR/morale/attack/defence; gold, resources and recruitment points as the
+- **Reading key:** † raw cost component as written (`auto+N` = autocalc base), ≈ labelled estimate, ? unresolved (never
+  zero). It sits beside the page heading, ahead of the data it explains.
+- **At a glance:** troops, commanders, recruitable mages and fixed magic maxima per project and reference nation, with
+  the nation's chart mark. The charts (roster bars, fixed-magic heatmap, cost and capability scatter) follow it.
+- Per nation, a unit table grouped into commanders and troops: base HP/protection/MR/morale/attack/defence in separate
+  right-aligned columns ("?" when unresolved); gold, resources and recruitment points as the
   raw component (†, `auto+N` = autocalc base) above the labelled estimate (≈) or "est. —" when unresolved; weapons,
   armour and the estimated protection; fixed paths and random picks with per-path chance only where the server gives it.
 - Project nations add start-site gems and national summons: required paths, target, count, gem cost and path, and gems
@@ -402,7 +480,7 @@ Then open <http://127.0.0.1:8765/>. Press Ctrl+C to stop. If installed, `kosmokr
 - **Project heading:** the mod's `#icon` banner (same rules as the sidebar) beside the mod name, on every
   tab. Nation flags appear only on the Nation tab.
 - **Overview:** the [project readiness](#project-readiness) panel, counts for the selected nation and
-  project-wide counts (labelled apart), the build and export panel, **Dependencies and compatibility** (overlap
+  project-wide counts (labelled apart), **Dependencies and compatibility** (overlap
   count and the dependency editor; validation counts are in the readiness panel), then mod info, `.dm` SHA-256,
   catalog provenance and JSON links under Advanced.
 - **Nation:** flag (native and 2x), description, summary, colours, clears, recruitable troops/commanders,
@@ -437,9 +515,11 @@ Then open <http://127.0.0.1:8765/>. Press Ctrl+C to stop. If installed, `kosmokr
   JSON are collapsible sections.
 - **Sites, Other definitions, Assets, Source, Validation, Docs.** Assets show path, format,
   dimensions, bytes, SHA-256 and which definitions use each file. Missing referenced files are flagged.
-- **Look:** a dark textured frame with parchment panels, serif labels and small bronze tabs and buttons, in the
-  spirit of the Dominions 6 interface. All textures, path markers and colours are plain CSS; no game or inspector
-  art, textures, fonts or code are bundled. The page needs no network access.
+- **Look:** quiet neutral dark surfaces with hairline borders, parchment serif headings, one warm accent for the
+  current tab, selection and focus, and right-aligned tabular numbers, in the spirit of the Dominions 6 interface.
+  Layout, chart marks and colours are plain CSS and SVG; native game icons (paths, gems, costs, traits, items) appear
+  only where the local catalog or your installed game provides them, always beside their text labels. No game or
+  inspector art, textures, fonts or code are bundled. The page needs no network access.
 
 ## JSON API (GET only)
 
@@ -462,6 +542,10 @@ catalog dataset version and revision, the `.dm` path and SHA-256. Add `?download
 /api/projects/<slug>/exports                  exports in <project>/exports (newest 20, with recorded revision)
 /api/projects/<slug>/exports/<id>/manifest    one export's manifest (by fixed export id only)
 /api/projects/<slug>/exports/<id>/archive     one ZIP export (application/zip, download)
+/api/projects/<slug>/workshop                 Workshop status: prepared folders (newest 10), install destination, steps
+/api/projects/<slug>/workshop/<id>/manifest   one prepared folder's manifest (fixed id <slug>-ws-<stamp>-<hex>)
+/api/projects/<slug>/workshop/<id>/archive    the prepared Workshop ZIP (application/zip, download)
+/api/projects/<slug>/workshop/<id>/banner.png the prepared banner.png, served only if it matches the manifest hash
 /api/projects/<slug>/nations/<id>/edit         nation editor state (POST on the same path previews/saves)
 /api/projects/<slug>/catalog-units/<id>       one catalog unit for comparison (read-only)
 /api/projects/<slug>/catalog-units/<id>/sprite/{idle,attack}
@@ -571,12 +655,15 @@ directory under workspace `tool-runs`. Downloads verify recorded output hashes. 
 - Binds to loopback only. Requests whose `Host` header is not a loopback name are rejected (DNS-rebinding guard).
 - GET/HEAD are read-only. Writes use `POST /api/projects/<slug>/monsters/<id>/edit` and `.../nations/<id>/edit` (editor state at
   `GET` on the same path), `/create/monster`, `/create/nation`, `/monsters/<id>/art`, `/content/<kind>`,
-  `/nations/<id>/heroes`, `/monsters/<id>/equipment`, `/playtests`, `/map-builds` and `/export` under the same project prefix, plus `POST /api/import` and the fixed tool routes above. All require an exact same-origin `Origin`, `application/json`, a body of at most 64 KB
+  `/nations/<id>/heroes`, `/monsters/<id>/equipment`, `/playtests`, `/map-builds`, `/export`, `/workshop/prepare` and
+  `/workshop/<id>/install` under the same project prefix, plus `POST /api/import` and the fixed tool routes above. All require an exact same-origin `Origin`, `application/json`, a body of at most 64 KB
   (6 MB on the art and import routes only) and the per-server CSRF token embedded in the served page
   (`X-Kosmo-CSRF`; it changes on every restart and is never written to disk or logs). Bad input returns 400,
   origin/token failures 403, a stale SHA-256, a held lock or a mid-export change 409, validation errors on export
   422. Any other POST, and PUT/DELETE/PATCH/OPTIONS, return 405. There is no raw `.dm` or path write route, and
-  export takes no path from the browser.
+  export takes no path from the browser. The Workshop routes take only `expected_sha256`, a listed `export_id`, a
+  documented `visibility` and a fixed Workshop id; the install destination comes from the server's start-up
+  configuration.
 - Exports are read back only by an export id that must match `<slug>-<stamp>[-<hex>]`. The file is looked up
   inside `<project>/exports`; a linked exports folder or linked entry is refused, and folder exports have no
   archive route.

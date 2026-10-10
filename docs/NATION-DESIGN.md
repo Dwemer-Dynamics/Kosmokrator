@@ -12,8 +12,174 @@ Before building a nation, record:
 - Main strengths, meaningful weaknesses and practical counters available to opponents.
 - Opening expansion plan, first-war research targets and later development options.
 - At least three same-era vanilla references, with sources and reasons for choosing them.
+- Art direction derived from the user's prompt and a complete original-asset checklist:
+  idle/attack pairs for every troop, commander, summon, hero, pretender and alternate
+  form; nation flag; custom mod banner; any additional artwork the content requires.
+  Record explicit user-authorized reuse/prototype exceptions. Follow `ASSET-RULESET.md`.
+  Completion requires all listed assets integrated and included in the export; stock
+  sprites and default graphics alone do not satisfy a request for a complete nation.
 
 Keep facts, community reports, design proposals and untested hypotheses explicitly separate. Record source dates/version context; a Dom5 guide, another era or an overhaul is not a direct Dom6 vanilla benchmark.
+
+## Default recruitable troop roster
+
+For a complete new nation, target 10-12 distinct recruitable troop types by default,
+including ordinary fort troops and capital-only troops. Summons, commanders, heroes,
+pretenders and alternate forms do not satisfy this target. Count distinct equipment
+variants only when they create a meaningful recruitment or battlefield choice.
+
+- A deliberately compact roster of 6-8 troops requires an explicit user request or
+  a documented design reason, such as unusual terrain recruitment or freespawn.
+- An expansive roster may target 14-16 troops when the theme supports useful variety.
+- Keep national summons additional to the recruitable roster. Do not reduce troop
+  or original artwork scope merely to finish sooner.
+- Give every troop a purpose and tradeoff in equipment, cost, protection, mobility,
+  recruitment location or battlefield role. Preserve thematic weaknesses; the
+  target does not require every nation to have cavalry, archers or every role.
+- Before generation, record the proposed count, recruitment locations and roles in
+  the brief. Before completion, reconcile the saved recruitment lists and capital
+  sites against that plan and the original asset checklist; explain exceptions.
+
+Reference basis: the local Dominions 6.37 dom6inspector catalog at revision
+68904be9da4a683e93ceff6ae457d430be2e43dd has a median core recruitable troop roster
+of 10 in each era. Core means unique troop IDs from ordinary fort recruitment and
+starting capital sites, excluding commanders and summons. Examples: EA Tir na n'Og
+6, Mekone 7, Ulm 10, Marverni 11, Caelum 14 and Machaka 14. Terrain/coastal/foreign
+recruitment and freespawn need separate review. These counts motivate the default;
+they are not a balance guarantee.
+
+## Generation requirements
+
+Apply these checks to complete new nations and record the results in the brief
+and delivery report. Do not erase the nation's weaknesses to satisfy a checklist.
+
+- Troop choices: document each recruit's role, cost and equipment tradeoffs,
+  mobility and availability. Review overlapping units for a real reason to choose
+  either. More expensive or numerically stronger copies alone do not provide depth.
+- National magic: plan early, middle and late development with national summons
+  plus thematic battlefield support or utility spells where supported and useful.
+  A complete magic plan must consider more than summoning rituals. Verify custom
+  effects against the manual, catalog and engine; do not invent unsupported effects.
+  Document deliberate omissions and how vanilla spells support the intended play.
+- Recruitment geography: evaluate ordinary forts, capital sites, non-fort and
+  terrain recruitment. Use location restrictions when they express the theme and
+  create a useful choice. Record what is available where and verify the saved
+  references; do not force special recruitment into every nation.
+- Natural progression: trace each signature spell from recruited caster paths and
+  random probabilities through research, boosters, forging access, gem income and
+  cost. Test normal production access and timing where tools permit. Accelerated
+  fixtures may prove execution but do not prove normal access, affordability or
+  balance. Report those evidence categories and any untested limits separately.
+- Presentation: review descriptions, equipment, temple appearance, site looks,
+  flag, banner and sprites together for thematic consistency. Select supported
+  built-in temple/site visuals deliberately. Site illustrations made for a browser
+  or guide are separate presentation assets, not custom in-game site textures.
+
+Prevention check: before final export, reconcile these five areas against the
+saved mod and test evidence. Correct defects or identify the exact unverified
+item; do not describe an accelerated or static result as normal gameplay proof.
+
+## National Features: vanilla presentation format
+
+For every generated nation, write the in-game National Features text in nation
+`#summary` using the vanilla labelled-line format shown by EA Arcoscephale. Keep
+the labels, spelling and order below; write original, nation-specific content.
+Do not replace this section with a short promotional sentence or lore paragraph.
+
+```text
+Race: <population and mechanically relevant racial traits>
+Military: <main troop types, sacreds and distinctive military capabilities>
+Magic: <main paths, secondary access and distinctive research or magic rules>
+Priests: <priest strength and distinctive priest abilities>
+Dominion: <special dominion effects, or explicitly no special effects>
+Buildings: <actual fort types and building cost or construction exceptions>
+```
+
+Use one readable line per category, with concise comma-separated facts and short
+parenthetical explanations where needed, matching the vanilla example's structure
+and useful detail. Cover all six categories even for a nation with ordinary priests
+or no special dominion. Do not invent mechanics to fill a line. Distinguish reliable
+magic access from random, rare, capital-only or summon-dependent access. Mention
+important recruitment restrictions and weaknesses where they change the summary.
+
+The engine may append a Buildings line automatically. Inspect the actual in-game
+screen and let the engine supply that line when it already reports the correct
+information; do not create a duplicate or contradictory Buildings entry. The final
+display must cover all six categories in the order above. Verify supported text
+line breaks against the modding manual and engine rather than assuming Markdown,
+HTML or literal backslash-n escapes render correctly.
+
+Keep `#descr` as the fuller nation lore and `#brief` as the short popup description;
+neither substitutes for `#summary`. Before export, reconcile every claim against
+saved nation commands, recruits, mage/priest paths, sites and inherited defaults.
+Before delivery, check the nation-selection screen for label order, line breaks,
+readability, completeness and duplicate Buildings text. If that screen cannot be
+checked, report presentation as unverified. Sparse unlabelled summaries fail this
+generation requirement even when the mod validates.
+
+## Generation quality gates
+
+Scope: complete nation generation and revisions. Apply these reusable checks before
+bulk artwork and repeat them against the saved source before delivery.
+
+- Recruitment choices: for overlapping troops, state a situation favouring each
+  choice and compare equal gold investment and equal production time, accounting
+  for resources, recruitment points and upkeep. Test representative alternatives
+  where the engine permits; do not pad the roster with dominated variants or erase
+  intentional cheap-to-elite progression merely to make every unit unique.
+- Routine support access: identify which recruitable casters can repeatedly use
+  the intended army support without temporary gem boosting. Record capital-only,
+  slow-recruit, commander-point and path-random bottlenecks. Keep deliberate
+  scarcity when it supports the design, but do not describe exceptional access as
+  ordinary support or silently give every nation stronger mages.
+- Army leadership: map each advertised army composition to an available commander
+  with the required living, magical and undead command capacity, stealth, movement
+  and terrain/water survival. Check recruitable availability and price, not just
+  hero or late-summon possibilities. Do not assume Holy paths grant undead command;
+  verify nation-specific prerequisites and actual capacity against the manual and
+  engine. Reconcile source, roster, guide and displayed totals before delivery.
+- Early identity: make at least one theme-shaped decision available during opening
+  or first-war play, through recruitment, geography, support or a bounded mechanic.
+  A late capstone may extend that identity; it must not be the only distinctive
+  promise in the brief. Do not lower research or add free units automatically.
+- Signature magic progression: verify the complete recruited caster -> research
+  -> forge -> equip -> cast route for any required booster. Record actual forging
+  charges, spell charges and competing gem uses. Demonstrate it under ordinary
+  production rules when possible; unlocking research or seeding a boosted caster
+  proves only fixture execution. Report any untested link explicitly.
+- Summon value: compare each summon against accessible same-era alternatives at
+  equal gem investment, including caster turns, research, upkeep, leadership,
+  replenishment and battlefield role. Test a representative use before numerical
+  balance claims; low headcount alone is not proof of poor value.
+  Show saving time from starting income and competing uses of that same gem path,
+  including forging, battle magic and other summons. Explain who can lead and
+  replenish the force. Distinguish a deliberately scarce investment from a useful
+  routine purchase; neither price nor a successful cast proves worthwhile value.
+- Creature defaults: audit newly defined units as well as copied units. Choose
+  age/max age, size, anatomy/item slots, food needs, encumbrance, resistances,
+  leadership and costs by creature type. Human defaults must not automatically
+  propagate to gods, undead, animals or alternate forms. Verify documented engine
+  behaviour rather than assuming a trait makes an irrelevant default harmless.
+- National spell purpose: explain what each spell adds beyond vanilla access.
+  For copied effects, record the original and changed school, research, paths,
+  fatigue, gem cost and targeting. Retain intentional variants with a thematic
+  or strategic rationale; a renamed vanilla effect alone does not establish depth.
+- Individual lore: write a distinct origin, custom, oath, relationship or mythic
+  consequence for every troop, commander, summon, hero and pretender. Connect it
+  to the role where useful. Keep practical instructions clear, but do not substitute
+  role labels followed by a repeated national sentence for individual descriptions.
+  Review the actual saved descriptions for repetition before final export.
+- Evidence capture: configure checkpoint collection before the first host. Save
+  settings, production source hashes, recoverable saves and per-turn score/log
+  receipts. At turns 12, 24 and 36 capture income, upkeep, forts, research/unlocks,
+  living mage counts, gem income/stocks/spending and surviving army composition
+  where available. Preserve missing fields explicitly; do not substitute cumulative
+  purchases for living mages or combine separate campaigns into one trajectory.
+
+Prevention check: reconcile planned roles and leadership, early identity, caster
+access, creature defaults, individual lore, spell changes and progression links
+against actual source, delivery documentation and evidence. Rank
+remaining design hypotheses separately from proven defects and testing gaps.
 
 ## Design criteria and prevention checks
 

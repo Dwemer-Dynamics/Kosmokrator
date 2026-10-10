@@ -1,4 +1,55 @@
-# Hebdomad unit asset rules
+# Nation asset rules and Hebdomad reference
+
+## Default for every new nation
+
+Generate a complete original asset set from the user's nation prompt unless the
+user explicitly asks for reused artwork or a prototype. This applies to all new
+nations; the Hebdomad examples below are style references, not a restriction on
+which nations receive artwork.
+
+- Create an original idle/attack pair for every troop, commander, summon, hero,
+  pretender and alternate form that appears in the nation.
+- Create an original nation flag and custom mod banner. Include other artwork
+  required by the requested content; do not add unrelated assets or mechanics.
+- Record a checklist mapping each roster ID/form to its two frame paths, and list
+  the flag, banner and additional assets. Derive silhouettes, palette and equipment
+  from the user's theme and the resolved gameplay loadouts.
+- Use built-in imagegen for generated bitmap artwork and the production rules
+  below. Keep exact prompts, raw outputs, hashes and mechanical conversion records.
+- Treat stock sprites and generic/default graphics as temporary placeholders.
+  Replace them before completion unless the user explicitly authorized reuse.
+- Before export, inspect native-size and enlarged art, verify dimensions, binary
+  alpha, baselines and equipment consistency, and confirm every source reference
+  and exported file. Remove `#copyspr` before adding custom sprite paths.
+- If any required asset is missing or generation is blocked, name the unfinished
+  assets. Do not label a placeholder-art build as a complete nation.
+
+## Magic item and spell artwork
+
+For every newly created magic item, generate an original icon derived from its
+name, lore and function, unless the user explicitly requests reused artwork or a
+prototype. Track the item definition and icon path in the asset checklist. Use the
+supported item `#spr` command with a centered 32x32 or 64x64 image; keep the item
+itself within 40x40 pixels and use explicit alpha transparency. Review at native
+size and enlarged, verify the saved reference and exported file, and retain the
+prompt and original generation. Remove conflicting sprite-copy commands before
+setting the custom icon. Missing required item icons are unfinished assets.
+
+Spell definitions do not require an invented icon or custom effect texture.
+Generate the original idle/attack artwork for every creature or form introduced
+by a spell. Add other spell presentation artwork only when the requested content
+uses a supported asset or the user asks for a separate illustration.
+
+## Site and temple presentation
+
+Choose theme-appropriate supported built-in site and temple visuals as part of
+the nation presentation review. The documented site command `#look` selects a
+built-in sprite (-1 for default, 0-9 for specific looks); it is not an image path.
+Do not claim generated site illustrations replace in-game site textures. Browser
+or guide illustrations are separate assets and are only required when requested.
+Record the selected visuals and distinguish file inspection from in-game review.
+
+## Hebdomad worked reference
 
 Current local expansion art: [hebdomad-expansion-v1](../assets/hebdomad-expansion-v1/preview.png),
 eight additional unique idle/attack pairs. Original v6 and pretender art remain unchanged.
