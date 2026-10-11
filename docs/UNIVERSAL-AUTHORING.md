@@ -1,10 +1,13 @@
 # Universal authoring foundation
 
 Kosmokrator supports nine editing contexts: monsters, nations, sites, spells, weapons, armour, items,
-mercenaries and events. Dedicated forms remain the quickest way to edit common fields. **Create & edit →
-Advanced commands** exposes the wider manual command index. Use the grouped **Section** selector to switch
-between definitions, Heroes and tools. Items, Mercenaries and Events have their own entries in that selector.
+mercenaries and events. Dedicated forms remain the quickest way to edit common fields. **Advanced tools → All manual commands** exposes the wider manual command index. Use the **Tool** selector
+for Weapons, Armour, Heroes, Events, Reference lookup and Playtests. Spells, Sites, Items and Mercenaries
+are edited in their own content sections; raw line editors are labelled **Advanced**.
 Common-field editors appear near the definition heading; raw catalog details stay collapsed until needed.
+Mercenary companies also have **Mercenaries → New company** with a structured form; it
+writes names for `#com`, `#unit` and `#item` as manual p.63 documents, and the advanced editor refuses numbers for
+those three. Agents use `author_state`/`author_save` with kind `mercs` for the same structured path.
 
 ## Command coverage and safe saves
 

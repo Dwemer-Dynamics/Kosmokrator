@@ -120,6 +120,9 @@ class Kosmokrator:
         if kind == 'dependencies':
             from .dependencies import dependency_state
             return dependency_state(self.ws, project)
+        if kind == 'mercs':
+            from .mercs import merc_state
+            return merc_state(self.ws, project, self._project_catalog(project))
         if kind.startswith('commands:'):
             from .command_edit import command_state
             return command_state(self.ws, project, kind.split(':', 1)[1], self._project_catalog(project))
@@ -150,6 +153,9 @@ class Kosmokrator:
         if kind == 'dependencies':
             from .dependencies import save_dependencies
             return save_dependencies(self.ws, project, body)
+        if kind == 'mercs':
+            from .mercs import save_merc
+            return save_merc(self.ws, project, self._project_catalog(project), body)
         if kind.startswith('commands:'):
             from .command_edit import save_commands
             return save_commands(self.ws, project, self._project_catalog(project), {**body, 'context': kind.split(':', 1)[1]})

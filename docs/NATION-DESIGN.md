@@ -75,6 +75,13 @@ and delivery report. Do not erase the nation's weaknesses to satisfy a checklist
   built-in temple/site visuals deliberately. Site illustrations made for a browser
   or guide are separate presentation assets, not custom in-game site textures.
 
+- Mercenary companies (optional): custom `#newmerc` companies are supported content, not a requirement.
+  There is no mandatory count, and a nation does not get an automatic company. Add one only when it serves
+  the theme or the world, and record it in the brief. A company references existing or new monster
+  definitions by name (manual p.63) and has no sprite command of its own; any new monster it introduces needs
+  its own original idle and attack artwork under the asset rules. Use names that are unique so `#com` and
+  `#unit` cannot pick a different monster with the same name.
+
 Prevention check: before final export, reconcile these five areas against the
 saved mod and test evidence. Correct defects or identify the exact unverified
 item; do not describe an accelerated or static result as normal gameplay proof.

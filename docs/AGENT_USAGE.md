@@ -8,6 +8,10 @@ Read-only `author_state` kinds now include `inheritance`, `compatibility`, `bala
 and `balance:<nation IDs separated by commas>`. These return source-backed reports;
 they do not change the mod or simulate combat. See [inheritance](INHERITANCE.md),
 [compatibility](COMPATIBILITY.md) and [comparisons](BALANCE-COMPARISONS.md).
+Kind `mercs` lists and appends optional `#newmerc` companies with structured, manual-documented fields; see
+[mercenary companies](WEB-BROWSER.md#mercenary-companies) and the optional-merc rule in
+[NATION-DESIGN.md](NATION-DESIGN.md#generation-requirements). `search_game_data` and the browser's read-only
+**Vanilla inspector** also cover the `mercs` and `events` catalog tables.
 Use `map-builds` with `author_state`/`author_save` for the
 [agent map workflow](AGENT-MAPS.md): brief, staged output review and guarded import.
 

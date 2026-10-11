@@ -25,6 +25,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import threading
 from pathlib import Path
 from typing import Any
@@ -103,26 +104,45 @@ def _pointer(project: Project) -> str | None:
     return sid
 
 
-def _walk_files(base: Path) -> dict[str, Path]:
-    """Regular files under base keyed by posix relative path; any link or junction is refused."""
-    out: dict[str, Path] = {}
+_REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def _walk_entries(base: Path) -> dict[str, tuple[Path, int]]:
+    """(path, size) of every regular file under base keyed by posix relative path; any link or junction is refused.
+
+    Uses os.scandir, whose entries carry the link and reparse-point attributes (and, on Windows, the size) from the
+    directory listing itself, instead of one lstat per entry through pathlib. The refusal rules match is_link."""
+    out: dict[str, tuple[Path, int]] = {}
     if is_link(base):
         raise KosmoError("reference_invalid", "A snapshot folder is a link or junction.")
-    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
-        d = Path(dirpath)
-        for name in [*dirnames, *filenames]:
-            if is_link(d / name):
-                raise KosmoError("reference_invalid", "The snapshot contains a link or junction.",
-                                 path=(d / name).relative_to(base).as_posix())
-        for name in filenames:
-            out[(d / name).relative_to(base).as_posix()] = d / name
+    stack = [(str(base), "")]
+    while stack:
+        folder, prefix = stack.pop()
+        with os.scandir(folder) as it:
+            for entry in it:
+                rel = prefix + entry.name
+                st = entry.stat(follow_symlinks=False)
+                if stat.S_ISLNK(st.st_mode) or getattr(st, "st_file_attributes", 0) & _REPARSE:
+                    raise KosmoError("reference_invalid", "The snapshot contains a link or junction.", path=rel)
+                if stat.S_ISDIR(st.st_mode):
+                    stack.append((entry.path, rel + "/"))
+                else:
+                    out[rel] = (Path(entry.path), st.st_size)
         if len(out) > MAX_FILES + 8:
             raise KosmoError("reference_invalid", "The snapshot holds more files than allowed.")
     return out
 
 
+def _walk_files(base: Path) -> dict[str, Path]:
+    """Regular files under base keyed by posix relative path; any link or junction is refused."""
+    return {rel: path for rel, (path, _size) in _walk_entries(base).items()}
+
+
 _LOAD_LOCK = threading.Lock()
 _LOADED: dict[tuple, tuple[Catalog, dict[str, Any]]] = {}
+# One verification at a time per snapshot folder: concurrent first requests (the inspector opens with several)
+# wait for that result instead of each hashing the same files.
+_VERIFYING: dict[str, threading.Lock] = {}
 # Recorded SHA-256 of every snapshot file, keyed by the snapshot catalog root, for verified image reads.
 _FILE_SHA: dict[str, dict[str, str]] = {}
 
@@ -140,7 +160,8 @@ def _load_snapshot(project: Project, sid: str) -> tuple[Catalog, dict[str, Any]]
     folders = [snap, snap / "catalog", gamedata_dir, snap / "catalog" / "images", snap / "trait-icons",
                *(snap / "catalog" / "images" / f for f in ("magicicons", "abilityicons", "items", "sprites"))]
     try:
-        table_stats = tuple((p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in sorted(gamedata_dir.iterdir()))
+        table_stats = tuple((p.name, s.st_size, s.st_mtime_ns) for p in sorted(gamedata_dir.iterdir())
+                            for s in (p.stat(),))
         folder_stats = tuple((os.lstat(f).st_mtime_ns, is_link(f)) if os.path.lexists(f) else None for f in folders)
     except OSError:
         table_stats, folder_stats = (), ()
@@ -148,6 +169,18 @@ def _load_snapshot(project: Project, sid: str) -> tuple[Catalog, dict[str, Any]]
     with _LOAD_LOCK:
         if key in _LOADED:
             return _LOADED[key]
+        if len(_VERIFYING) > 64:
+            _VERIFYING.clear()
+        verifying = _VERIFYING.setdefault(str(snap), threading.Lock())
+    with verifying:
+        with _LOAD_LOCK:
+            if key in _LOADED:
+                return _LOADED[key]
+        return _verify_snapshot(project, sid, snap, man_path, st, key)
+
+
+def _verify_snapshot(project: Project, sid: str, snap: Path, man_path: Path, st: os.stat_result, key: tuple
+                     ) -> tuple[Catalog, dict[str, Any]]:
     if st.st_size > MAX_MANIFEST_BYTES:
         raise KosmoError("reference_invalid", "The snapshot manifest is too large.")
     try:
@@ -158,17 +191,17 @@ def _load_snapshot(project: Project, sid: str) -> tuple[Catalog, dict[str, Any]]
             or not isinstance(manifest.get("files"), list):
         raise KosmoError("reference_invalid", "The snapshot manifest has an unexpected format.")
     listed = {f.get("path"): f for f in manifest["files"] if isinstance(f, dict)}
-    found = _walk_files(snap)
+    found = _walk_entries(snap)
     found.pop(MANIFEST, None)
     if set(found) != set(listed):
         extra, missing = sorted(set(found) - set(listed)), sorted(set(listed) - set(found))
         raise KosmoError("reference_invalid", "Snapshot files do not match the manifest.",
                          problems=[*(f"unlisted: {p}" for p in extra[:10]), *(f"missing: {p}" for p in missing[:10])])
-    for rel, path in found.items():
+    for rel, (path, size) in found.items():
         rec = listed[rel]
         if rel.startswith("catalog/images/"):
             # Catalog images: size here, SHA-256 on every read (read_verified), so large sets load quickly.
-            ok = path.stat().st_size == rec.get("bytes")
+            ok = size == rec.get("bytes")
         else:
             data = path.read_bytes()
             ok = len(data) == rec.get("bytes") and sha256_bytes(data) == rec.get("sha256")

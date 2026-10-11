@@ -96,6 +96,16 @@ RECRUIT_WHERE = {
     "homemon": "Recruitable only where this site is (start sites are at the capital)",
     "homecom": "Recruitable only where this site is (start sites are at the capital)",
     "mon": "Recruitable where this site is", "com": "Recruitable where this site is",
+    # Terrain, foreign and underwater recruitment (manual 6.36 p.44), for the commands listed in NATION_*_CMDS above.
+    "addforeignunit": "Recruitable only in provinces without a fort",
+    "addforeigncom": "Recruitable only in provinces without a fort",
+    **{f"{t}rec": f"Recruitable in {t} provinces without a fort" for t in ("forest", "mountain", "swamp", "waste", "cave", "coast")},
+    **{f"{t}com": f"Recruitable in {t} provinces, with or without a fort" for t in ("forest", "mountain", "swamp", "waste", "cave")},
+    "uwrec": "Recruitable in underwater forts", "uwcom": "Recruitable in underwater forts",
+    "landrec": "Recruitable in overwater forts (underwater nation)", "landcom": "Recruitable in overwater forts (underwater nation)",
+    # Deprecated in manual 6.36 without a documented effect; listed so the roster is not silently short. Confirm in game.
+    **{f"coastunit{i}": "Coastal recruitment (deprecated command; confirm in game)" for i in (1, 2, 3)},
+    **{f"coastcom{i}": "Coastal recruitment (deprecated command; confirm in game)" for i in (1, 2)},
 }
 
 _INDEX_LOCK = threading.Lock()

@@ -53,6 +53,9 @@ def _render(context, command, values):
             raise KosmoError('bad_argument', f'#{name}: {arg["name"]} needs a number.')
         if reference and type(value) not in (int, str):
             raise KosmoError('bad_argument', f'#{name}: use an ID or quoted name.')
+        # Mercenary #com, #unit and #item are documented with names only (manual p.63).
+        if context == 'merc' and name in ('com', 'unit', 'item') and not isinstance(value, str):
+            raise KosmoError('bad_argument', f'#{name}: the manual takes a quoted name here, not a number.')
         if typ in ('str', 'img', 'file', 'sitename') and not isinstance(value, str):
             raise KosmoError('bad_argument', f'#{name}: {arg["name"]} needs text.')
         if isinstance(value, str):

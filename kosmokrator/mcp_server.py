@@ -97,6 +97,7 @@ def build_server(k: Kosmokrator):
         """State for commands:<context>, dependencies, maps, maps:<id>, map-builds, content or playtests.
         Read-only reports: inheritance, compatibility and balance[:comma-separated nation IDs].
         reference-snapshot reports the project's local reference snapshot (state, coverage, missing data).
+        mercs lists #newmerc companies with #com/#unit/#item names resolved and the structured form options.
         Includes source revision, reviewed schemas, authored values and preserved unknown lines."""
         return envelope(k.author_state, project, kind)
 
@@ -106,6 +107,8 @@ def build_server(k: Kosmokrator):
         or maps:import. map-builds supports create/review/accept for agent-produced bundles.
         reference-snapshot (expected_sha256, expected_snapshot, sprites, preview) copies the catalog data and local
         reference art the project needs into its .kosmokrator folder; it is never exported.
+        mercs (expected_sha256, preview, company) appends one #newmerc company; commander/troop/items are
+        {origin: catalog, id} or {origin: project, key} and are written as their exact names (manual p.63).
         Mod edits need expected_sha256; map edits and jobs need expected_revision; acceptance also binds output.
         Uses project locking, backups and reviewed command forms."""
         return envelope(k.author_save, project, kind, body)

@@ -27,6 +27,13 @@ expected SHA-256 and expected snapshot id). A project with a snapshot reads only
 including the project-scoped icon routes .../gem-icons, path-icons, ability-icons, item-icons and trait-icons.
 Exports and Workshop folders never include it.
 
+Vanilla inspector (inspector.py): GET .../inspector, .../inspector/<category> (q, repeatable c=field:op[:value],
+sort, order, page, per_page, age, nation, role; the original field/op/value filter still works), .../inspector/<category>/filters and
+.../inspector/<category>/<id> browse the catalog that project reads, read-only; images use the existing id-based sprite
+and icon routes. Mercenary
+companies (mercs.py): GET .../mercs lists the project's #newmerc blocks and POST .../mercs previews or appends one
+structured company through the guarded advanced-editor writer.
+
 Workshop preparation (workshop.py): POST .../workshop/prepare turns one existing export of the shown revision into
 <project>/exports/workshop/<id>/<slug>/ (exported files plus dom6ws.txt and banner.png) with a ZIP and a manifest
 beside it, and POST .../workshop/<id>/install copies that folder into the Dominions 6 mods folder fixed by the server
@@ -57,6 +64,9 @@ from .author import create_monster, create_nation, donor_search, upload_art
 from .content import (KINDS as CONTENT_KINDS, REF_CATS, content_state, heroes_state, reference_detail,
                       reference_search, save_content, save_heroes)
 from .command_edit import command_state, save_commands
+from .inspector import CATS as INSPECTOR_CATS, MAX_CONDITIONS as INSPECTOR_MAX_CONDITIONS, detail as inspector_detail, \
+    filter_meta as inspector_filters, list_rows as inspector_list, summary as inspector_summary
+from .mercs import merc_state, save_merc
 from .dependencies import dependency_state, save_dependencies
 from .maps import (list_maps, map_state, import_map, save_map, map_variant_image, map_source,
                    export_map, map_export_path)
@@ -114,6 +124,7 @@ IMPORT_ROUTE = "/api/import"
 MAX_EDIT_BYTES = 64 * 1024
 TOOLS_ROUTE_RE = re.compile(r"/api/tools/(domerger|nationgen|spritegen|mapnuke)/(preview|run)")
 REFERENCE_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/reference-snapshot")
+MERC_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/mercs")
 EQUIPMENT_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/monsters/(\d{1,6})/equipment")
 # Import uploads one .dm plus its assets as base64; bounded like the art route.
 MAX_IMPORT_BODY_BYTES = 6 * 1024 * 1024
@@ -275,7 +286,8 @@ class Handler(BaseHTTPRequestHandler):
             mb = re.fullmatch(r'/api/projects/([a-z][a-z0-9_]{1,47})/map-builds', self.path)
             mm = re.fullmatch(r'/api/projects/([a-z][a-z0-9_]{1,47})/maps/(import|[A-Za-z][A-Za-z0-9_]{0,47}/(?:edit|export))', self.path)
             mr = REFERENCE_ROUTE_RE.fullmatch(self.path)
-            if not (m or mx or mc or ma or mn or mco or mh or mp or mi or mt or me or mg or md or mm or mb or mw or mr):
+            mmerc = MERC_ROUTE_RE.fullmatch(self.path)
+            if not (m or mx or mc or ma or mn or mco or mh or mp or mi or mt or me or mg or md or mm or mb or mw or mr or mmerc):
                 return self._reject_write()
             limit = 180 * 1024 * 1024 if mm and mm.group(2) == 'import' else MAX_ART_BODY_BYTES if ma else MAX_IMPORT_BODY_BYTES if mi else MAX_EDIT_BYTES
             host = (self.headers.get("Host") or "").strip()
@@ -312,7 +324,7 @@ class Handler(BaseHTTPRequestHandler):
                 live, _err = self.state.catalog()
                 return self._json({"ok": True, "result": create_snapshot(self.state.workspace, mr.group(1), live, body)})
             # Project routes read the project's own reference snapshot when it has one.
-            scoped = next((x for x in (m, mx, mc, ma, mn, mco, mh, mp, me, mg, md, mm, mb) if x), None)
+            scoped = next((x for x in (m, mx, mc, ma, mn, mco, mh, mp, me, mg, md, mm, mb, mmerc) if x), None)
             cat, _err = self.state.catalog_for(scoped.group(1)) if scoped else self.state.catalog()
             if mb:
                 from .map_builds import save_map_build
@@ -325,6 +337,8 @@ class Handler(BaseHTTPRequestHandler):
                     ident, operation = action.split('/')
                     result = (save_map if operation == 'edit' else export_map)(self.state.workspace, slug, ident, body, cat)
                 return self._json({'ok': True, 'result': result})
+            if mmerc:
+                return self._json({"ok": True, "result": save_merc(self.state.workspace, mmerc.group(1), cat, body)})
             if mg:
                 return self._json({'ok': True, 'result': save_commands(self.state.workspace, mg.group(1), cat, body)})
             if md:
@@ -402,7 +416,9 @@ class Handler(BaseHTTPRequestHandler):
             segs = [unquote(s) for s in raw_path.split("/")[1:]]
             if any(s in (".", "..") or "\x00" in s for s in segs):
                 return self._error(HTTPStatus.BAD_REQUEST, "path_escape", "Path traversal is not allowed.")
-            query = {k: v[-1] for k, v in parse_qs(parts.query).items()}
+            multi = parse_qs(parts.query)
+            self._query_lists = multi  # repeatable parameters (the inspector's c=) read the full list
+            query = {k: v[-1] for k, v in multi.items()}
             self._route(segs, query)
         except KosmoError as exc:
             status = HTTPStatus.NOT_FOUND if exc.code.endswith(("missing", "not_a_file")) else HTTPStatus.BAD_REQUEST
@@ -576,6 +592,31 @@ class Handler(BaseHTTPRequestHandler):
             open_project(ws, slug)
             cat, _err = self.state.catalog_for(slug)
             return self._json({"ok": True, "result": reference_detail(cat, rest[1], int(rest[2]))})
+        if head == "inspector" and 1 <= len(rest) <= 3:
+            open_project(ws, slug)
+            cat, _err = self.state.catalog_for(slug)
+            if len(rest) == 1:
+                return self._json({"ok": True, "result": inspector_summary(cat)})
+            if rest[1] not in INSPECTOR_CATS:
+                return self._error(HTTPStatus.NOT_FOUND, "not_found", "Unknown inspector category.")
+            if len(rest) == 2:
+                conds = getattr(self, "_query_lists", {}).get("c", [])
+                if len(conds) > INSPECTOR_MAX_CONDITIONS:
+                    return self._error(HTTPStatus.BAD_REQUEST, "bad_query",
+                                       f"At most {INSPECTOR_MAX_CONDITIONS} conditions.", field="c")
+                return self._json({"ok": True, "result": inspector_list(
+                    cat, rest[1], q.get("q", ""), q.get("field", ""), q.get("op", ""), q.get("value", ""),
+                    q.get("page", "1"), q.get("per_page", ""), conditions=conds, sort=q.get("sort", ""),
+                    order=q.get("order", ""), age=q.get("age", ""), nation=q.get("nation", ""),
+                    role=q.get("role", ""))})
+            if rest[2] == "filters":
+                return self._json({"ok": True, "result": inspector_filters(cat, rest[1])})
+            if not re.fullmatch(r"\d{1,6}", rest[2]):
+                return self._error(HTTPStatus.NOT_FOUND, "not_found", "Inspector ids are whole numbers.")
+            return self._json({"ok": True, "result": inspector_detail(cat, slug, rest[1], int(rest[2]))})
+        if head == "mercs" and len(rest) == 1:
+            cat, _err = self.state.catalog_for(slug)
+            return self._json({"ok": True, "result": merc_state(ws, slug, cat)})
         if head == "playtests" and len(rest) == 1:
             return self._json({"ok": True, "result": list_playtests(ws, slug)})
         if head == "nations" and len(rest) == 3 and rest[2] == "heroes" and re.fullmatch(r"\d{1,3}", rest[1]):
