@@ -77,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--category", default="all",
                    choices=["all", "units", "nations", "weapons", "armors", "sites", "spells", "items"])
     p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--project", help="Search this project's reference snapshot when it has one")
 
     p = sub.add_parser("validate", parents=[common], help="Static validation (errors/warnings/unverified)")
     p.add_argument("project")
@@ -103,7 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("author", parents=[common], help="Show or preview/save sites, spells, weapons, armour, "
                                                         "nation heroes or playtest records")
     p.add_argument("project")
-    p.add_argument("kind", help="sites | spells | weapons | armors | heroes:<nation id> | playtests | commands:<context> | dependencies | inheritance | compatibility | balance[:nation IDs] | map-builds | maps | maps:<id> | maps:import")
+    p.add_argument("kind", help="sites | spells | weapons | armors | heroes:<nation id> | playtests | commands:<context> | dependencies | inheritance | compatibility | balance[:nation IDs] | map-builds | maps | maps:<id> | maps:import | reference-snapshot")
     p.add_argument("--body-file", help="JSON request (as for the web route; '-' for stdin). Omit to show state")
 
     p = sub.add_parser('import-map', parents=[common], help='Import a map bundle into an existing project')
@@ -120,6 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("category", choices=["spells", "sites", "weapons", "armors"])
     p.add_argument("query", nargs="?")
     p.add_argument("--id", type=int, help="Show one catalog row with labelled fields (spells: effect/summon)")
+    p.add_argument("--project", help="Read this project's reference snapshot when it has one")
 
     sub.add_parser("mcp", parents=[common], help="Run the MCP stdio server (needs the 'mcp' extra)")
 
@@ -227,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
         elif c == "allocate":
             res = envelope(k.allocate_ids, args.project, args.kind, args.count, args.label, args.dep)
         elif c == "search":
-            res = envelope(k.search_game_data, args.query, args.category, args.limit)
+            res = envelope(k.search_game_data, args.query, args.category, args.limit, args.project)
         elif c == "validate":
             res = envelope(k.validate_mod, args.project, args.dep)
         elif c == "export":
@@ -250,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
         elif c == 'view':
             res = envelope(k.project_view, args.project)
         elif c == "reference":
-            res = envelope(k.reference, args.category, args.query, args.id)
+            res = envelope(k.reference, args.category, args.query, args.id, args.project)
         elif c == "tools":
             if args.action == "status":
                 res = envelope(k.external_tools)

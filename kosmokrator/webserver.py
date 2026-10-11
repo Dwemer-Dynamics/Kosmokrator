@@ -21,6 +21,19 @@ Bounded content authoring (content.py, playtest.py, importdm.py) uses the same c
 project from an uploaded .dm and assets (never overwrites). GET /api/tools only reports administrator-configured
 external tool status; nothing is executed from the browser.
 
+Project reference snapshots (reference.py): POST .../reference-snapshot previews or writes a self-contained copy of
+the catalog tables and local reference art one project needs under <project>/.kosmokrator/reference (project lock,
+expected SHA-256 and expected snapshot id). A project with a snapshot reads only that snapshot in every project route,
+including the project-scoped icon routes .../gem-icons, path-icons, ability-icons, item-icons and trait-icons.
+Exports and Workshop folders never include it.
+
+Vanilla inspector (inspector.py): GET .../inspector, .../inspector/<category> (q, repeatable c=field:op[:value],
+sort, order, page, per_page, age, nation, role; the original field/op/value filter still works), .../inspector/<category>/filters and
+.../inspector/<category>/<id> browse the catalog that project reads, read-only; images use the existing id-based sprite
+and icon routes. Mercenary
+companies (mercs.py): GET .../mercs lists the project's #newmerc blocks and POST .../mercs previews or appends one
+structured company through the guarded advanced-editor writer.
+
 Workshop preparation (workshop.py): POST .../workshop/prepare turns one existing export of the shown revision into
 <project>/exports/workshop/<id>/<slug>/ (exported files plus dom6ws.txt and banner.png) with a ZIP and a manifest
 beside it, and POST .../workshop/<id>/install copies that folder into the Dominions 6 mods folder fixed by the server
@@ -51,6 +64,9 @@ from .author import create_monster, create_nation, donor_search, upload_art
 from .content import (KINDS as CONTENT_KINDS, REF_CATS, content_state, heroes_state, reference_detail,
                       reference_search, save_content, save_heroes)
 from .command_edit import command_state, save_commands
+from .inspector import CATS as INSPECTOR_CATS, MAX_CONDITIONS as INSPECTOR_MAX_CONDITIONS, detail as inspector_detail, \
+    filter_meta as inspector_filters, list_rows as inspector_list, summary as inspector_summary
+from .mercs import merc_state, save_merc
 from .dependencies import dependency_state, save_dependencies
 from .maps import (list_maps, map_state, import_map, save_map, map_variant_image, map_source,
                    export_map, map_export_path)
@@ -69,6 +85,8 @@ from .tga import decode_tga, encode_png
 from .integrations import tool_status, preview_tool, run_tool, list_tool_runs, tool_receipt, tool_archive
 from .loadout import equipment_state, save_equipment
 from .trait_icons import load_icon_cache
+from .reference import (create_snapshot, read_verified, reference_status, resolve_catalog, snapshot_trait_icon_dir,
+                        workspace_reference_summary)
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 # Fixed allow-list: the static route never maps request text onto the filesystem.
@@ -105,6 +123,8 @@ PLAYTEST_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/playtests"
 IMPORT_ROUTE = "/api/import"
 MAX_EDIT_BYTES = 64 * 1024
 TOOLS_ROUTE_RE = re.compile(r"/api/tools/(domerger|nationgen|spritegen|mapnuke)/(preview|run)")
+REFERENCE_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/reference-snapshot")
+MERC_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/mercs")
 EQUIPMENT_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/monsters/(\d{1,6})/equipment")
 # Import uploads one .dm plus its assets as base64; bounded like the art route.
 MAX_IMPORT_BODY_BYTES = 6 * 1024 * 1024
@@ -123,7 +143,8 @@ EDIT_STATUS = {"sha_mismatch": HTTPStatus.CONFLICT, "project_locked": HTTPStatus
                "install_unavailable": HTTPStatus.CONFLICT,
                "project_exists": HTTPStatus.CONFLICT,
                "validation_failed": HTTPStatus.UNPROCESSABLE_ENTITY,
-               "object_missing": HTTPStatus.NOT_FOUND, "project_missing": HTTPStatus.NOT_FOUND}
+               "object_missing": HTTPStatus.NOT_FOUND, "project_missing": HTTPStatus.NOT_FOUND,
+               "reference_changed": HTTPStatus.CONFLICT, "reference_too_large": HTTPStatus.REQUEST_ENTITY_TOO_LARGE}
 EDIT_STATUS.update(object_in_use=HTTPStatus.CONFLICT, id_conflict=HTTPStatus.CONFLICT)
 # Only these error details are echoed to the browser (no absolute, lock or temp paths).
 SAFE_DETAILS = {"lines", "field", "blocked", "problems", "expected", "actual", "counts", "errors", "validation"}
@@ -154,6 +175,7 @@ class BrowserState:
             self.docs = d.resolve()
         self.cache = ModelCache()
         self.trait_icons, self.trait_icon_images = load_icon_cache(self.workspace)
+        self._snapshot_icons: dict[tuple[str, str], tuple[dict[str, Any], dict[str, bytes]]] = {}
         self.csrf = secrets.token_urlsafe(32)  # per server process; only ever sent inside index.html
         # The Workshop install destination is fixed when the server starts; requests can never name a path.
         self.mods_env = {k: v for k, v in os.environ.items() if k in (MODS_ENV, "APPDATA")}
@@ -167,6 +189,25 @@ class BrowserState:
             return load_catalog(self.catalog_arg, required=True), None
         except KosmoError as exc:
             return None, exc.to_dict()
+
+    def catalog_for(self, slug: str) -> tuple[Any, dict[str, Any] | None]:
+        """The catalog one project reads: its verified reference snapshot if it has one, else the live catalog."""
+        live, err = self.catalog()
+        return resolve_catalog(self.workspace, slug, live, err)
+
+    def trait_icons_for(self, slug: str) -> tuple[dict[str, Any], dict[str, bytes]]:
+        """Native UI icons for one project: its snapshot copy when present, else the verified workspace cache."""
+        found = snapshot_trait_icon_dir(self.workspace, slug)
+        if found is None:
+            icons = {k: {**v, "url": f"/api/projects/{slug}/trait-icons/{k}.png"} for k, v in self.trait_icons.items()}
+            return icons, self.trait_icon_images
+        sid, path = found
+        key = (slug, sid)  # a copied project folder keeps its snapshot id
+        if key not in self._snapshot_icons:
+            if len(self._snapshot_icons) > 16:
+                self._snapshot_icons.clear()
+            self._snapshot_icons[key] = load_icon_cache(self.workspace, path, f"/api/projects/{slug}/trait-icons")
+        return self._snapshot_icons[key]
 
     def global_docs(self) -> list[dict[str, Any]]:
         if not self.docs:
@@ -244,7 +285,9 @@ class Handler(BaseHTTPRequestHandler):
             md = re.fullmatch(r'/api/projects/([a-z][a-z0-9_]{1,47})/dependencies', self.path)
             mb = re.fullmatch(r'/api/projects/([a-z][a-z0-9_]{1,47})/map-builds', self.path)
             mm = re.fullmatch(r'/api/projects/([a-z][a-z0-9_]{1,47})/maps/(import|[A-Za-z][A-Za-z0-9_]{0,47}/(?:edit|export))', self.path)
-            if not (m or mx or mc or ma or mn or mco or mh or mp or mi or mt or me or mg or md or mm or mb or mw):
+            mr = REFERENCE_ROUTE_RE.fullmatch(self.path)
+            mmerc = MERC_ROUTE_RE.fullmatch(self.path)
+            if not (m or mx or mc or ma or mn or mco or mh or mp or mi or mt or me or mg or md or mm or mb or mw or mr or mmerc):
                 return self._reject_write()
             limit = 180 * 1024 * 1024 if mm and mm.group(2) == 'import' else MAX_ART_BODY_BYTES if ma else MAX_IMPORT_BODY_BYTES if mi else MAX_EDIT_BYTES
             host = (self.headers.get("Host") or "").strip()
@@ -277,7 +320,12 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     res = install_workshop(self.state.workspace, slug, mw.group(3), body, self.state.mods_config())
                 return self._json({"ok": True, "result": res})
-            cat, _err = self.state.catalog()
+            if mr:
+                live, _err = self.state.catalog()
+                return self._json({"ok": True, "result": create_snapshot(self.state.workspace, mr.group(1), live, body)})
+            # Project routes read the project's own reference snapshot when it has one.
+            scoped = next((x for x in (m, mx, mc, ma, mn, mco, mh, mp, me, mg, md, mm, mb, mmerc) if x), None)
+            cat, _err = self.state.catalog_for(scoped.group(1)) if scoped else self.state.catalog()
             if mb:
                 from .map_builds import save_map_build
                 return self._json({'ok':True,'result':save_map_build(self.state.workspace,mb.group(1),body,cat)})
@@ -289,6 +337,8 @@ class Handler(BaseHTTPRequestHandler):
                     ident, operation = action.split('/')
                     result = (save_map if operation == 'edit' else export_map)(self.state.workspace, slug, ident, body, cat)
                 return self._json({'ok': True, 'result': result})
+            if mmerc:
+                return self._json({"ok": True, "result": save_merc(self.state.workspace, mmerc.group(1), cat, body)})
             if mg:
                 return self._json({'ok': True, 'result': save_commands(self.state.workspace, mg.group(1), cat, body)})
             if md:
@@ -366,7 +416,9 @@ class Handler(BaseHTTPRequestHandler):
             segs = [unquote(s) for s in raw_path.split("/")[1:]]
             if any(s in (".", "..") or "\x00" in s for s in segs):
                 return self._error(HTTPStatus.BAD_REQUEST, "path_escape", "Path traversal is not allowed.")
-            query = {k: v[-1] for k, v in parse_qs(parts.query).items()}
+            multi = parse_qs(parts.query)
+            self._query_lists = multi  # repeatable parameters (the inspector's c=) read the full list
+            query = {k: v[-1] for k, v in multi.items()}
             self._route(segs, query)
         except KosmoError as exc:
             status = HTTPStatus.NOT_FOUND if exc.code.endswith(("missing", "not_a_file")) else HTTPStatus.BAD_REQUEST
@@ -396,33 +448,19 @@ class Handler(BaseHTTPRequestHandler):
                                  "workspace": str(st.workspace),
                                  "runtime": {"python_executable": sys.executable, "platform": sys.platform},
                                  "catalog": cat.meta if cat else None,
-                               "catalog_error": cat_err, "docs": st.global_docs()})
+                               "catalog_error": cat_err, "docs": st.global_docs(),
+                               "project_references": workspace_reference_summary(st.workspace, cat)})
         if api == ["projects"]:
             cat, cat_err = st.catalog()
-            res = list_projects(st.workspace, st.cache, cat)
+            res = list_projects(st.workspace, st.cache, cat, catalog_for=lambda s: st.catalog_for(s)[0])
             return self._json({"ok": True, **res, "catalog_error": cat_err},
                               download="projects.json" if dl else None)
         if api == ["tools"]:
             return self._json({"ok": True, "result": tool_status(st.workspace)})
         if api == ["trait-icons"]:
             return self._json({"ok": True, "icons": st.trait_icons})
-        if len(api) == 2 and api[0] == "trait-icons":
-            key = api[1][:-4] if api[1].endswith(".png") else ""
-            png = st.trait_icon_images.get(key)
-            if png is None:
-                return self._error(HTTPStatus.NOT_FOUND, "icon_missing", "No confirmed native icon for this trait.")
-            return self._send(200, png, "image/png")
-        if len(api) == 2 and api[0] == "gem-icons":
-            return self._gem_icon(api[1])
-        if len(api) == 2 and api[0] == "path-icons":
-            key = api[1][:-4] if api[1].endswith(".png") else ""
-            return self._catalog_icon("magicicons", f"Path_{key}.png" if key in PATH_ICON_PATHS else None)
-        if len(api) == 2 and api[0] == "ability-icons":
-            key = api[1][:-4] if api[1].endswith(".png") else ""
-            return self._catalog_icon("abilityicons", f"{key}.png" if key in ABILITY_ICON_NAMES else None)
-        if len(api) == 2 and api[0] == "item-icons":
-            mi = ITEM_ICON_RE.match(api[1])
-            return self._catalog_icon("items", f"item{int(mi.group(1))}.png" if mi else None)
+        if len(api) == 2 and api[0] in ("trait-icons", "gem-icons", "path-icons", "ability-icons", "item-icons"):
+            return self._icon(api[0], api[1], None)
         if api == ["tools", "runs"]:
             return self._json({"ok": True, "result": list_tool_runs(st.workspace)})
         if len(api) in (3, 4) and api[:2] == ["tools", "runs"]:
@@ -453,9 +491,11 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, data, STATIC[name])
 
     def _model(self, slug: str) -> dict[str, Any]:
-        cat, cat_err = self.state.catalog()
+        cat, cat_err = self.state.catalog_for(slug)
         model = self.state.cache.get(self.state.workspace, slug, cat)
-        return {**model, "catalog_error": cat_err}
+        live, _live_err = self.state.catalog()
+        return {**model, "catalog_error": cat_err,
+                "reference": reference_status(self.state.workspace, slug, live, model)}
 
     def _latest_export(self, slug: str) -> dict[str, Any]:
         """The newest export, read fresh on every request (exports are outside the model cache's fingerprint)."""
@@ -467,7 +507,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _project(self, slug: str, rest: list[str], q: dict[str, str], dl: bool) -> None:
         if len(rest) == 3 and rest[0] == "monsters" and rest[1].isdigit() and rest[2] == "equipment":
-            cat, _ = self.state.catalog()
+            cat, _ = self.state.catalog_for(slug)
             return self._json({"ok": True, "result": equipment_state(self.state.workspace, slug, int(rest[1]), cat)})
         ws = self.state.workspace
         if not rest:
@@ -482,10 +522,10 @@ class Handler(BaseHTTPRequestHandler):
             refs = q.get('references')
             if refs is not None and (not re.fullmatch(r'\d+(?:,\d+){0,11}',refs)):
                 raise KosmoError('bad_request','references must contain up to 12 comma-separated nation IDs.')
-            cat, _err = self.state.catalog()
+            cat, _err = self.state.catalog_for(slug)
             return self._json({'ok':True,'result':balance_report(self._model(slug),cat,[int(x) for x in refs.split(',')] if refs else None)})
         if head == 'maps':
-            cat, _err = self.state.catalog()
+            cat, _err = self.state.catalog_for(slug)
             if len(rest) == 1:
                 return self._json({'ok': True, 'result': list_maps(ws, slug, cat)})
             ident = rest[1]
@@ -511,7 +551,7 @@ class Handler(BaseHTTPRequestHandler):
                                   {'Content-Disposition': f'attachment; filename="{path.name}"'})
             return self._error(HTTPStatus.NOT_FOUND, 'not_found', 'Unknown map route.')
         if head == 'commands' and len(rest) == 1:
-            cat, _err = self.state.catalog()
+            cat, _err = self.state.catalog_for(slug)
             return self._json({'ok': True, 'result': command_state(ws, slug, q.get('context', 'monster'), cat)})
         if head == 'dependencies' and len(rest) == 1:
             return self._json({'ok': True, 'result': dependency_state(ws, slug)})
@@ -538,25 +578,58 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(HTTPStatus.NOT_FOUND, "not_found", "Unknown Workshop route.")
         if head == "donors" and len(rest) == 1:
             open_project(ws, slug)
-            cat, _err = self.state.catalog()
+            cat, _err = self.state.catalog_for(slug)
             return self._json({"ok": True, "result": donor_search(cat, q.get("q", "")[:MAX_DONOR_QUERY + 1])})
         if head == "content" and len(rest) == 2 and rest[1] in CONTENT_KINDS:
-            cat, _err = self.state.catalog()
+            cat, _err = self.state.catalog_for(slug)
             return self._json({"ok": True, "result": content_state(ws, slug, rest[1], cat)})
         if head == "reference" and len(rest) == 1:
             open_project(ws, slug)
-            cat, _err = self.state.catalog()
+            cat, _err = self.state.catalog_for(slug)
             return self._json({"ok": True, "result": reference_search(cat, q.get("cat", ""),
                                                                       q.get("q", "")[:MAX_DONOR_QUERY + 1])})
         if head == "reference" and len(rest) == 3 and rest[1] in REF_CATS and re.fullmatch(r"\d{1,5}", rest[2]):
             open_project(ws, slug)
-            cat, _err = self.state.catalog()
+            cat, _err = self.state.catalog_for(slug)
             return self._json({"ok": True, "result": reference_detail(cat, rest[1], int(rest[2]))})
+        if head == "inspector" and 1 <= len(rest) <= 3:
+            open_project(ws, slug)
+            cat, _err = self.state.catalog_for(slug)
+            if len(rest) == 1:
+                return self._json({"ok": True, "result": inspector_summary(cat)})
+            if rest[1] not in INSPECTOR_CATS:
+                return self._error(HTTPStatus.NOT_FOUND, "not_found", "Unknown inspector category.")
+            if len(rest) == 2:
+                conds = getattr(self, "_query_lists", {}).get("c", [])
+                if len(conds) > INSPECTOR_MAX_CONDITIONS:
+                    return self._error(HTTPStatus.BAD_REQUEST, "bad_query",
+                                       f"At most {INSPECTOR_MAX_CONDITIONS} conditions.", field="c")
+                return self._json({"ok": True, "result": inspector_list(
+                    cat, rest[1], q.get("q", ""), q.get("field", ""), q.get("op", ""), q.get("value", ""),
+                    q.get("page", "1"), q.get("per_page", ""), conditions=conds, sort=q.get("sort", ""),
+                    order=q.get("order", ""), age=q.get("age", ""), nation=q.get("nation", ""),
+                    role=q.get("role", ""))})
+            if rest[2] == "filters":
+                return self._json({"ok": True, "result": inspector_filters(cat, rest[1])})
+            if not re.fullmatch(r"\d{1,6}", rest[2]):
+                return self._error(HTTPStatus.NOT_FOUND, "not_found", "Inspector ids are whole numbers.")
+            return self._json({"ok": True, "result": inspector_detail(cat, slug, rest[1], int(rest[2]))})
+        if head == "mercs" and len(rest) == 1:
+            cat, _err = self.state.catalog_for(slug)
+            return self._json({"ok": True, "result": merc_state(ws, slug, cat)})
         if head == "playtests" and len(rest) == 1:
             return self._json({"ok": True, "result": list_playtests(ws, slug)})
         if head == "nations" and len(rest) == 3 and rest[2] == "heroes" and re.fullmatch(r"\d{1,3}", rest[1]):
-            cat, _err = self.state.catalog()
+            cat, _err = self.state.catalog_for(slug)
             return self._json({"ok": True, "result": heroes_state(ws, slug, int(rest[1]), cat)})
+        if head == "reference-snapshot" and len(rest) == 1:
+            return self._json({"ok": True, "result": self._model(slug)["reference"]})
+        if head == "trait-icons" and len(rest) == 1:
+            open_project(ws, slug)
+            return self._json({"ok": True, "icons": self.state.trait_icons_for(slug)[0]})
+        if len(rest) == 2 and head in ("trait-icons", "gem-icons", "path-icons", "ability-icons", "item-icons"):
+            open_project(ws, slug)
+            return self._icon(head, rest[1], slug)
         if head == "catalog-units" and len(rest) in (2, 4) and MONSTER_ID_RE.match(rest[1]):
             return self._catalog_unit(slug, int(rest[1]), rest[2:])
         if head == "docs" and len(rest) >= 2:
@@ -570,10 +643,10 @@ class Handler(BaseHTTPRequestHandler):
         if head == "pretenders" and len(rest) in (2, 4):
             return self._pretender(slug, m, prov, rest, dl)
         if head == "monsters" and len(rest) == 3 and rest[2] == "edit" and MONSTER_ID_RE.match(rest[1]):
-            cat, _err = self.state.catalog()
+            cat, _err = self.state.catalog_for(slug)
             return self._json({"ok": True, "result": editor_state(ws, slug, int(rest[1]), cat)})
         if head == "nations" and len(rest) == 3 and rest[2] == "edit" and re.fullmatch(r"\d{1,3}", rest[1]):
-            cat, _err = self.state.catalog()
+            cat, _err = self.state.catalog_for(slug)
             return self._json({"ok": True, "result": nation_editor_state(ws, slug, int(rest[1]), cat)})
         if head in ("monsters", "sites", "nations", "other_definitions") and len(rest) == 2:
             uid_tail = rest[1]
@@ -599,20 +672,39 @@ class Handler(BaseHTTPRequestHandler):
         # path is rebuilt from its integer id and a fixed frame name. There is no general catalog file route.
         if rest[2] != "sprite" or rest[3] not in SPRITE_FRAMES or god["source"] != "catalog":
             return self._error(HTTPStatus.NOT_FOUND, "not_found", "Unknown pretender route.")
-        cat, _err = self.state.catalog()
+        cat, _err = self.state.catalog_for(slug)
         path = catalog_sprite_path(cat, god["id"], rest[3])
         if path is None:
             return self._error(HTTPStatus.NOT_FOUND, "sprite_missing", "No catalog sprite for this pretender.")
-        self._send(200, path.read_bytes(), "image/png")
+        data = read_verified(cat, path)
+        if data is None:
+            return self._error(HTTPStatus.NOT_FOUND, "sprite_missing", "The snapshot sprite does not match its manifest.")
+        self._send(200, data, "image/png")
 
     def _gem_icon(self, name: str) -> None:
         """One catalog gem icon (images/magicicons/Gem_<P>.png) for a path letter from GEM_ICON_PATHS only."""
-        key = name[:-4] if name.endswith(".png") else ""
-        self._catalog_icon("magicicons", f"Gem_{key}.png" if key in GEM_ICON_PATHS else None)
+        self._icon("gem-icons", name, None)
 
-    def _catalog_icon(self, folder: str, fname: str | None) -> None:
+    def _icon(self, kind: str, name: str, slug: str | None) -> None:
+        """One native icon by fixed key. With a slug it comes from that project's catalog (its snapshot if any)."""
+        key = name[:-4] if name.endswith(".png") else ""
+        if kind == "trait-icons":
+            png = (self.state.trait_icons_for(slug)[1] if slug else self.state.trait_icon_images).get(key)
+            if png is None:
+                return self._error(HTTPStatus.NOT_FOUND, "icon_missing", "No confirmed native icon for this trait.")
+            return self._send(200, png, "image/png")
+        if kind == "gem-icons":
+            return self._catalog_icon("magicicons", f"Gem_{key}.png" if key in GEM_ICON_PATHS else None, slug)
+        if kind == "path-icons":
+            return self._catalog_icon("magicicons", f"Path_{key}.png" if key in PATH_ICON_PATHS else None, slug)
+        if kind == "ability-icons":
+            return self._catalog_icon("abilityicons", f"{key}.png" if key in ABILITY_ICON_NAMES else None, slug)
+        mi = ITEM_ICON_RE.match(name)
+        return self._catalog_icon("items", f"item{int(mi.group(1))}.png" if mi else None, slug)
+
+    def _catalog_icon(self, folder: str, fname: str | None, slug: str | None = None) -> None:
         """One small PNG from the catalog's images/<folder>; callers rebuild fname from a fixed allow-list or an id."""
-        cat, _err = self.state.catalog()
+        cat, _err = self.state.catalog_for(slug) if slug else self.state.catalog()
         if fname is None or cat is None:
             return self._error(HTTPStatus.NOT_FOUND, "icon_missing", "No native catalog icon for this key.")
         base = cat.gamedata.parent / "images" / folder
@@ -620,7 +712,7 @@ class Handler(BaseHTTPRequestHandler):
         if any(is_link(part) for part in (base.parent, base, path)) or not path.is_file() \
                 or path.stat().st_size > MAX_CATALOG_ICON_BYTES:
             return self._error(HTTPStatus.NOT_FOUND, "icon_missing", "No native catalog icon for this key.")
-        data = path.read_bytes()
+        data = read_verified(cat, path) or b""
         if data[:8] != b"\x89PNG\r\n\x1a\n":
             return self._error(HTTPStatus.NOT_FOUND, "icon_missing", "No native catalog icon for this key.")
         self._send(200, data, "image/png")
@@ -628,7 +720,7 @@ class Handler(BaseHTTPRequestHandler):
     def _catalog_unit(self, slug: str, mid: int, rest: list[str]) -> None:
         """Read-only comparison data for one catalog unit, or its sprite rebuilt from the integer id."""
         open_project(self.state.workspace, slug)
-        cat, _err = self.state.catalog()
+        cat, _err = self.state.catalog_for(slug)
         if not rest:
             return self._json({"ok": True, "result": catalog_unit_view(cat, slug, mid)})
         if rest[0] != "sprite" or rest[1] not in SPRITE_FRAMES:
@@ -636,7 +728,10 @@ class Handler(BaseHTTPRequestHandler):
         path = catalog_sprite_path(cat, mid, rest[1])
         if path is None:
             return self._error(HTTPStatus.NOT_FOUND, "sprite_missing", "No catalog sprite for this unit.")
-        self._send(200, path.read_bytes(), "image/png")
+        data = read_verified(cat, path)
+        if data is None:
+            return self._error(HTTPStatus.NOT_FOUND, "sprite_missing", "The snapshot sprite does not match its manifest.")
+        self._send(200, data, "image/png")
 
     def _export(self, slug: str, rest: list[str]) -> None:
         """Read back exports by fixed id only: the list, one manifest, or one zip archive."""

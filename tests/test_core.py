@@ -815,5 +815,259 @@ class WorkshopTests(Base):
         self.assertEqual(list(outside.iterdir()), [])
 
 
+class ReferenceSnapshotTests(Base):
+    """Project reference snapshots: catalog-free reuse, isolation, stale/tamper refusal and export exclusion."""
+
+    PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 40
+
+    def setUp(self) -> None:
+        super().setUp()
+        root = Path(self._tmp.name) / "cat"
+        (root / "LICENSE").write_text("GPL-3.0 test licence\n", encoding="utf-8")
+        for folder, names in (("sprites", ["0199_1.png", "0311_1.png", "0003_rider_1.png"]),
+                              ("magicicons", ["Gem_F.png", "Path_U.png"]), ("items", ["item1.png"])):
+            (root / "images" / folder).mkdir(parents=True)
+            for name in names:
+                (root / "images" / folder / name).write_bytes(self.PNG)
+        (root / "gamedata" / "unitdescr").mkdir()
+        (root / "gamedata" / "unitdescr" / "0199.txt").write_text("descr", encoding="utf-8")
+        self.set_dm(b'#modname "X"\n#newmonster 5000\n#copystats 199\n#name "Copy"\n#end\n')
+        self.root = self.ws / "demo_mod"
+
+    def body(self, **kw):
+        from kosmokrator.reference import reference_status
+        cur = reference_status(self.ws, "demo_mod", self.catalog)["snapshot"]
+        return {"expected_sha256": sha(self.dm.read_bytes()), "expected_snapshot": cur, **kw}
+
+    def test_snapshot_reused_without_live_catalog_and_never_exported(self) -> None:
+        from kosmokrator.browse import build_project_model
+        from kosmokrator.pretenders import catalog_sprite_path
+        from kosmokrator.reference import create_snapshot, reference_status, resolve_catalog
+        dm_before = self.dm.read_bytes()
+        prev = create_snapshot(self.ws, "demo_mod", self.catalog, self.body(preview=True))
+        self.assertFalse((self.root / ".kosmokrator" / "reference").exists())
+        self.assertEqual(prev["scope"]["tables"], "complete")
+        res = create_snapshot(self.ws, "demo_mod", self.catalog, self.body())
+        manifest = json.loads((self.root / ".kosmokrator" / "reference" / res["snapshot"] / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        paths = {f["path"] for f in manifest["files"]}
+        self.assertTrue({"catalog/gamedata/BaseU.csv", "catalog/LICENSE", "catalog/images/sprites/0199_1.png",
+                         "catalog/images/magicicons/Gem_F.png", "catalog/images/items/item1.png"} <= paths)
+        self.assertNotIn("catalog/images/sprites/0311_1.png", paths)  # unreferenced: partial sprite scope
+        self.assertFalse(any("unitdescr" in x or "rider" in x for x in paths))
+        self.assertEqual(manifest["scope"]["sprites"], "referenced")
+        self.assertIn({"kind": "sprite", "id": 199, "frame": "attack", "reason": "no sprite file in the source catalog"},
+                      manifest["missing"])
+        self.assertNotIn(str(self.ws).replace("\\", "\\\\"), json.dumps(manifest))  # no absolute local paths
+        # No live catalog: the project still resolves vanilla data and sprites from its own snapshot.
+        cat, err = resolve_catalog(self.ws, "demo_mod", None, {"code": "catalog_missing"})
+        self.assertIsNone(err)
+        self.assertTrue(cat.meta["catalog_path"].startswith(".kosmokrator/reference/"))
+        m = build_project_model(self.ws, "demo_mod", cat)
+        self.assertEqual(m["monsters"][0]["donor"]["name"], "Cardaces")
+        self.assertIsNotNone(catalog_sprite_path(cat, 199, "idle"))
+        self.assertEqual(reference_status(self.ws, "demo_mod", None, m)["state"], "offline")
+        self.assertEqual(reference_status(self.ws, "demo_mod", self.catalog, m)["state"], "current")
+        # Projects without a snapshot keep reading the live catalog unchanged.
+        create_project(self.ws, "plain_mod")
+        self.assertIs(resolve_catalog(self.ws, "plain_mod", self.catalog, None)[0], self.catalog)
+        # Exports carry only the mod; the snapshot and its imagery stay local.
+        out = export_mod(self.ws, "demo_mod", dest="out.zip", catalog=cat)
+        with zipfile.ZipFile(self.ws / "out.zip") as zf:
+            self.assertTrue(all(n.startswith("demo_mod/") and ".kosmokrator" not in n and not n.endswith(".png")
+                                for n in zf.namelist()))
+        self.assertTrue(out["manifest"]["catalog"]["catalog_path"].startswith(".kosmokrator/reference/"))
+        self.assertEqual(self.dm.read_bytes(), dm_before)
+
+    def test_stale_tampered_linked_and_live_differences_are_reported(self) -> None:
+        from kosmokrator.reference import create_snapshot, read_verified, reference_status, resolve_catalog
+        first = create_snapshot(self.ws, "demo_mod", self.catalog, self.body())
+        for bad, code in (({"expected_snapshot": None}, "reference_changed"),
+                          ({"expected_sha256": "0" * 64}, "sha_mismatch"), ({"sprites": "everything"}, "bad_request")):
+            with self.assertRaises(KosmoError) as cm:
+                create_snapshot(self.ws, "demo_mod", self.catalog, {**self.body(), **bad})
+            self.assertEqual(cm.exception.code, code)
+        with self.assertRaises(KosmoError) as cm:
+            create_snapshot(self.ws, "demo_mod", None, self.body())
+        self.assertEqual(cm.exception.code, "catalog_missing")
+        second = create_snapshot(self.ws, "demo_mod", self.catalog, self.body(sprites="all"))
+        ref = self.root / ".kosmokrator" / "reference"
+        self.assertEqual(sorted(p.name for p in ref.iterdir()), ["current.json", second["snapshot"]])
+        self.assertIn(first["snapshot"], second["removed"])
+        # A different live catalog is reported as stale; the snapshot stays in use (versions are not mixed).
+        other = write_catalog(Path(self._tmp.name) / "other")
+        (other / "gamedata" / "nations.csv").write_text("id\tname\tepithet\tera\n5\tChanged\tX\t1\n", encoding="utf-8")
+        live2 = load_catalog(other)
+        self.assertEqual(reference_status(self.ws, "demo_mod", live2)["state"], "stale")
+        self.assertEqual(resolve_catalog(self.ws, "demo_mod", live2, None)[0].row("nations", 5)["name"], "Arcoscephale")
+        # A tampered file makes the snapshot invalid: it is not used and the live catalog is not substituted.
+        target = ref / second["snapshot"] / "catalog" / "gamedata" / "nations.csv"
+        original = target.read_bytes()
+        target.write_bytes(original + b"6\tExtra\t\t1\n")
+        cat, err = resolve_catalog(self.ws, "demo_mod", self.catalog, None)
+        self.assertIsNone(cat)
+        self.assertEqual(err["code"], "reference_invalid")
+        self.assertEqual(reference_status(self.ws, "demo_mod", self.catalog)["state"], "invalid")
+        target.write_bytes(original)
+        cat, err = resolve_catalog(self.ws, "demo_mod", None, None)
+        self.assertIsNone(err)
+        sprite = cat.root / "images" / "sprites" / "0311_1.png"
+        self.assertEqual(read_verified(cat, sprite), self.PNG)
+        sprite.write_bytes(self.PNG + b"x")  # images are checked against the manifest on every read
+        self.assertIsNone(read_verified(cat, sprite))
+        sprite.write_bytes(self.PNG)
+        # A link or junction inside a snapshot is refused as well.
+        outside = Path(self._tmp.name) / "outside"
+        outside.mkdir()
+        PatchTests._dir_link(self, outside, ref / second["snapshot"] / "catalog" / "linked")
+        self.assertEqual(resolve_catalog(self.ws, "demo_mod", None, None)[1]["code"], "reference_invalid")
+
+
+class InspectorMercTests(Base):
+    """Vanilla inspector paging/search (event id 0) and structured mercenary companies."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        g = self.catalog.gamedata
+        (g / "events.csv").write_text("id\tname\trarity\tdescription\trequirements\teffects\tend\n"
+                                      "0\tA festival\t-1\tA festival was held.\tminpop 50\tincdom 3\t\n"
+                                      "1\tA statue\t1\tA statue was raised.\tland 1\tcom 199|B300 30\t\n",
+                                      encoding="utf-8")
+        (g / "Mercenary.csv").write_text("id\tname\tbossname\tcom\tunit\tnrunits\tlevel\tminmen\tminpay\txp\trandequip"
+                                         "\trecrate\titem1\titem2\teramask\tend\n"
+                                         "1\tStingers\tDante\t311\t199\t50\t0\t15\t250\t20\t1\t100\tFire Sword\t\t7\t\n",
+                                         encoding="utf-8")
+
+    def test_inspector_pages_search_and_event_zero(self) -> None:
+        from kosmokrator import inspector
+        from kosmokrator.catalog import search
+        counts = {c["key"]: c["count"] for c in inspector.summary(self.catalog)["categories"]}
+        self.assertEqual((counts["events"], counts["mercs"], counts["units"]), (2, 1, 2))
+        page = inspector.list_rows(self.catalog, "events", per_page=1, page=1)
+        self.assertEqual((page["total"], page["pages"], page["results"][0]["id"]), (2, 2, 0))
+        self.assertEqual(inspector.list_rows(self.catalog, "events", per_page=1, page=9)["results"][0]["id"], 1)
+        self.assertEqual([r["id"] for r in inspector.list_rows(self.catalog, "events", q="0")["results"]], [0])
+        self.assertEqual([r["id"] for r in inspector.list_rows(self.catalog, "events", q="statue")["results"]], [1])
+        self.assertEqual(search(self.catalog, "0", "events")["results"][0]["id"], 0)
+        self.assertNotIn("events", {r["category"] for r in search(self.catalog, "a", "all")["results"]})
+        ev = inspector.detail(self.catalog, "demo_mod", "events", 0)
+        self.assertEqual((ev["description"], ev["effects"][0]["manual"]["command"]), ("A festival was held.", "#incdom"))
+        fx = inspector.detail(self.catalog, "demo_mod", "events", 1)["effects"]
+        self.assertEqual((fx[0]["unit"]["name"], fx[1]["raw"], "manual" in fx[1]), ("Cardaces", "B300 30", False))
+        flt = inspector.list_rows(self.catalog, "units", field="mask1", op="has")
+        self.assertEqual([r["id"] for r in flt["results"]], [311])
+        merc = inspector.detail(self.catalog, "demo_mod", "mercs", 1)
+        self.assertEqual((merc["commander"]["name"], merc["troop"]["name"], merc["items"][0]["id"]),
+                         ("Mystic", "Cardaces", 1))
+        self.assertEqual(inspector.detail(self.catalog, "demo_mod", "units", 199)["mercs"][0]["roles"], ["troop"])
+        for bad in ({"cat": "files"}, {"cat": "units", "field": "nope"}, {"cat": "units", "q": "x" * 61}):
+            with self.assertRaises(KosmoError):
+                inspector.list_rows(self.catalog, bad.pop("cat"), **bad)
+        with self.assertRaises(KosmoError) as cm:  # a catalog without the optional table stays usable otherwise
+            inspector.list_rows(load_catalog(write_catalog(Path(self._tmp.name) / "plain")), "events")
+        self.assertEqual(cm.exception.code, "catalog_incomplete")
+
+    def test_inspector_conditions_sort_and_filter_meta(self) -> None:
+        from kosmokrator import inspector
+        ids = lambda **kw: [r["id"] for r in inspector.list_rows(self.catalog, **kw)["results"]]  # noqa: E731
+        # Numeric ranges include zero and negatives; event id 0 survives sorting and paging.
+        self.assertEqual(ids(cat="events", conditions=["rarity:between:-1..0"]), [0])
+        self.assertEqual(ids(cat="events", conditions=["rarity:lt:0"]), [0])
+        self.assertEqual(ids(cat="events", sort="rarity", order="desc"), [1, 0])
+        self.assertEqual(ids(cat="events", sort="id", order="desc", per_page=1, page=2), [0])
+        # Numbers, not text ("3712" < "400" as text); a blank cell counts as 0; AND with the original single filter.
+        self.assertEqual(ids(cat="units", conditions=["mask1:gte:400"]), [311])
+        self.assertEqual(ids(cat="units", conditions=["mask1:eq:0"]), [199])
+        self.assertEqual(ids(cat="units", field="mask1", op="has", conditions=["mask1:none"]), [])
+        page = inspector.list_rows(self.catalog, "units", conditions=["mask1:has"], sort="name")
+        self.assertEqual((page["results"][0]["values"], page["conditions"][0]["text"], page["range"]),
+                         ({"mask1": "3712"}, "mask1 has a value", [1, 1]))
+        for bad in (["mask1:gt:x"], ["mask1:between:5..1"], ["name:gt:1"], ["nope:has"], ["mask1:has"] * 9):
+            with self.assertRaises(KosmoError):
+                inspector.list_rows(self.catalog, "units", conditions=bad)
+        meta = inspector.filter_meta(self.catalog, "mercs")
+        level = next(c for c in meta["common"] if c["field"] == "level")
+        self.assertEqual((level["kind"], level["choices"][0]["value"], level["choices"][0]["count"]), ("choice", "0", 1))
+        self.assertIn({"key": "minpay", "label": "Minimum pay", "kind": "number"}, meta["sorts"])
+
+    def test_inspector_age_nation_role_filters(self) -> None:
+        from kosmokrator import inspector
+        g = self.catalog.gamedata
+        (g / "nations.csv").write_text("id\tname\tepithet\tera\n0\tIndependents\tIndependents\t0\n"
+                                       "5\tArcoscephale\tGolden Era\t1\n43\tArcoscephale\tThe Old Kingdom\t2\n",
+                                       encoding="utf-8")
+        (g / "MagicSites.csv").write_text("id\tname\tpath\tlevel\trarity\thcom1\n1\tThe Smouldercone\tFire\t0\t5\t311\n",
+                                          encoding="utf-8")
+        (g / "fort_troop_types_by_nation.csv").write_text("monster_number\tnation_number\n199\t5\n199\t43\n199\t0\n",
+                                                          encoding="utf-8")
+        (g / "attributes_by_nation.csv").write_text("nation_number\tattribute\traw_value\n43\t52\t1\n", encoding="utf-8")
+        ids = lambda **kw: [r["id"] for r in inspector.list_rows(self.catalog, "units", **kw)["results"]]  # noqa: E731
+        self.assertEqual(ids(age="1"), [199])  # a shared fort troop; independents (era 0) do not count
+        self.assertEqual(ids(age="2"), [199, 311])
+        self.assertEqual(ids(nation="43", role="capital"), [311])
+        self.assertEqual(ids(nation="43", role="troop"), [199])
+        self.assertEqual(ids(nation="national"), [199, 311])
+        self.assertEqual(ids(nation="none"), [])
+        self.assertEqual(ids(nation="5", conditions=["mask1:has"]), [])  # AND with column conditions
+        row = inspector.list_rows(self.catalog, "units", age="2")["results"][0]
+        self.assertEqual([n["id"] for n in row["nations"]], [43])
+        ties = inspector.detail(self.catalog, "demo_mod", "units", 311)["nations"]
+        self.assertEqual((ties[0]["id"], ties[0]["how"]), (43, ["commander", "capital only"]))
+        for bad in ({"age": "4"}, {"nation": "5", "age": "2"}, {"nation": "none", "age": "1"}, {"nation": "x"},
+                    {"nation": "0"}, {"role": "god"}):
+            with self.assertRaises(KosmoError):
+                inspector.list_rows(self.catalog, "units", **bad)
+        with self.assertRaises(KosmoError):
+            inspector.list_rows(self.catalog, "spells", nation="5")
+        self.assertEqual([r["id"] for r in inspector.list_rows(self.catalog, "mercs", age="3")["results"]], [1])
+        self.assertEqual([r["id"] for r in inspector.list_rows(self.catalog, "nations", age="2")["results"]], [43])
+        simple = {s["key"]: s for s in inspector.filter_meta(self.catalog, "units")["simple"]}
+        self.assertEqual([(c["value"], c["era"], c["count"]) for c in simple["nation"]["choices"]],
+                         [("5", 1, 1), ("43", 2, 2)])
+        self.assertEqual([c["count"] for c in simple["nation"]["special"]], [2, 0])
+
+    def test_merc_company_preview_save_browse_export(self) -> None:
+        from kosmokrator.command_edit import save_commands
+        from kosmokrator.mercs import merc_state, save_merc
+        original = self.dm.read_bytes() + b'#newmonster 5000\n#copystats 199\n#name "Sellsword"\n#oddcmd 7\n#end\n'
+        h = self.set_dm(original)
+        st = merc_state(self.ws, "demo_mod", self.catalog)
+        mon = st["options"]["monsters"][0]
+        company = {"name": "Iron Band", "bossname": "Hrolf", "commander": {"origin": "project", "key": mon["key"]},
+                   "troop": {"origin": "catalog", "id": 199}, "nrunits": 20, "minmen": 5, "minpay": 150, "xp": 10,
+                   "recrate": 100, "randequip": 1, "level": 0, "eramask": 7, "items": [{"origin": "catalog", "id": 1}]}
+        prev = save_merc(self.ws, "demo_mod", self.catalog, {"expected_sha256": h, "preview": True, "company": company})
+        self.assertFalse(prev["written"])
+        self.assertIn('+#com "Sellsword"', prev["diff"])
+        self.assertEqual(self.dm.read_bytes(), original)
+        for bad, code in (({"expected_sha256": "0" * 64}, "sha_mismatch"),
+                          ({"company": {**company, "eramask": 9}}, "bad_value"),
+                          ({"company": {**company, "items": [{"origin": "catalog", "id": 1}] * 5}}, "bad_value"),
+                          ({"company": {**company, "commander": {"origin": "catalog", "id": 4242}}}, "bad_value")):
+            with self.assertRaises(KosmoError) as cm:
+                save_merc(self.ws, "demo_mod", self.catalog, {"expected_sha256": h, "preview": True,
+                                                              "company": company, **bad})
+            self.assertEqual(cm.exception.code, code)
+        res = save_merc(self.ws, "demo_mod", self.catalog, {"expected_sha256": h, "preview": False, "company": company})
+        data = self.dm.read_bytes()
+        self.assertTrue(res["written"] and data.startswith(original) and b"#newmerc\n#name \"Iron Band\"" in data)
+        # The revision guard holds after the save, and #com by number is refused (the manual takes names).
+        with self.assertRaises(KosmoError) as cm:
+            save_merc(self.ws, "demo_mod", self.catalog, {"expected_sha256": h, "preview": True, "company": company})
+        self.assertEqual(cm.exception.code, "sha_mismatch")
+        with self.assertRaises(KosmoError) as cm:
+            save_commands(self.ws, "demo_mod", self.catalog, {"expected_sha256": sha(data), "preview": True,
+                                                              "context": "merc", "mode": "edit", "target": res["key"],
+                                                              "changes": [{"op": "add", "command": "com", "args": [199]}]})
+        self.assertEqual(cm.exception.code, "bad_argument")
+        comp = merc_state(self.ws, "demo_mod", self.catalog)["companies"][0]
+        self.assertEqual((comp["key"], comp["commander"]["candidates"][0]["id"], comp["troop"]["status"],
+                          comp["items"][0]["status"]), (res["key"], 5000, "resolved", "resolved"))
+        export_mod(self.ws, "demo_mod", dest="merc.zip", catalog=self.catalog)
+        with zipfile.ZipFile(self.ws / "merc.zip") as zf:
+            self.assertIn(b"#newmerc", zf.read("demo_mod/demo_mod.dm"))
+            self.assertFalse(any(".kosmokrator" in n for n in zf.namelist()))
+
+
 if __name__ == "__main__":
     unittest.main()

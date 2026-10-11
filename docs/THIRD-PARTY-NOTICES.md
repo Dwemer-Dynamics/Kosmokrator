@@ -40,6 +40,14 @@ Kosmokrator does not bundle or download it. Its extracted game data is a communi
 reference and can lag or differ from the installed game. Consult that repository's
 license and notices before redistributing any of its contents.
 
+When a user makes a project self-contained, Kosmokrator copies that checkout's tables,
+its `LICENSE` and the images the project needs into the project's
+`.kosmokrator/reference/` folder, with a manifest recording the origin, revision,
+dataset version, licence and attribution. The images there, and any native UI icons
+copied from the workspace cache, are game graphics: the snapshot is a local authoring
+reference only, ignored by the project `.gitignore` and never included in exports or
+Workshop folders. It is not intended for redistribution.
+
 ## Python packages and optional external tools
 
 The core uses the Python standard library. Packaging uses setuptools; optional MCP

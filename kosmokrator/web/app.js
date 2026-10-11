@@ -8,7 +8,7 @@
     godQuery: "", godStatus: "all", godSource: "all", nation: null, editors: new Map(), exports: new Map(), creates: new Map(), arts: new Map(),
     nationEditors: new Map(), catalogUnits: new Map(), compare: { query: "", results: null, searching: false },
     authData: new Map(), authoring: new Map(), refs: new Map(), importDraft: null, toolDrafts: new Map(), depDrafts: new Map(),
-    maps: new Map(), mapImports: new Map() };
+    maps: new Map(), mapImports: new Map(), inspector: new Map() };
 
   // ---------- DOM helpers (never innerHTML) ----------
   function el(tag, attrs, ...kids) {
@@ -95,13 +95,67 @@
     setTimeout(() => t.remove(), 1800);
   }
 
+  // ---------- save receipts ----------
+  // Every successful save, create or art upload leaves a receipt under the project header (file, new revision, backup)
+  // that survives route changes until dismissed; the toast only echoes it. Receipts are kept per project slug, so they
+  // never appear in another project, and are dropped when the project leaves the workspace list.
+  const receipts = new Map();
+  const RECEIPT_MAX = 5;
+  function recordReceipt(slug, title, r, extra) {
+    const res = r || {};
+    if (res.written === false) return;
+    const files = Array.isArray(res.files) ? res.files.map((f) => (typeof f === "string" ? f : txt(f && (f.path || f.file)))).filter(Boolean) : [];
+    const list = receipts.get(slug) || [];
+    list.unshift({ title, at: new Date(), file: res.file || res.dm || null, sha: res.after_sha256 || null,
+      revision: typeof res.revision === "string" ? res.revision : null, backup: res.backup || null, files, ...(extra || {}) });
+    receipts.set(slug, list.slice(0, RECEIPT_MAX));
+    // Writes that only redraw their own panel (no route render) still show the receipt at once.
+    const head = main.querySelector(".proj-head"), ds = main.querySelector("#draft-status");
+    if (head && ds && ds.dataset.slug === slug) {
+      const panelNode = receiptPanel(slug), old = main.querySelector(".receipt");
+      if (old) old.replaceWith(panelNode); else head.after(panelNode);
+    }
+  }
+  function receiptPanel(slug) {
+    const list = receipts.get(slug);
+    if (!list || !list.length) return null;
+    const [last, ...older] = list;
+    const time = (d) => d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const facts = (x) => el("dl", { class: "kv receipt-facts" },
+      x.file ? [el("dt", { text: "File" }), el("dd", { class: "mono", text: x.file })] : null,
+      x.folder ? [el("dt", { text: "Folder" }), el("dd", null, el("span", { class: "mono", text: x.folder }), x.folderNote ? el("span", { class: "faint", text: ` (${x.folderNote})` }) : null)] : null,
+      x.files.length ? [el("dt", { text: x.files.length === 1 ? "New file" : "New files" }), el("dd", { class: "mono", text: x.files.join(", ") })] : null,
+      x.sha ? [el("dt", { text: "New revision" }), el("dd", { class: "mono", title: x.sha }, `SHA-256 ${shortSha(x.sha)}`)] : null,
+      x.revision ? [el("dt", { text: "Revision" }), el("dd", { class: "mono", title: x.revision }, shortRev(x.revision))] : null,
+      el("dt", { text: "Backup" }), el("dd", { class: x.backup ? "mono" : "faint", text: x.backup || x.backupNote || "None reported for this write" }));
+    const box = el("section", { class: "receipt", "aria-labelledby": "receipt-h" },
+      el("div", { class: "receipt-head" },
+        el("h2", { id: "receipt-h", class: "receipt-title" }, badge("saved", "ok"), " ", last.title),
+        el("span", { class: "faint", text: `at ${time(last.at)}` }),
+        el("button", { type: "button", class: "btn btn-small btn-ghost receipt-dismiss", "aria-label": "Dismiss save receipts for this project",
+          onclick: () => { receipts.delete(slug); box.remove(); const t = $("#page-title"); if (t) t.focus({ preventScroll: true }); } }, "Dismiss")),
+      facts(last),
+      older.length ? el("details", { class: "raw tech receipt-older" }, el("summary", null, `Earlier saves this session (${older.length})`),
+        el("div", { class: "inner" }, el("ol", { class: "plain-list" }, older.map((x) => el("li", null,
+          el("strong", { text: x.title }), el("span", { class: "faint", text: ` at ${time(x.at)}` }), facts(x)))))) : null);
+    return box;
+  }
+
   // ---------- data ----------
-  async function getJSON(url) {
+  async function getJSON(url, opts) {
+    const signal = opts && opts.signal;
+    const aborted = () => ({ error: { code: "aborted", message: "Superseded by a newer request." } });
     let res;
-    try { res = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" }); }
-    catch (e) { throw { error: { code: "network_error", message: "The local server is not reachable. Is `kosmokrator serve` still running?" } }; }
+    try { res = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store", signal }); }
+    catch (e) {
+      if (signal && signal.aborted) throw aborted();
+      throw { error: { code: "network_error", message: "The local server is not reachable. Is `kosmokrator serve` still running?" } };
+    }
     let body;
-    try { body = await res.json(); } catch (e) { throw { error: { code: "bad_response", message: `HTTP ${res.status}` } }; }
+    try { body = await res.json(); } catch (e) {
+      if (signal && signal.aborted) throw aborted();
+      throw { error: { code: "bad_response", message: `HTTP ${res.status}` } };
+    }
     if (!res.ok || body.ok === false) throw body.error ? body : { error: { code: `http_${res.status}`, message: res.statusText } };
     return body;
   }
@@ -122,6 +176,20 @@
   // A key that does not load stays text-only; letters and names are always shown beside the art.
   const PATH_KEYS = ["F", "A", "W", "E", "S", "D", "N", "G", "B", "H"];
   const gemIcons = new Map(), skillIcons = new Map(), abilityIcons = new Map();
+  // Icon source: the server-wide catalog ("/api"), or a project's own reference snapshot through its project-scoped
+  // routes while that project is open. Projects without a snapshot keep the server-wide icons.
+  const iconScope = { base: "/api", key: "global" };
+  async function useIconScope(m) {
+    const ref = m && m.reference, snap = ref && ref.active ? ref.snapshot : null;
+    const key = snap ? `${m.project.slug}:${snap}` : "global";
+    if (iconScope.key === key) return;
+    iconScope.key = key;
+    iconScope.base = snap ? `/api/projects/${encodeURIComponent(m.project.slug)}` : "/api";
+    for (const map of [traitIcons, gemIcons, skillIcons, abilityIcons]) map.clear();
+    await Promise.all([loadTraitIcons(), loadGemIcons()]);
+  }
+  // The catalog a project reads (its snapshot or the live catalog); without a project, the server-wide one.
+  const catalogOf = (m) => (m ? (m.provenance && m.provenance.catalog) || null : (state.meta && state.meta.catalog) || null);
   function probeIcon(map, key, url, cls) {
     return new Promise((done) => {
       const img = new Image(), timer = setTimeout(() => { img.src = ""; done(); }, 3000);
@@ -131,21 +199,23 @@
     });
   }
   function loadGemIcons() {
-    return Promise.all([...PATH_KEYS.map((p) => probeIcon(gemIcons, p, `/api/gem-icons/${p}.png`, "gem-ic")),
-      ...[...PATH_KEYS, "U"].map((p) => probeIcon(skillIcons, p, `/api/path-icons/${p}.png`, "path-img")),
-      probeIcon(abilityIcons, "holy", "/api/ability-icons/holy.png", "trait-icon")]);
+    const b = iconScope.base;
+    return Promise.all([...PATH_KEYS.map((p) => probeIcon(gemIcons, p, `${b}/gem-icons/${p}.png`, "gem-ic")),
+      ...[...PATH_KEYS, "U"].map((p) => probeIcon(skillIcons, p, `${b}/path-icons/${p}.png`, "path-img")),
+      probeIcon(abilityIcons, "holy", `${b}/ability-icons/holy.png`, "trait-icon")]);
   }
   async function loadTraitIcons() {
     const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 3000);
     try {
-      const res = await fetch("/api/trait-icons", { headers: { Accept: "application/json" }, cache: "no-store", credentials: "same-origin", signal: ctl.signal });
+      const b = iconScope.base;
+      const res = await fetch(`${b}/trait-icons`, { headers: { Accept: "application/json" }, cache: "no-store", credentials: "same-origin", signal: ctl.signal });
       if (!res.ok) return;
       const body = await res.json();
       if (!body || body.ok !== true || !body.icons || typeof body.icons !== "object") return;
       for (const [raw, ic] of Object.entries(body.icons)) {
         const cmd = String(raw).replace(/^#/, "").toLowerCase();
         // Only accept this exact same-origin API path for the command; anything else is ignored.
-        if (!/^[a-z0-9_]+$/.test(cmd) || !ic || typeof ic.url !== "string" || ic.url.toLowerCase() !== `/api/trait-icons/${cmd}.png`) continue;
+        if (!/^[a-z0-9_]+$/.test(cmd) || !ic || typeof ic.url !== "string" || ic.url.toLowerCase() !== `${b}/trait-icons/${cmd}.png`.toLowerCase()) continue;
         const dim = (v) => (Number.isInteger(v) && v > 0 && v <= 64 ? v : 32);
         traitIcons.set(cmd, { url: ic.url, width: dim(ic.width), height: dim(ic.height) });
       }
@@ -191,13 +261,23 @@
     try { return await state.models.get(slug); }
     catch (e) { state.models.delete(slug); throw e; }
   }
+  // Resolves true only when the text reached the clipboard: the async API succeeded, or the legacy command reported
+  // success. Callers that move a workflow forward must check the result.
   async function copy(text, label) {
-    try { await navigator.clipboard.writeText(text); toast(`${label} copied`); }
-    catch (_) {
-      const ta = el("textarea", { class: "sr-only" }); ta.value = text; document.body.append(ta); ta.select();
-      try { document.execCommand("copy"); toast(`${label} copied`); } catch (_e) { toast("Copy failed"); }
-      ta.remove();
+    let ok = false;
+    if (navigator.clipboard && window.isSecureContext) {
+      try { await navigator.clipboard.writeText(text); ok = true; } catch (_) { ok = false; }
     }
+    if (!ok) {
+      const back = document.activeElement;
+      const ta = el("textarea", { class: "sr-only", readonly: true, tabindex: "-1", "aria-hidden": "true" });
+      ta.value = text; document.body.append(ta); ta.select();
+      try { ok = document.execCommand("copy") === true; } catch (_e) { ok = false; }
+      ta.remove();
+      if (back && back.isConnected && typeof back.focus === "function") back.focus({ preventScroll: true });
+    }
+    toast(ok ? `${label} copied` : `${label} not copied: the browser blocked the clipboard`);
+    return ok;
   }
 
   function jsonActions(url, getObj, label) {
@@ -310,6 +390,8 @@
       list.replaceChildren(stateBox("loading", "Reading workspace..."));
       try {
         state.projects = await getJSON("/api/projects");
+        const listed = new Set((state.projects.projects || []).map((p) => p.slug));
+        for (const s of [...receipts.keys()]) if (!listed.has(s)) receipts.delete(s);
       } catch (e) {
         state.projects = null;
         list.replaceChildren(errorBox(e, "projects"));
@@ -319,16 +401,20 @@
     renderSidebar();
     renderCatalogStatus();
   }
-  function renderCatalogStatus() {
+  // Only a problem is shown; ready vanilla data needs no header badge.
+  function renderCatalogStatus(m) {
     const box = $("#catalog-status");
     const meta = state.meta || {};
-    const cat = meta.catalog;
-    if (cat) {
-      box.replaceChildren(badge(`catalog ${cat.dataset_version ? "data " + cat.dataset_version : "version unknown"}`, "ok"), " ",
-        el("span", { class: "faint mono", title: cat.catalog_path || "", text: cat.revision ? `rev ${cat.revision.slice(0, 10)}` : "no git revision" }));
+    const cat = meta.catalog, ref = m && m.reference;
+    if (ref && ref.active) {
+      box.replaceChildren(...(ref.state === "stale" ? [badge("Vanilla data update available", "warn")] : []));
+    } else if (ref && ref.state === "invalid") {
+      box.replaceChildren(badge("Vanilla data needs repair", "err"));
+    } else if (cat) {
+      box.replaceChildren();
     } else {
-      box.replaceChildren(badge("no catalog", "warn"), " ",
-        el("span", { class: "faint", title: (meta.catalog_error && meta.catalog_error.message) || "", text: "donor data unavailable" }));
+      const n = (meta.project_references && meta.project_references.projects_with_snapshot) || 0;
+      box.replaceChildren(...(n ? [] : [badge("Vanilla data unavailable", "warn")]));
     }
   }
   // Compact rows: a small banner, name, era/version/validation and slug. A filter appears once the list is long,
@@ -340,21 +426,48 @@
     const q = txt(state.projectQuery).trim().toLowerCase();
     return !q || [p.slug, p.name, p.mod_name, p.nation, p.era_name].some((x) => x && String(x).toLowerCase().includes(q));
   };
+  // Problems only: a clean project shows no badge.
   const validationBadge = (v) => !v ? badge("not validated", "warn") : v.ok
-    ? badge(v.counts.warnings ? `valid, ${v.counts.warnings} warn` : "valid", v.counts.warnings ? "warn" : "ok")
+    ? (v.counts.warnings ? badge(`${v.counts.warnings} warning${v.counts.warnings === 1 ? "" : "s"}`, "warn") : null)
     : badge(`${v.counts.errors} error${v.counts.errors === 1 ? "" : "s"}`, "err");
+  // The vanilla catalog sits under the project list: it opens the inspector of one project, which reads that project's own
+  // reference snapshot (or the live catalog). Without a selected project it names the last selected or first readable one.
+  const storedLastProject = () => { try { return localStorage.getItem("kosmo.lastProject"); } catch (_) { return null; } };
+  function renderCatalogNav(cur) {
+    const box = $("#catalog-nav");
+    const readable = state.projects ? state.projects.projects.filter((p) => p.ok) : [];
+    const find = (s) => s && readable.find((p) => p.slug === s);
+    let target = find(cur), why = null;
+    if (target) { try { localStorage.setItem("kosmo.lastProject", target.slug); } catch (_) { /* private mode */ } }
+    else if ((target = find(storedLastProject()))) why = "Last selected project";
+    else if ((target = readable[0])) why = "First project";
+    if (!target) {
+      box.replaceChildren(el("p", { class: "faint sidebar-empty", text: "Open a project to browse the catalog." }));
+      return;
+    }
+    const name = target.nation || target.name || target.slug;
+    const here = !why && (location.hash.match(/^#\/p\/([^/?]+)\/inspector(?:[/?]|$)/) || [])[1] === target.slug;
+    box.replaceChildren(el("a", { class: "catalog-link", href: route("p", target.slug, "inspector"), "aria-current": here ? "page" : null,
+      "aria-label": `Vanilla catalog for ${name} (${target.slug})${why ? `, ${why.toLowerCase()}` : ""}` },
+      el("span", { class: "title", text: "Vanilla catalog" }),
+      why ? el("span", { class: "faint", text: `${why}: ${name}` }) : null));
+  }
   function renderSidebar(current) {
     const list = $("#project-list");
     const data = state.projects;
+    const cur = current !== undefined ? current : (location.hash.match(/^#\/p\/([^/?]+)/) || [])[1];
+    renderCatalogNav(cur);
     if (!data) return;
     if (!projectFilter.isConnected) list.before(projectFilter);
-    const cur = current !== undefined ? current : (location.hash.match(/^#\/p\/([^/?]+)/) || [])[1];
     projectFilter.hidden = data.projects.length <= 5;
     if (!data.projects.length) {
       list.replaceChildren(el("p", { class: "faint sidebar-empty" }, "No projects yet. ", el("a", { href: "#/start" }, "Start a nation or map")));
       return;
     }
     const shown = projectFilter.hidden ? data.projects : data.projects.filter((p) => projectMatches(p) || p.slug === cur);
+    // The slug is shown only where two projects would otherwise look the same.
+    const shownName = (p) => txt(p.nation || p.name || p.slug);
+    const dupName = (p) => data.projects.filter((x) => x.ok && shownName(x) === shownName(p)).length > 1;
     if (!shown.length) { list.replaceChildren(el("p", { class: "faint sidebar-empty", role: "status", text: "No project matches the filter." })); return; }
     list.replaceChildren(...shown.map((p) => {
       if (!p.ok) {
@@ -370,18 +483,20 @@
           el("div", { class: "meta" },
             p.era_name ? el("span", { text: p.era_name }) : null,
             p.version ? el("span", { text: `v${p.version}` }) : null, validationBadge(p.validation)),
-          el("div", { class: "faint mono slug", text: p.slug })));
+          dupName(p) ? el("div", { class: "faint mono slug", text: p.slug }) : null));
     }));
   }
 
   // ---------- project shell ----------
-  // Section groups shown in the tab bar; keys and routes are unchanged.
+  // Section groups shown in the tab bar; keys and routes are unchanged. Browse and Build are always visible;
+  // the secondary Files group sits behind the More disclosure so the page content starts sooner on narrow screens.
   const TAB_GROUPS = [
-    ["browse", "Browse", [["overview", "Overview"], ["nation", "Nation"], ["units", "Units"], ["pretenders", "Pretenders"], ["sites", "Sites"], ["spells", "Spells"], ["items", "Items"], ["maps", "Maps"], ["balance", "Balance"]]],
-    ["edit", "Edit", [["author", "Create & edit"], ["validation", "Validation"], ["export", "Export & Workshop"]]],
-    ["files", "Files", [["source", "Source"], ["assets", "Assets"], ["other", "Other definitions"], ["docs", "Docs"]]],
+    ["browse", "Browse", [["overview", "Overview"], ["nation", "Nation"], ["units", "Units"], ["pretenders", "Pretenders"], ["sites", "Sites"], ["spells", "Spells"], ["items", "Items"], ["mercs", "Mercenaries"], ["maps", "Maps"], ["balance", "Balance"]]],
+    ["edit", "Build", [["author", "Advanced tools"], ["validation", "Validation"], ["export", "Export"]]],
+    ["files", "More", [["source", "Source"], ["assets", "Assets"], ["other", "Other definitions"], ["docs", "Docs"]]],
   ];
-  const TABS = TAB_GROUPS.flatMap((g) => g[2]);
+  // The vanilla inspector is reached from the sidebar's Catalog section, not the tab bar.
+  const TABS = [...TAB_GROUPS.flatMap((g) => g[2]), ["inspector", "Vanilla catalog"]];
   // Sections that follow the nation selector; the rest are always project-wide.
   const NATION_TABS = new Set(["overview", "nation", "units", "pretenders", "balance", "sites"]);
   const nationUnits = (m) => m.monsters.filter((u) => inSelectedNation(m, unitNationUids(u)));
@@ -397,9 +512,9 @@
   }
   function tabCount(m, key) {
     const c = m.counts;
-    // Units counts the recruitable roster (and unassigned monsters) of the selected nation; pretender forms are counted under Pretenders.
-    return { nation: c.nations, units: nationUnits(m).filter((u) => u.role !== "pretender").length, pretenders: nationPretenderCount(m),
-      sites: nationSites(m).length, spells: otherOfKind(m, "spell").length, items: otherOfKind(m, "item").length, other: c.other_definitions, assets: c.asset_files,
+    // Units counts every entry its list shows for the selected nation (recruits, heroes, summons, pretender forms ...).
+    return { nation: c.nations, units: nationUnits(m).length, pretenders: nationPretenderCount(m),
+      sites: nationSites(m).length, spells: otherOfKind(m, "spell").length, items: otherOfKind(m, "item").length, mercs: otherOfKind(m, "merc").length, other: c.other_definitions, assets: c.asset_files,
       validation: m.validation ? m.validation.counts.errors + m.validation.counts.warnings + m.validation.counts.unverified : null,
       docs: m.project.docs.length + ((state.meta && state.meta.docs.length) || 0) }[key];
   }
@@ -416,48 +531,150 @@
       state.nation = { slug, key: sel.value };
       rememberNation(slug, sel.value);
       // The Nation tab's argument is the nation itself, so it is dropped; other details stay open.
-      location.hash = active === "nation" || !arg ? route("p", slug, active) : route("p", slug, active, arg);
+      // An open section editor ("<section>/edit/<key>") keeps its entry.
+      location.hash = active === "nation" || !arg ? route("p", slug, active)
+        : SECTION_EDITORS[active] && arg === "edit" ? route("p", slug, ...parseHash().slice(2)) : route("p", slug, active, arg);
     });
-    const heroes = active === "author" && arg === "heroes";
-    const scoped = NATION_TABS.has(active) || heroes;
+    // Tab tooltips say which sections follow the selector; no standing explanation here.
     return el("div", { class: "nation-bar", role: "group", "aria-label": "Nation selection" },
-      el("label", { for: "nation-select", text: "Nation" }), sel,
-      scoped ? el("span", { class: "faint", text: heroes ? "Heroes are edited for this nation." : "Filters the Browse sections." })
-        : el("span", null, badge("project-wide", "info"), el("span", { class: "faint", text: " Not filtered by nation." })));
+      el("label", { for: "nation-select", text: "Nation" }), sel);
+  }
+  // The nation selector appears only where it filters something: the nation sections, and Heroes (set per nation).
+  const showsNation = (active, arg) => NATION_TABS.has(active) || (active === "author" && arg === "heroes");
+  // Remembered per project so the Vanilla catalog can offer an exact way back.
+  const lastProjectHash = new Map();
+  function tabLink(m, key, label, active) {
+    const slug = m.project.slug, cnt = tabCount(m, key), wide = !NATION_TABS.has(key);
+    const xs = key === "export" ? exportStatus(m) : null;
+    return el("a", { href: route("p", slug, key), "aria-current": key === active ? "page" : null, class: wide ? "wide" : null,
+      title: xs ? `Export: ${xs[0]}` : wide ? "Project-wide" : `Filtered to ${nationScopeText(m)}` },
+      label, cnt !== undefined && cnt !== null ? el("span", { class: "count", text: cnt }) : null,
+      xs ? el("span", { class: `tab-flag ${xs[1]}`, text: xs[0] }) : null);
+  }
+  // "More" disclosure for the secondary sections (Source, Assets, Other definitions, Docs). A button controls a list of
+  // ordinary links: Escape or a click elsewhere closes it, arrow keys move through it, and the current section shows on the button.
+  function moreMenu(m, items, active) {
+    const cur = items.find(([k]) => k === active);
+    const id = "tab-more-list";
+    const list = el("ul", { class: "tab-more-list", id, hidden: true }, items.map(([k, l]) => el("li", null, tabLink(m, k, l, active))));
+    const btn = el("button", { type: "button", class: "tab-more-btn" + (cur ? " is-current" : ""), "aria-expanded": "false", "aria-controls": id },
+      cur ? `More: ${cur[1]}` : "More", el("span", { class: "caret", "aria-hidden": "true", text: "▾" }));
+    const wrap = el("div", { class: "tab-more" }, btn, list);
+    const links = () => [...list.querySelectorAll("a")];
+    const outside = (e) => { if (!wrap.contains(e.target)) setOpen(false); };
+    function setOpen(open, focus) {
+      list.hidden = !open;
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open) document.addEventListener("pointerdown", outside, true); else document.removeEventListener("pointerdown", outside, true);
+      if (open && focus) (links().find((a) => a.getAttribute("aria-current") === "page") || links()[0]).focus();
+      if (!open && focus) btn.focus();
+    }
+    btn.addEventListener("click", () => setOpen(list.hidden, false));
+    btn.addEventListener("keydown", (e) => { if (e.key === "ArrowDown") { e.preventDefault(); setOpen(true, true); } });
+    wrap.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !list.hidden) { e.preventDefault(); e.stopPropagation(); setOpen(false, true); return; }
+      const ls = links(), i = ls.indexOf(document.activeElement);
+      if (i < 0 || (e.key !== "ArrowDown" && e.key !== "ArrowUp")) return;
+      e.preventDefault(); e.stopPropagation();
+      if (e.key === "ArrowUp" && i === 0) { btn.focus(); return; }
+      ls[Math.min(ls.length - 1, i + (e.key === "ArrowDown" ? 1 : -1))].focus();
+    });
+    wrap.addEventListener("focusout", (e) => { if (!list.hidden && e.relatedTarget && !wrap.contains(e.relatedTarget)) setOpen(false); });
+    list.addEventListener("click", (e) => { if (e.target.closest("a")) setOpen(false); });
+    return wrap;
   }
   function projectShell(m, active, arg) {
     const slug = m.project.slug;
+    if (active === "inspector") return catalogShell(m);
     const n = selectedNation(m) || m.nations[0];
     const banner = bannerImg(m.project.banner, `${m.project.mod_name || m.project.name || slug} banner`);
-    const tabs = el("nav", { class: "tabs", "aria-label": "Project sections" }, TAB_GROUPS.map(([gk, glabel, items]) =>
-      el("div", { class: `tab-group tab-group-${gk}`, role: "group", "aria-labelledby": `tab-group-${gk}` },
-        el("span", { class: "tab-group-label", id: `tab-group-${gk}`, text: glabel }),
-        items.map(([key, label]) => {
-          const cnt = tabCount(m, key), wide = !NATION_TABS.has(key);
-          return el("a", { href: route("p", slug, key), "aria-current": key === active ? "page" : null, class: wide ? "wide" : null,
-            title: wide ? "Project-wide" : `Filtered to ${nationScopeText(m)}` },
-            label, cnt !== undefined && cnt !== null ? el("span", { class: "count", text: cnt }) : null);
-        }))));
+    const [primary, secondary] = [TAB_GROUPS.filter((g) => g[0] !== "files"), TAB_GROUPS.find((g) => g[0] === "files")];
+    const groups = el("div", { class: "tabs-scroll", id: "tabs-scroll" }, primary.map(([gk, glabel, items]) =>
+      el("div", { class: `tab-group tab-group-${gk}`, role: "group", "aria-label": glabel }, items.map(([key, label]) => tabLink(m, key, label, active)))));
+    // Narrow screens put the tabs in one sideways-scrolling row; these buttons (with a fade) show there is more on that
+    // side and scroll by about a screen width. They are hidden whenever that side has nothing more.
+    const nudge = (dir, label, glyph) => el("button", { type: "button", class: `tabs-nudge tabs-${dir < 0 ? "prev" : "next"}`, "aria-label": label,
+      "aria-controls": "tabs-scroll", hidden: true, onclick: () => groups.scrollBy({ left: dir * Math.max(120, groups.clientWidth * 0.7), behavior: reducedMotion() ? "auto" : "smooth" }) },
+      el("span", { "aria-hidden": "true", text: glyph }));
+    const prev = nudge(-1, "Scroll section tabs left", "‹"), next = nudge(1, "Scroll section tabs right", "›");
+    const rail = el("div", { class: "tabs-rail" }, prev, groups, next);
+    tabOverflow(rail, groups, prev, next);
+    const tabs = el("nav", { class: "tabs", "aria-label": "Project sections" }, rail, moreMenu(m, secondary[2], active));
+    // Left/Right move along the visible tabs and the More button.
     tabs.addEventListener("keydown", (e) => {
       if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
-      const links = [...tabs.querySelectorAll("a")];
-      const i = links.indexOf(document.activeElement);
+      const stops = [...groups.querySelectorAll("a"), tabs.querySelector(".tab-more-btn")];
+      const i = stops.indexOf(document.activeElement);
       if (i < 0) return;
       e.preventDefault();
-      links[(i + (e.key === "ArrowRight" ? 1 : links.length - 1)) % links.length].focus();
+      stops[(i + (e.key === "ArrowRight" ? 1 : stops.length - 1)) % stops.length].focus();
     });
+    const nDrafts = unsavedDrafts(slug).length;
     const head = el("div", { class: "proj-head" }, banner,
       el("div", { class: "proj-title" },
         el("h1", { tabindex: "-1", id: "page-title", text: m.project.mod_name || m.project.name || slug }),
         el("div", { class: "sub" },
-          [n && n.epithet, m.project.era_name, m.project.version && `v${m.project.version}`, `target Dominions ${txt(m.project.target_game_version)}`]
+          [n && n.epithet, m.project.era_name, m.project.version && `v${m.project.version}`]
             .filter(Boolean).join(" · "))),
-      exportHeadButton(m, active));
+      el("div", { class: "proj-actions" },
+        showsNation(active, arg) ? nationBar(m, active, arg) : null,
+        el("span", { id: "draft-status", "data-slug": slug, hidden: !nDrafts || null },
+          el("a", { class: "badge warn", href: route("p", slug, "export"), title: "Drafts are kept in this browser tab only; Export lists them" },
+            `${nDrafts} unsaved draft${nDrafts === 1 ? "" : "s"}`))));
     const banners = [];
     if (m.catalog_error) banners.push(stateBox("empty", "No game-data catalog.",
       `${m.catalog_error.message} Donor stats and vanilla references are shown as unresolved.`));
     for (const d of m.diagnostics || []) banners.push(stateBox(d.severity === "error" ? "error" : "empty", d.code, d.message));
-    return [head, ...banners, nationBar(m, active, arg), tabs].filter(Boolean);
+    return [head, receiptPanel(slug), ...banners, tabs].filter(Boolean);
+  }
+  const reducedMotion = () => !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  // Shows a scroll button only on a side with hidden tabs. A focused button that disappears hands focus to the nearest tab.
+  function tabOverflow(rail, sc, prev, next) {
+    let ro = null;
+    const sync = () => {
+      if (!sc.isConnected) { if (ro && rail.dataset.mounted) ro.disconnect(); return; }
+      rail.dataset.mounted = "1";
+      const max = sc.scrollWidth - sc.clientWidth, left = max > 1 && sc.scrollLeft > 1, right = max > 1 && sc.scrollLeft < max - 1;
+      for (const [b, on] of [[prev, left], [next, right]]) {
+        if (!on && !b.hidden && document.activeElement === b) {
+          const ls = [...sc.querySelectorAll("a")];
+          const t = b === prev ? ls[0] : ls[ls.length - 1];
+          if (t) t.focus({ preventScroll: true });
+        }
+        b.hidden = !on;
+      }
+      rail.classList.toggle("can-left", left);
+      rail.classList.toggle("can-right", right);
+    };
+    sc.addEventListener("scroll", sync, { passive: true });
+    if (typeof ResizeObserver === "function") { ro = new ResizeObserver(sync); ro.observe(sc); }
+    return sync;
+  }
+  // After a route renders, centre the current tab inside the scrolling strip. Only the strip scrolls, never the page;
+  // a current section in the More menu leaves the strip where it is.
+  function revealActiveTab() {
+    const sc = main.querySelector(".tabs-scroll");
+    if (!sc || sc.scrollWidth <= sc.clientWidth + 1) return;
+    const a = sc.querySelector('a[aria-current="page"]');
+    if (!a) return;
+    const sr = sc.getBoundingClientRect(), ar = a.getBoundingClientRect();
+    sc.scrollLeft += (ar.left + ar.width / 2) - (sr.left + sr.width / 2);
+  }
+  // The Vanilla catalog is a separate, read-only reference context: no project tabs or nation selector, its own heading,
+  // where the data comes from, and an explicit way back. Routes (#/p/<slug>/inspector/...) and the APIs are unchanged;
+  // the project in the address only decides which snapshot or live catalog is read.
+  function catalogShell(m) {
+    const slug = m.project.slug, name = txt(m.project.mod_name || m.project.name || slug);
+    const cat = catalogOf(m), snap = cat && cat.reference_snapshot;
+    const back = lastProjectHash.get(slug) || route("p", slug, "overview");
+    return [el("header", { class: "catalog-head" },
+      el("div", { class: "catalog-head-text" },
+        el("p", { class: "catalog-kicker" }, badge("read-only reference", "info"), " Vanilla game data"),
+        el("h1", { tabindex: "-1", id: "page-title", text: "Vanilla catalog" }),
+        el("p", { class: "sub" }, !cat ? "No catalog is available for this project."
+          : snap ? ["Reading ", el("strong", { text: `${name}'s reference snapshot` }), ` (${txt(snap.snapshot)}). Nothing here changes the project.`]
+            : ["Reading ", el("strong", { text: "the live catalog" }), ` the server was started with, opened from ${name}. Nothing here changes the project.`])),
+      el("a", { class: "btn catalog-back", href: back }, `← Back to ${name}`))];
   }
 
   // ---------- project readiness (top of Overview) ----------
@@ -479,7 +696,7 @@
     const slug = m.project.slug, R = m.readiness, p = m.provenance;
     const holder = el("section", { class: "panel readiness", "aria-labelledby": "ready-h" });
     if (!R) {
-      holder.append(el("h3", { id: "ready-h", text: "Project readiness" }),
+      holder.append(el("h3", { id: "ready-h", text: "Readiness" }),
         stateBox("empty", "Readiness is not available from this server.", "Restart `kosmokrator serve` to load the current version, then reload."));
       return holder;
     }
@@ -514,16 +731,14 @@
           text: [`${sc.custom} custom`, sc.vanilla ? `${sc.vanilla} vanilla` : null, sc.inherited ? `${sc.inherited} copied from project units` : null,
             nMissingSpr ? `${nMissingSpr} missing` : "none missing"].filter(Boolean).join(" · "),
           action: el("a", { href: route("p", slug, "units") }, "Units") },
-        { key: "shared", kind: "info", label: "Shared sprites",
-          text: S.shared_count ? `${S.shared_count} sprite${S.shared_count === 1 ? " is" : "s are"} used by more than one unit (allowed).` : "Each custom sprite is used by one unit.",
-          action: null },
         { key: "export", kind: xKind, label: "Latest export", text: xText, detail: xDetail,
           action: el("button", { type: "button", class: "btn btn-small btn-ghost", onclick: goExport }, "Open export") },
       ];
       const attention = R.status !== "ready";
-      const kindWord = { ok: "OK", warn: "Check", err: "Fix", info: "Info" };
-      const list = el("ul", { class: "ready-list" }, rows.map((r) => el("li", { class: `ready-row is-${r.kind}`, "data-ready": r.key },
-        el("span", { class: `badge ${r.kind}`, text: kindWord[r.kind] }),
+      // Rows that pass are left out; the latest export always stays as the route to Export.
+      const kindWord = { warn: "Check", err: "Fix" };
+      const list = el("ul", { class: "ready-list" }, rows.filter((r) => r.kind === "warn" || r.kind === "err" || r.key === "export").map((r) => el("li", { class: `ready-row is-${r.kind}`, "data-ready": r.key },
+        kindWord[r.kind] ? el("span", { class: `badge ${r.kind}`, text: kindWord[r.kind] }) : el("span", { "aria-hidden": "true" }),
         el("span", { class: "ready-label", text: r.label }),
         el("span", { class: "ready-text" }, r.text, r.detail ? el("span", { class: "ready-detail" }, r.detail) : null),
         r.action ? el("span", { class: "ready-action" }, r.action) : null)));
@@ -546,7 +761,7 @@
         const srcText = (s) => s.source ? `${s.source.via} ${txt(s.source.ref)}${s.source.name ? ` ${s.source.name}` : ""}` : "";
         lists.push(el("details", { class: "raw" }, el("summary", null, `Vanilla and copied sprites (${sc.vanilla + sc.inherited})`),
           el("div", { class: "inner" },
-            el("p", { class: "panel-note", text: "Valid: these units show the game's own sprite (or another project unit's) instead of custom art. No vanilla image is packaged." }),
+            el("p", { class: "panel-note", text: "These units borrow an existing sprite instead of custom art." }),
             el("ul", { class: "plain-list ready-items" }, [...S.vanilla, ...S.inherited].map((s) => el("li", null, unitA(s), " ",
               badge(s.status === "vanilla" ? "vanilla sprite" : "copied sprite", "info"), " ",
               el("span", { class: "faint", text: `from ${srcText(s)}` }), " ", s.source ? srcRef(slug, p.file, s.source.line) : null,
@@ -556,7 +771,7 @@
       }
       if (S.shared.length) lists.push(el("details", { class: "raw" }, el("summary", null, `Shared sprites (${S.shared_count})`),
         el("div", { class: "inner" },
-          el("p", { class: "panel-note", text: "Informational: several units can use the same image. Give a unit its own art only if it should look different." }),
+          el("p", { class: "panel-note", text: "Allowed. Give a unit its own art only if it should look different." }),
           el("ul", { class: "plain-list ready-items" }, S.shared.map((g) => el("li", null,
             g.files.map((f, i) => [i ? " = " : "", el("code", { text: f })]), g.kind === "same_content" ? [" ", badge("identical files", "info")] : null,
             el("div", { class: "ready-units" }, g.monsters.map((u, i) => [i ? ", " : "", unitA(u)]))))),
@@ -564,14 +779,157 @@
 
       fillKids(holder,
         el("div", { class: "ready-head" },
-          el("h3", { id: "ready-h", text: "Project readiness" }),
-          badge(attention ? "needs attention" : "ready to export", attention ? "err" : "ok")),
-        list, lists,
-        el("p", { class: "panel-note", text: R.note }));
+          el("h3", { id: "ready-h", text: "Readiness" }),
+          attention ? badge("needs attention", "err") : null),
+        list, lists);
     }
     draw();
     exportUi(slug).redrawReadiness = draw;
     return holder;
+  }
+
+  // ---------- reference snapshot (Overview) ----------
+  // Copies the catalog tables and local reference art this project needs into <project>/.kosmokrator/reference so it
+  // can be browsed and edited without the external catalog. The server checks the saved .dm hash and the current
+  // snapshot id under the project lock; nothing here is ever packaged into exports or Workshop folders.
+  const mb = (n) => `${(Number(n || 0) / 1048576).toFixed(n >= 10485760 ? 0 : 1)} MB`;
+  function referenceUi(slug) {
+    if (!state.reference) state.reference = new Map();
+    if (!state.reference.has(slug)) state.reference.set(slug, { sprites: "referenced", busy: null, preview: null, result: null, error: null });
+    return state.reference.get(slug);
+  }
+  function referencePanel(m) {
+    const slug = m.project.slug, ref = m.reference, ui = referenceUi(slug), p = m.provenance;
+    if (!ref) return techSection("Reference snapshot", false,
+      stateBox("empty", "Not reported by this server.", "Restart `kosmokrator serve` to load the current version, then reload."));
+    const holder = el("div", { class: "inner stack" });
+    const base = `/api/projects/${encodeURIComponent(slug)}`;
+    const live = ref.live || {};
+    const body = () => ({ expected_sha256: p.sha256, expected_snapshot: ref.snapshot || null, sprites: ui.sprites });
+    async function run(preview) {
+      ui.busy = preview ? "preview" : "write"; ui.error = null; if (!preview) ui.result = null; draw();
+      try {
+        const r = await postJSON(`${base}/reference-snapshot`, { ...body(), preview });
+        if (preview) ui.preview = r;
+        else { ui.result = r; ui.preview = null; }
+      } catch (e) { ui.error = e; }
+      ui.busy = null;
+      if (!preview && ui.result) {
+        // The write never touches the .dm, so there is no .dm backup; replaced snapshots are deleted, not backed up.
+        const r = ui.result, t = r.totals || {}, gone = r.removed || [];
+        recordReceipt(slug, `Wrote reference snapshot ${txt(r.snapshot)}`, { written: true }, {
+          folder: `${slug}/${txt(r.path)}/`, folderNote: `${txt(t.files)} files · ${mb(t.bytes)}`,
+          backupNote: gone.length ? `None: the .dm was not changed. Replaced snapshot${gone.length === 1 ? "" : "s"} ${gone.join(", ")} deleted, not backed up.`
+            : "Not needed: the .dm was not changed and no earlier snapshot was replaced." });
+        state.models.delete(slug); state.catalogUnits && state.catalogUnits.clear();
+        await loadProjects(true);
+        try { state.meta = await getJSON("/api/meta"); } catch (_) { /* keep the old status */ }
+        await render();
+        toast("Reference snapshot written");
+        return;
+      }
+      draw();
+      const h = holder.querySelector("#ref-outcome"); if (h) h.focus();
+    }
+    const stateRow = {
+      none: ["info", "No snapshot", live.available ? "This project reads the live catalog the server was started with." : "No live catalog either: vanilla references are unresolved."],
+      offline: ["ok", "Self-contained", "Reading this project's snapshot. No live catalog is configured, so it cannot be compared or refreshed."],
+      current: ["ok", "Self-contained", "Reading this project's snapshot; it matches the live catalog."],
+      stale: ["warn", "Snapshot differs from live catalog", "Still reading this project's snapshot (versions are never mixed). Refresh to adopt the live catalog."],
+      invalid: ["err", "Snapshot failed verification", "The snapshot is not used and no live catalog data is substituted. Recreate it from a live catalog."],
+    }[ref.state] || ["info", txt(ref.state), ref.summary];
+    const needs = stateRow[0] === "warn" || stateRow[0] === "err";
+    const box = el("details", { class: "raw tech reference-panel", open: needs || ui.open || ui.busy || ui.error || ui.preview || ui.result ? true : null },
+      el("summary", null, "Reference snapshot", needs ? [" ", badge(stateRow[1], stateRow[0])] : null), holder);
+    box.addEventListener("toggle", () => { ui.open = box.open; });
+    const ver = (v) => v ? `${v.dataset_version ? `data ${v.dataset_version}` : "version unknown"}${v.revision ? ` · rev ${String(v.revision).slice(0, 10)}` : ""}` : "—";
+    const groupRows = (g) => Object.entries(g || {}).map(([k, x]) => [txt(k).replace(/_/g, " "), txt(x.files), mb(x.bytes)]);
+    function missingList(list, count) {
+      if (!list || !list.length) return el("p", { class: "muted", text: "Nothing referenced is missing from the source catalog." });
+      const label = (x) => x.kind === "sprite" ? `Unit ${x.id} ${x.frame} sprite` : x.kind === "unit" ? `Unit ${x.id}` : x.kind === "item_icon" ? `Item ${x.id} icon`
+        : x.kind === "trait_icons" ? "Native UI icons" : `${txt(x.kind).replace(/_/g, " ")} ${txt(x.name || x.id || "")}`;
+      return el("div", null, el("ul", { class: "plain-list ready-items" }, list.slice(0, 40).map((x) => el("li", null, el("strong", { text: label(x) }), " ", el("span", { class: "faint", text: txt(x.reason) })))),
+        (count || list.length) > 40 ? el("p", { class: "faint", text: `Showing 40 of ${count || list.length}.` }) : null);
+    }
+    function planView(r, written) {
+      const sc = r.scope || {};
+      return el("div", { class: "stack" },
+        el("p", null, el("strong", { id: "ref-outcome", tabindex: "-1", text: written ? `Snapshot ${txt(r.snapshot)} written.` : "Snapshot preview (nothing written yet)." }), " ",
+          badge(`${txt(r.totals && r.totals.files)} files · ${mb(r.totals && r.totals.bytes)}`, "info")),
+        el("dl", { class: "kv" },
+          el("dt", { text: "Catalog tables" }), el("dd", { text: `Complete: all ${txt(sc.table_count)} gamedata tables, byte for byte.` }),
+          el("dt", { text: "Unit sprites" }), el("dd", { text: sc.sprites === "all" ? `All ${txt(sc.sprite_units_count)} catalog units.` : `Partial: ${txt(sc.sprite_units_count)} catalog units this project references.` }),
+          el("dt", { text: "Item, gem and path icons" }), el("dd", { text: `Items ${txt(sc.item_icons)}; gem and path icons and the sacred badge (fixed set).` }),
+          el("dt", { text: "Native UI icons" }), el("dd", { text: sc.trait_icons ? "Copied from the verified workspace cache." : "Not available in this workspace; trait labels stay text-only." }),
+          el("dt", { text: "Source" }), el("dd", { text: `${txt((r.source || {}).name)} · ${ver(r.source)} · ${txt((r.source || {}).license)}` })),
+        table(["Group", "Files", "Size"], groupRows(r.groups), { caption: "What the snapshot holds" }),
+        el("details", { class: "raw", open: (r.missing_count || 0) > 0 && (r.missing_count || 0) <= 12 || null },
+          el("summary", null, `Missing from the source catalog (${txt(r.missing_count || 0)})`),
+          el("div", { class: "inner" }, missingList(r.missing, r.missing_count))),
+        written && (r.removed || []).length ? el("p", { class: "faint", text: `Replaced ${r.removed.join(", ")}.` }) : null);
+    }
+    function errorView(e) {
+      const err = e.error || {};
+      const title = { sha_mismatch: "Not written: the saved .dm changed since this page loaded.",
+        reference_changed: "Not written: the snapshot changed since this page loaded.",
+        catalog_missing: "A live catalog is needed to create or refresh the snapshot.",
+        project_locked: "Not written: another save or export holds the project lock.",
+        reference_too_large: "Not written: the snapshot would exceed the size limits.",
+        bad_csrf: "Not written: the page token is out of date.", bad_origin: "Not written: request was not from this page." }[err.code] || "Snapshot failed.";
+      const reload = ["sha_mismatch", "reference_changed", "bad_csrf"].includes(err.code);
+      return el("div", { class: "state state-error", role: "alert" },
+        el("strong", { id: "ref-outcome", tabindex: "-1", text: title }),
+        el("div", null, el("span", { class: "code", text: `[${txt(err.code)}] ` }), txt(err.message)),
+        el("div", { class: "btn-row" },
+          reload ? el("button", { type: "button", class: "btn btn-small", onclick: async () => { state.models.delete(slug); await loadProjects(true); await render(); } }, "Reload project") : null,
+          err.code === "project_locked" ? el("button", { type: "button", class: "btn btn-small", onclick: () => run(false) }, "Try again") : null),
+        el("p", { class: "panel-note", text: "Nothing was changed by this request; the previous snapshot, if any, is still in use." }));
+    }
+    function draw() {
+      const blocked = !CSRF ? "No editor token from this server; restart `kosmokrator serve` and reload."
+        : !live.available ? (ref.active ? "Refreshing needs the live catalog: start the server with --catalog. The current snapshot stays in use." : "Creating a snapshot needs the live catalog: start the server with --catalog.")
+        : null;
+      const scopeSel = el("select", { class: "input", id: "ref-sprites", disabled: ui.busy || blocked ? true : null },
+        el("option", { value: "referenced", text: "Sprites this project references (small)" }),
+        el("option", { value: "all", text: "Every catalog unit sprite (about 20 MB, 9,000 files)" }));
+      scopeSel.value = ui.sprites;
+      scopeSel.addEventListener("change", () => { ui.sprites = scopeSel.value; ui.preview = null; draw(); });
+      const sc = ref.scope || {}, t = ref.totals || {};
+      const nowMissing = ref.sprites_missing_now_count || 0;
+      fillKids(holder,
+        el("p", { class: "panel-note", text: "Copies the catalog data and art this project uses into its folder, so it works without the external catalog." }),
+        el("p", { class: "export-drafts", role: "note" }, badge("local only", "warn"),
+          " Contains imagery from your own copy of Dominions 6. Exports and Workshop folders never include it. Do not share it."),
+        el("ul", { class: "ready-list" },
+          el("li", { class: `ready-row is-${stateRow[0]}` }, el("span", { class: `badge ${stateRow[0]}`, text: { ok: "OK", warn: "Check", err: "Fix", info: "Info" }[stateRow[0]] }),
+            el("span", { class: "ready-label", text: "Status" }), el("span", { class: "ready-text", text: stateRow[2] })),
+          ref.active ? el("li", { class: "ready-row is-info" }, el("span", { class: "badge info", text: "Info" }), el("span", { class: "ready-label", text: "Snapshot" }),
+            el("span", { class: "ready-text" }, `${ver(ref.version)} · ${txt(t.files)} files · ${mb(t.bytes)}`,
+              el("span", { class: "ready-detail mono faint", text: `${txt(ref.snapshot)} · created ${txt(ref.created_utc)}` }))) : null,
+          ref.active ? el("li", { class: `ready-row is-${sc.sprites === "all" || !nowMissing ? "ok" : "warn"}` },
+            el("span", { class: `badge ${sc.sprites === "all" || !nowMissing ? "ok" : "warn"}`, text: sc.sprites === "all" || !nowMissing ? "OK" : "Check" }),
+            el("span", { class: "ready-label", text: "Coverage" }),
+            el("span", { class: "ready-text", text: `Tables complete (${txt(sc.table_count)}). ${sc.sprites === "all" ? "All unit sprites." : `Sprites for ${txt(sc.sprite_units_count)} referenced units (partial).`}`
+              + (nowMissing ? ` ${nowMissing} unit${nowMissing === 1 ? " referenced now has" : "s referenced now have"} no sprite in the snapshot; refresh to add.` : "")
+              + (ref.project_changed ? " The .dm changed since the snapshot was made." : "") })) : null,
+          live.available ? el("li", { class: "ready-row is-info" }, el("span", { class: "badge info", text: "Info" }), el("span", { class: "ready-label", text: "Live catalog" }),
+            el("span", { class: "ready-text", text: ver(live) })) : null),
+        ref.state === "invalid" && ref.error ? stateBox("error", txt(ref.error.message), (ref.error.problems || []).join(", ") || null) : null,
+        el("div", { class: "btn-row export-controls" },
+          el("label", { for: "ref-sprites", class: "faint", text: "Sprites" }), scopeSel,
+          el("button", { type: "button", class: "btn btn-small btn-ghost", disabled: ui.busy || blocked ? true : null, "aria-describedby": blocked ? "ref-blocked" : null, onclick: () => run(true) },
+            ui.busy === "preview" ? "Checking…" : "Preview size and coverage"),
+          el("button", { type: "button", class: "btn", disabled: ui.busy || blocked ? true : null, "aria-describedby": blocked ? "ref-blocked" : null, onclick: () => run(false) },
+            ui.busy === "write" ? "Writing snapshot…" : ref.active ? "Refresh snapshot" : "Make project self-contained")),
+        blocked ? el("p", { class: "panel-note", id: "ref-blocked", text: blocked }) : null,
+        el("div", { role: "status", "aria-live": "polite" }, ui.busy ? stateBox("loading", ui.busy === "preview" ? "Measuring what the snapshot would hold..." : "Copying and verifying the snapshot...") : null),
+        ui.error ? errorView(ui.error) : ui.result ? planView(ui.result, true) : ui.preview ? planView(ui.preview, false) : null,
+        ref.active && !ui.preview && !ui.result ? el("details", { class: "raw" }, el("summary", null, `Missing from the source catalog when made (${(ref.missing || []).length})`),
+          el("div", { class: "inner" }, missingList(ref.missing))) : null,
+        el("p", { class: "panel-note", text: `Stored in ${slug}/.kosmokrator/reference/ with a manifest of sources, versions, licences and hashes. Catalog data: dom6inspector (GPL-3.0), licence copied alongside.` }));
+    }
+    draw();
+    return box;
   }
 
   // ---------- views ----------
@@ -580,26 +938,32 @@
     const tile = (n, l, href) => el(href ? "a" : "div", { class: "tile", href, style: null },
       el("div", { class: "n", text: n }), el("div", { class: "l", text: l }));
     const base = `/api/projects/${encodeURIComponent(slug)}`;
-    const units = nationUnits(m), roleN = (r) => units.filter((u) => u.role === r).length;
+    const rc = rosterCounts(m);
     const pretenders = nationPretenderCount(m);
+    // Roster tiles open Units with the matching role filter, so each number leads to the same list.
+    const rosterTile = (key, label) => { const a = tile(rc[key], label, route("p", slug, "units")); a.addEventListener("click", () => { state.unitRole = key; }); return a; };
     return el("div", { class: "stack" },
       (m.mod_info.description || {}).value ? el("p", { class: "prose muted", text: m.mod_info.description.value }) : null,
       readinessPanel(m),
+      referencePanel(m),
       el("section", { "aria-labelledby": "ov-nation" },
         el("h4", { id: "ov-nation", text: `Nation: ${nationScopeText(m)}` }),
         el("div", { class: "tiles" },
-          tile(roleN("troop"), "troops", route("p", slug, "units")), tile(roleN("commander"), "commanders", route("p", slug, "units")),
-          pretenders !== null ? tile(pretenders, state.nation.key === N_NONE ? "unlisted custom gods" : "pretenders listed", route("p", slug, "pretenders")) : null,
-          roleN("pretender") ? tile(roleN("pretender"), "custom pretender forms", route("p", slug, "pretenders")) : null,
+          rosterTile("troop", "recruitable troops"), rosterTile("commander", "recruitable commanders"),
+          rc.hero ? rosterTile("hero", rc.hero === 1 ? "hero" : "heroes") : null,
+          rc.summon ? rosterTile("summon", rc.summon === 1 ? "summon" : "summons") : null,
+          rc.other ? rosterTile("other", "start army / defence only") : null,
+          pretenders !== null ? tile(pretenders, state.nation.key === N_NONE ? "unlisted custom gods" : pretenders === 1 ? "pretender listed" : "pretenders listed", route("p", slug, "pretenders")) : null,
+          rc.pretender ? tile(rc.pretender, rc.pretender === 1 ? "custom pretender form" : "custom pretender forms", route("p", slug, "pretenders")) : null,
           tile(nationSites(m).length, state.nation.key === N_ALL || state.nation.key === N_NONE ? "sites" : "start sites", route("p", slug, "sites")),
-          roleN("unassigned") ? tile(roleN("unassigned"), "monsters not recruited", route("p", slug, "units")) : null)),
+          rc.unassigned ? rosterTile("unassigned", "units tied to no nation") : null)),
       el("section", { "aria-labelledby": "ov-project" },
         el("h4", { id: "ov-project", text: "Project-wide" }),
         el("div", { class: "tiles" },
           tile(c.nations, "nations", route("p", slug, "nation")), tile(c.monsters, "monster definitions", route("p", slug, "units")),
           tile(c.sites, "site definitions", route("p", slug, "sites")))),
       // Validation counts live in the readiness panel above; this panel keeps only what readiness does not show.
-      panel("Dependencies and compatibility",
+      panel("Dependencies",
         !v ? stateBox("error", "Validation unavailable", "See diagnostics above.")
           : !m.readiness ? el("p", null, v.ok ? badge("no errors", "ok") : badge("has errors", "err"), " ",
             `${v.counts.errors} errors · ${v.counts.warnings} warnings · ${v.counts.unverified} unverified `,
@@ -607,7 +971,7 @@
         m.compatibility && (m.compatibility.overlaps || []).length ? el("p", null, badge(`${m.compatibility.overlaps.length} overlap(s) with dependencies or vanilla`, "warn"),
           el("span", { class: "faint" }, " Listed in the ", el("a", { href: route("p", slug, "validation") }, "validation report"), ".")) : null,
         CSRF ? depEditor(m) : el("p", { class: "faint", text: m.project.dependencies.length ? `Dependencies: ${m.project.dependencies.join(", ")}` : "No dependencies listed." })),
-      techSection("Advanced: mod info, catalog, JSON data and limitations", false,
+      techSection("Details", false,
         el("div", { class: "grid-2" },
           panel("Mod info", el("dl", { class: "kv" },
             el("dt", { text: "#modname" }), el("dd", { text: (m.mod_info.modname || {}).value || "—" }),
@@ -624,12 +988,12 @@
             el("dt", { text: "Other definitions" }), el("dd", null, el("a", { href: route("p", slug, "other") }, txt(c.other_definitions))))),
           panel("Catalog provenance",
             p.catalog ? el("dl", { class: "kv" },
+              el("dt", { text: "Read from" }), el("dd", { text: p.catalog.reference_snapshot ? `this project's reference snapshot (${p.catalog.reference_snapshot.snapshot})` : "live catalog" }),
               el("dt", { text: "Dataset" }), el("dd", { text: p.catalog.dataset_version || "unknown" }),
               el("dt", { text: "Revision" }), el("dd", { class: "hash", text: p.catalog.revision || "unknown" }),
               el("dt", { text: "Source" }), el("dd", { class: "faint", text: p.catalog.source })) :
               el("p", { class: "muted", text: "No catalog supplied." }))),
-        panel("Data (read-only JSON, project-wide)",
-          el("p", { class: "panel-note", text: "Stable, project-scoped URLs. Each carries schema, provenance (tool, manual and catalog version, .dm hash) and diagnostics." }),
+        panel("JSON",
           table(["Resource", "URL", ""], [
             ["Whole project", base], ["Nations", `${base}/nations`], ["Monsters", `${base}/monsters`], ["Sites", `${base}/sites`],
             ["Pretenders", `${base}/pretenders`], ["Other definitions", `${base}/other_definitions`], ["Assets", `${base}/assets`], ["Validation", `${base}/validation`],
@@ -648,13 +1012,14 @@
     const n = selectedNation(m);
     if (!n) {
       return el("div", { class: "stack" }, newBtn,
-        stateBox("empty", "Choose a nation.", "The selector above shows all nations or the definitions tied to none; pick one nation to see its details."),
-        table(["Nation", "Era", "Line"], m.nations.map((x) => [el("a", { href: route("p", slug, "nation", nationKey(x)) }, nationLabel(x)),
-          txt(x.era_name || "unknown"), srcRef(slug, x.source.file, x.source.line)])));
+        stateBox("empty", "Choose a nation."),
+        table(["Nation", "Era"], m.nations.map((x) => [el("a", { href: route("p", slug, "nation", nationKey(x)) }, nationLabel(x)),
+          txt(x.era_name || "unknown")])));
     }
     // Roster lines and per-unit Compare stay reachable through Advanced (authored commands) and the unit sheet.
-    const rows = (list) => list.length ? table(["Unit", "Command"], list.map((r) =>
-      [monsterLink(slug, r.monster), el("code", { text: r.command })])) : el("p", { class: "muted", text: "None." });
+    // The recruiting command is in the tooltip; the authored commands under Details list every line.
+    const rows = (list) => list.length ? el("ul", { class: "plain-list" }, list.map((r) =>
+      el("li", { title: txt(r.command) }, monsterLink(slug, r.monster)))) : el("p", { class: "muted", text: "None." });
     const sa = n.start_army;
     const swatch = (rgb) => {
       const s = el("span", { class: "swatch", "aria-hidden": "true" });
@@ -669,18 +1034,23 @@
         el("div", { class: "nation-ident" },
           n.flag ? el("div", { class: "sprite-box nation-flag" }, spriteImg(`${n.flag.url}?format=png`, `${txt(n.name)} flag`, 1)) : null,
           el("dl", { class: "kv" },
-            el("dt", { text: "Nation id" }), el("dd", null, el("code", { text: `#selectnation ${txt(n.id)}` }), " ", srcRef(slug, n.source.file, n.source.line)),
             el("dt", { text: "Era" }), el("dd", { text: n.era_name ? `${n.era_name} (#era ${n.era})` : "unknown" }),
             el("dt", { text: "Colours" }), el("dd", null, Object.entries(n.colors).map(([k, c]) => el("span", { title: `#${k} ${c.rgb.join(" ")}` }, swatch(c.rgb), `${k === "color" ? "primary" : "secondary"} `))),
             n.flag ? null : [el("dt", { text: "Flag" }), el("dd", { text: "none" })])),
         n.brief ? el("p", { class: "prose", style: null }, el("em", { text: n.brief })) : null,
-        Number.isInteger(n.id) ? el("p", { class: "cross-link" }, el("a", { class: "btn btn-small", href: route("p", slug, "author", "heroes") }, "Edit heroes"),
-          el("span", { class: "faint", text: ` For ${txt(n.name)} (#${n.id}), in Create & edit.` })) : null),
+        Number.isInteger(n.id) ? el("p", { class: "cross-link" }, el("a", { class: "btn btn-small", href: route("p", slug, "author", "heroes") }, "Edit heroes")) : null),
       n.description ? panel("Description", el("p", { class: "prose", text: n.description })) : null,
       n.summary && !same(n.summary, n.description) ? panel("Summary", el("p", { class: "prose", text: n.summary })) : null,
       el("div", { class: "grid-2" },
-        panel("Recruitable troops", rows(n.recruitment.troops)),
-        panel("Recruitable commanders", rows(n.recruitment.commanders))),
+        panel("Fort troops (#addrecunit)", rows(n.recruitment.troops)),
+        panel("Fort commanders (#addreccom)", rows(n.recruitment.commanders))),
+      (() => {
+        // Capital-site, terrain and coastal recruits come from the units' own recruitment entries (same source as Units and Balance).
+        const other = m.monsters.flatMap((u) => recruitsFor(m, u, n).filter((r) => !/^#addrec(unit|com)$/.test(txt(r.via))).map((r) => ({ u, r })));
+        return other.length ? panel(`Other recruitment (${other.length})`, el("ul", { class: "plain-list" }, other.map(({ u, r }) =>
+          el("li", null, el("a", { href: route("p", slug, "units", u.id ?? u.uid) }, `${txt(u.name || "(unnamed)")}${u.id !== null && u.id !== undefined ? ` (#${u.id})` : ""}`), " ", el("code", { text: txt(r.via) }), " ",
+            el("span", { class: "faint", text: r.site_name ? `${r.where} (${r.site_name})` : txt(r.where) }))))) : null;
+      })(),
       el("div", { class: "grid-2" },
         panel("Start army",
           el("dl", { class: "kv" },
@@ -689,23 +1059,24 @@
             ...sa.units.flatMap((u) => [el("dt", { text: `Unit slot ${u.slot}` }),
               el("dd", null, u.count !== null ? `${u.count} × ` : unresolved("count unset "), monsterLink(slug, u.monster), " ", srcRef(slug, n.source.file, u.lines[0]))]))),
         panel("Start sites and gems",
-          n.start_sites.length ? table(["Site", "Gems", "Line"], n.start_sites.map((s) => {
+          n.start_sites.length ? table(["Site", "Gems"], n.start_sites.map((s) => {
             const g = n.gem_sites.find((x) => x.site === s.site.uid);
-            return [siteLink(slug, s.site), g ? gemList(g.gems) : unresolved("no modelled gems"), srcRef(slug, n.source.file, s.line)];
-          })) : el("p", { class: "muted", text: "No #startsite commands." }),
-          el("p", { class: "panel-note" }, "Gem income from start sites: ", gemList(n.gem_sites.flatMap((g) => g.gems), "none modelled"), " per turn (static reading; other income not included)."))),
+            return [siteLink(slug, s.site), g ? gemList(g.gems) : unresolved("no modelled gems")];
+          })) : el("p", { class: "muted", text: "No start sites." }),
+          el("p", { class: "panel-note" }, "Start-site gems per turn: ", gemList(n.gem_sites.flatMap((g) => g.gems), "none")))),
       n.defence.length ? panel("Province defence, walls and guards", table(["Command", "Value", "Line"], n.defence.map((d) =>
         [el("code", { text: d.command }), d.monster ? monsterLink(slug, d.monster) : txt(d.count), srcRef(slug, n.source.file, d.line)]))) : null,
       n.diagnostics.length ? panel(`Diagnostics (${n.diagnostics.length})`, diagnosticsList(slug, n.diagnostics, n.source.file)) : null,
-      techSection(`Advanced: authored commands (${n.authored.length}), other commands, source and JSON`, false,
+      techSection("Details: commands, source and JSON", false,
         panel("Flag and clears",
           el("dl", { class: "kv" },
+            el("dt", { text: "Nation" }), el("dd", null, el("code", { text: `#selectnation ${txt(n.id)}` }), " ", srcRef(slug, n.source.file, n.source.line)),
             el("dt", { text: "Flag" }), el("dd", null, n.flag ? [el("code", { text: n.flag.path }), " ", srcRef(slug, n.source.file, n.flag.line), " ",
               el("a", { href: `${n.flag.url}?format=png`, target: "_blank", rel: "noopener" }, "Open PNG preview")] : "none"),
             el("dt", { text: "Clears" }), el("dd", null, n.clears.length ? n.clears.map((x) => [el("code", { text: x.command }), " ", srcRef(slug, n.source.file, x.line), " "]) : "none"))),
         n.other_commands.length ? panel("Other nation commands (listed, not interpreted)", table(["Command", "Arguments", "Status", "Line"], n.other_commands.map((o) =>
           [el("code", { text: o.command }), el("code", { text: o.args.join(" ") }), statusBadge(o.status), srcRef(slug, n.source.file, o.line)]))) : null,
-        panel("Authored commands", authoredTable(slug, n)),
+        panel(`Authored commands (${n.authored.length})`, authoredTable(slug, n)),
         sourcePanel(slug, n, "Nation"),
         panel("JSON", jsonActions(`/api/projects/${encodeURIComponent(slug)}/nations/${encodeURIComponent(n.id)}`, () => n, "Nation JSON"))));
   }
@@ -716,18 +1087,49 @@
   // cleared by #clearnation), scoped to the selected nation; never from the unit name or #unique. The backend role stays
   // commander. Hero-only units (no direct recruitment) are grouped under Heroes, ahead of Summons when both apply.
   const HERO_VIA = /^#(multi)?hero\d+$/;
-  function heroTies(m, u) {
+  // `n` (a nation object) overrides the selected nation; Balance classifies each project nation this way.
+  function heroTies(m, u, n) {
     const ties = (u.nations || []).filter((x) => HERO_VIA.test(txt(x.via)));
-    if (state.nation.key === N_ALL) return ties;
-    const n = state.nation.key === N_NONE ? null : selectedNation(m);
+    if (n === undefined) {
+      if (state.nation.key === N_ALL) return ties;
+      n = state.nation.key === N_NONE ? null : selectedNation(m);
+    }
     return n ? ties.filter((x) => x.nation === n.uid) : [];
   }
-  const isHero = (m, u) => heroTies(m, u).length > 0;
+  const isHero = (m, u, n) => heroTies(m, u, n).length > 0;
   const isSummon = (u) => Array.isArray(u.summoning) && u.summoning.length > 0;
-  function unitGroup(m, u) {
-    if (u.role === "pretender" || (u.recruitment || []).length) return u.role;
-    return isHero(m, u) ? "hero" : isSummon(u) ? "summon" : u.role;
+  // Shared roster classification for Units, Overview, the tab count and Balance. A recruit has a recruitment entry for the
+  // selected nation (fort, capital or other start site, terrain or coastal command); everything else is a hero, summon,
+  // pretender form, a unit tied only by start army or province defence ("other"), or tied to no nation.
+  function recruitsFor(m, u, n) {
+    const rec = u.recruitment || [];
+    if (n === undefined) {
+      if (state.nation.key === N_ALL || state.nation.key === N_NONE) return rec;
+      n = selectedNation(m);
+    }
+    if (!n) return [];
+    return rec.filter((r) => r.nation === n.uid || (r.site && (u.nations || []).some((x) => x.nation === n.uid && x.site === r.site)));
   }
+  function unitGroup(m, u, n) {
+    if (u.role === "pretender") return "pretender";
+    if (recruitsFor(m, u, n).length) return u.role === "commander" ? "commander" : "troop";
+    if (isHero(m, u, n)) return "hero";
+    if (isSummon(u)) return "summon";
+    return u.role === "troop" || u.role === "commander" ? "other" : "unassigned";
+  }
+  const ROSTER_GROUPS = [["troop", "Recruitable troops", "recruitable troop", "recruitable troops"], ["commander", "Recruitable commanders", "recruitable commander", "recruitable commanders"],
+    ["hero", "Heroes", "hero", "heroes"], ["summon", "Summons (not recruited)", "summon", "summons"],
+    ["other", "Start army or defence only (not recruitable)", "start army / defence unit", "start army / defence units"],
+    ["unassigned", "Not tied to a nation", "unit tied to no nation", "units tied to no nation"], ["pretender", "Pretender forms (not recruitable)", "pretender form", "pretender forms"]];
+  function rosterCounts(m, n) {
+    const c = Object.fromEntries(ROSTER_GROUPS.map((g) => [g[0], 0]));
+    const pool = n === undefined ? nationUnits(m) : m.monsters.filter((u) => unitNationUids(u).includes(n.uid));
+    for (const u of pool) c[unitGroup(m, u, n)]++;
+    return c;
+  }
+  const rosterWord = (key, n) => { const g = ROSTER_GROUPS.find((x) => x[0] === key); return `${n} ${n === 1 ? g[2] : g[3]}`; };
+  // "11 recruitable troops · 7 recruitable commanders · 1 hero ..." (empty groups left out).
+  const rosterSummary = (c, keys) => (keys || ROSTER_GROUPS.map((g) => g[0])).filter((k) => c[k]).map((k) => rosterWord(k, c[k])).join(" · ");
   function unitMatches(m, u, q, role) {
     if (role !== "all" && (role === "summon" ? !isSummon(u) : role === "hero" ? !isHero(m, u) : unitGroup(m, u) !== role)) return false;
     if (!q) return true;
@@ -742,34 +1144,35 @@
     if (!m.monsters.length) return el("div", { class: "stack" }, createButtons(m, "unit"), stateBox("empty", "No monster blocks.", "This project defines or selects no monsters. Create one with New unit."));
     const selected = m.monsters.find((u) => String(u.id) === String(sel) || u.uid === sel) || null;
     const listEl = el("ul", { class: "unit-list", "aria-label": "Units" });
-    const search = el("input", { class: "input", type: "search", placeholder: "Search name, id, role, donor  ( / )", "aria-label": "Search units", value: state.unitQuery });
+    const search = el("input", { class: "input", type: "search", placeholder: "Search units  ( / )", "aria-label": "Search units by name, id, role or donor", value: state.unitQuery });
     const roleSel = el("select", { class: "input", "aria-label": "Filter by role" },
-      [["all", "All roles"], ["troop", "Troops"], ["commander", "Commanders"], ["hero", "Heroes"], ["summon", "Summons"], ["unassigned", "Not recruited"], ["pretender", "Pretender forms"]].map(([v, l]) => {
+      [["all", "All roles"], ["troop", "Recruitable troops"], ["commander", "Recruitable commanders"], ["hero", "Heroes"], ["summon", "Summons"],
+        ["other", "Start army or defence only"], ["unassigned", "Not tied to a nation"], ["pretender", "Pretender forms"]].map(([v, l]) => {
         const o = el("option", { value: v, text: l }); if (v === state.unitRole) o.selected = true; return o;
       }));
     // One visible count line doubles as the live status for search and filter changes.
     const status = el("p", { class: "faint", role: "status", "aria-live": "polite" });
-    const pool = nationUnits(m);
+    const pool = nationUnits(m), counts = rosterCounts(m);
     function fill() {
       const shown = pool.filter((u) => unitMatches(m, u, state.unitQuery, state.unitRole));
       listEl.replaceChildren();
       // Under the Heroes or Summons filter every match is listed in that group; otherwise each unit appears once, in its own group.
       const groupOf = (u) => state.unitRole === "summon" || state.unitRole === "hero" ? state.unitRole : unitGroup(m, u);
-      for (const role of ["troop", "commander", "hero", "summon", "unassigned", "pretender"]) {
+      for (const [role, groupLabel] of ROSTER_GROUPS) {
         const group = shown.filter((u) => groupOf(u) === role);
         if (!group.length) continue;
-        listEl.append(el("li", { class: "group-label", "aria-hidden": "true", text: { troop: "Troops", commander: "Commanders", hero: "Heroes", summon: "Summons", unassigned: "Not recruited by a nation", pretender: "Pretender forms (not recruitable)" }[role] }));
+        listEl.append(el("li", { class: "group-label", "aria-hidden": "true", text: `${groupLabel} (${group.length})` }));
         for (const u of group) {
           const thumb = el("span", { class: "thumb" });
           if (u.sprites.idle) thumb.append(spriteImg(u.sprites.idle.url, "", 1, el("span", { class: "faint", text: "?" })));
           listEl.append(el("li", null, el("a", { class: "unit-item", href: route("p", slug, "units", u.id ?? u.uid), "aria-current": u === selected ? "true" : null },
             thumb, el("span", null, el("div", { class: "nm", text: u.name || "(unnamed)" }),
-              el("div", { class: "sub", text: [`#${txt(u.id ?? u.selector)}`, u.role, isHero(m, u) ? "hero" : null, isSummon(u) ? "summon" : null].filter(Boolean).join(" · ") })))));
+              el("div", { class: "sub", text: [`#${txt(u.id ?? u.selector)}`, role !== "hero" && isHero(m, u) ? "hero" : null, role !== "summon" && isSummon(u) ? "summon" : null].filter(Boolean).join(" · ") })))));
         }
       }
       if (!shown.length) listEl.append(el("li", null, stateBox("empty", pool.length ? "No units match." : `No units for ${nationScopeText(m)}.`,
         pool.length ? "Clear the search or role filter." : "Choose another nation, \"Not tied to a nation\" or \"All nations\" above.")));
-      status.textContent = `${shown.length} of ${pool.length} shown for ${nationScopeText(m)} · ${m.monsters.length} monster definitions in the project`;
+      status.textContent = shown.length === pool.length ? `${pool.length} unit${pool.length === 1 ? "" : "s"}${pool.length ? `: ${rosterSummary(counts)}` : ""}` : `${shown.length} of ${pool.length} units`;
     }
     search.addEventListener("input", () => { state.unitQuery = search.value; fill(); });
     search.addEventListener("keydown", (e) => { if (e.key === "Escape") { search.value = ""; state.unitQuery = ""; fill(); } if (e.key === "ArrowDown") { e.preventDefault(); const a = listEl.querySelector("a"); if (a) a.focus(); } });
@@ -805,7 +1208,7 @@
       rosterBtn.textContent = open ? "Hide unit list" : `Show unit list (${pool.length})`;
     }
     const left = el("div", { class: "unit-pane" + (rosterOpen ? "" : " roster-collapsed") }, rosterBtn, outside, roster);
-    const right = selected && sub === "compare" ? compareView(m, selected) : selected ? unitDetail(m, selected) : stateBox("empty", "Select a unit.", "Choose a unit from the list to see its inheritance, resolved fields, sprites and source.");
+    const right = selected && sub === "compare" ? compareView(m, selected) : selected ? unitDetail(m, selected) : stateBox("empty", "Select a unit.");
     return el("div", { class: "split" }, left, el("div", { id: "unit-detail" }, right));
   }
 
@@ -973,7 +1376,7 @@
         el("div", { class: "sprite-box" }, img || el("div", { class: "preview-missing", text: fr.missing || "no sprite command" })),
         el("div", { class: "cap" }, fr.label, fr.path ? [el("br"), el("code", { text: fr.path })] : null, fr.origin ? el("div", { class: "faint", text: fr.origin }) : null));
     };
-    return techSection("Artwork: enlarged sprite frames", false,
+    return techSection("Enlarged sprites", false,
       el("div", { class: "sprites" }, frames.map(frame)),
       el("div", { class: "btn-row" }, el("span", { class: "muted", text: "Enlarged view:" }), scaleBtns,
         el("span", { class: "faint", text: "Pixelated scaling on a transparency grid, for checking edges and alpha." })));
@@ -983,48 +1386,126 @@
   // Only definitions from this project's .dm link anywhere; dependency and vanilla entries are plain text with their origin.
   const isLocal = (origin) => origin === null || origin === undefined || ["project", "local"].includes(String(origin).toLowerCase());
   const asText = (w) => (w !== null && typeof w === "object" ? txt(w.message || w.reason || w.label || JSON.stringify(w)) : txt(w));
+  // Catalog targets ("catalog:<context>:<id>") are not graph objects; their names come from entries the model already
+  // carries (enriched uses/used_by of definitions, or this object's catalog template).
+  const relCatalogNames = new WeakMap();
+  function relCatalogEntry(m, key) {
+    if (!relCatalogNames.has(m)) {
+      const names = new Map();
+      for (const o of [...(m.monsters || []), ...(m.sites || []), ...(m.nations || []), ...(m.other_definitions || [])])
+        for (const e of [...(o.uses || []), ...(o.used_by || [])]) if (e && e.key && e.name && !names.has(e.key)) names.set(e.key, e);
+      relCatalogNames.set(m, names);
+    }
+    return relCatalogNames.get(m).get(key);
+  }
   // used_by / uses for one definition: from the object itself, else derived from m.relationships by context and id (or line).
+  // Derived entries keep src_origin, the file their source line belongs to (the referring definition), apart from origin.
   function relOf(m, obj, ctx) {
     if (!obj) return null;
-    if (Array.isArray(obj.used_by) || Array.isArray(obj.uses)) return { used_by: obj.used_by || [], uses: obj.uses || [] };
+    const enriched = Array.isArray(obj.used_by) || Array.isArray(obj.uses);
     const R = m.relationships;
-    if (!R || !Array.isArray(R.objects)) return null;
+    if (!R || !Array.isArray(R.objects)) return enriched ? { used_by: obj.used_by || [], uses: obj.uses || [], ctx } : null;
     const line = obj.source ? obj.source.line : obj.line, has = (v) => v !== null && v !== undefined;
     const me = R.objects.find((o) => o.context === ctx && ((has(o.id) && has(obj.id) && String(o.id) === String(obj.id)) || (line && o.line === line && isLocal(o.origin))));
-    if (!me) return { used_by: [], uses: [] };
+    if (!me) return { used_by: obj.used_by || [], uses: obj.uses || [], ctx };
     const byKey = new Map(R.objects.map((o) => [o.key, o]));
-    const ent = (k, e) => ({ ...(byKey.get(k) || { key: k }), command: e.command, relation: e.relation, line: e.line ?? (byKey.get(k) || {}).line, status: e.status });
-    return { used_by: (R.edges || []).filter((e) => e.to === me.key).map((e) => ent(e.from, e)),
-      uses: (R.edges || []).filter((e) => e.from === me.key).map((e) => ent(e.to, e)) };
+    const tp = obj.template || {};
+    const target = (k, e) => {
+      if (byKey.has(k)) return byKey.get(k);
+      const cat = k && /^catalog:([^:]+):(.+)$/.exec(k);
+      if (cat) {
+        const id = /^-?\d+$/.test(cat[2]) ? Number(cat[2]) : cat[2], known = relCatalogEntry(m, k);
+        const name = (known && known.name) || (tp.source === "catalog" && cat[1] === ctx && String(tp.id) === String(id) ? tp.name : null);
+        return { key: k, context: cat[1], id, name: name || null, origin: "catalog" };
+      }
+      // Unresolved (to: null): keep the written argument and the expected kind.
+      if (!k) return { key: null, context: e.target_context || null, id: Number.isInteger(e.argument) ? e.argument : null,
+        name: has(e.argument) && !Number.isInteger(e.argument) ? String(e.argument) : null, origin: null };
+      return { key: k };
+    };
+    const ent = (k, e, srcOrigin) => { const t = target(k, e);
+      return { ...t, command: e.command, relation: e.relation, line: e.line ?? t.line, status: e.status, target_context: e.target_context, src_origin: srcOrigin }; };
+    const derived = { ctx, used_by: (R.edges || []).filter((e) => e.to === me.key).map((e) => ent(e.from, e, (byKey.get(e.from) || {}).origin)),
+      uses: (R.edges || []).filter((e) => e.from === me.key).map((e) => ent(e.to, e, me.origin)) };
+    if (!enriched) return derived;
+    // Preserve enriched names and inherited equipment, but take reference lines and source files from graph edges.
+    for (const direction of ["used_by", "uses"]) {
+      const supplied = obj[direction] || [], edges = derived[direction];
+      derived[direction] = supplied.map((entry) => {
+        const edge = edges.find((e) => e.key === entry.key && e.command === entry.command);
+        return edge ? { ...entry, line: edge.line, src_origin: edge.src_origin, target_context: edge.target_context, status: edge.status }
+          : { ...entry, source_is_definition: true };
+      });
+      for (const edge of edges) if (!supplied.some((e) => e.key === edge.key && e.command === edge.command)) derived[direction].push(edge);
+    }
+    return derived;
   }
+  const relNoun = (ctx) => REL_NOUN[ctx] || txt(ctx) || "definition";
+  const relOriginText = (o) => o === "catalog" ? "the vanilla catalog" : txt(o);
   function relLink(m, e) {
-    const slug = m.project.slug, label = `${txt(e.name || e.key || "unknown")}${e.id !== null && e.id !== undefined ? ` (#${e.id})` : ""}`;
-    if (!isLocal(e.origin)) return el("span", { text: label });
+    const slug = m.project.slug, hasId = e.id !== null && e.id !== undefined, noun = relNoun(e.context);
+    const label = e.name ? `${txt(e.name)}${hasId ? ` (#${e.id})` : ""}`
+      : hasId ? `${noun.charAt(0).toUpperCase()}${noun.slice(1)} #${e.id}` : txt(e.key || "unknown");
+    if (!isLocal(e.origin) || !e.key) return el("span", { text: label });
     if (e.context === "monster" && m.monsters.some((u) => u.id !== null && String(u.id) === String(e.id))) return el("a", { href: route("p", slug, "units", e.id) }, label);
     if (e.context === "site" && m.sites.some((s) => s.id !== null && String(s.id) === String(e.id))) return el("a", { href: route("p", slug, "sites", e.id) }, label);
     if (e.context === "nation" && e.id !== null && e.id !== undefined) return el("a", { href: route("p", slug, "nation", e.id) }, label);
     if (e.key && CMD_CONTEXTS.some((c) => c[0] === e.context)) return el("a", { href: cmdRoute(slug, e.context, e.key) }, label);
     return el("span", { text: label });
   }
-  // Compact, collapsed unless it has a few entries. Dependency entries show origin and line, never an edit link.
+  // What a reference means, as [phrase when the other entry uses this one, phrase when this one uses the other].
+  const REL_NOUN = { monster: "unit", armor: "armour", merc: "mercenary company" };
+  // tctx is the context of the referenced side; #damage only summons when that side is a unit (summon spells).
+  function relPhrase(e, tctx = e.target_context || e.context) {
+    const c = String(e.command || "").replace(/^#/, "").toLowerCase(), rel = String(e.relation || "");
+    if (rel === "effective inherited equipment reference") return ["has this as inherited equipment", "has as inherited equipment"];
+    if (rel === "event code requirement") return ["is linked to this by an event code", "is linked by an event code to"];
+    if (c === "copystats") return ["copies stats from this", "copies stats from"];
+    if (c === "copyspr") return ["copies the sprite of this", "copies the sprite of"];
+    if (c.startsWith("copy")) return ["copies this", "copies"];
+    if (/rec(unit|com)|^addrec|^forcerec/.test(c)) return ["recruits this", "recruits"];
+    if (/summon|makemonster/.test(c) || (c === "damage" && tctx === "monster")) return ["summons this", "summons"];
+    if (/^start(com|unit|scout)/.test(c)) return ["starts with this", "starts with"];
+    if (c.includes("hero")) return ["has this as a hero", "has as a hero"];
+    if (c === "addgod") return ["offers this as a pretender", "offers as a pretender"];
+    if (c === "startsite" || c === "newsite") return ["has this as a start site", "has as a start site"];
+    if (c === "weapon") return ["is armed with this", "is armed with"];
+    if (c === "armor") return ["wears this", "wears"];
+    return ["refers to this", "refers to"];
+  }
+  // Related content: plain sentences about what refers to this entry and what it refers to. Collapsed by default; the raw
+  // commands, relations and source lines are in the nested Details table. Unresolved references and read-only dependency
+  // entries stay flagged in the sentences and in the summary line.
   function usedBySection(m, rel) {
     if (!rel) return null;
     const ub = rel.used_by || [], us = rel.uses || [], n = ub.length + us.length;
-    const item = (e) => el("li", null, relLink(m, e), " ", el("span", { class: "faint", text: txt(e.context) }),
-      e.command ? [" ", el("code", { text: e.command })] : null,
-      e.relation ? el("span", { class: "faint", text: ` ${String(e.relation).replace(/_/g, " ")}` }) : null,
-      e.status && e.status !== "resolved" ? [" ", badge(String(e.status).replace(/_/g, " "), "warn")] : null, " ",
-      isLocal(e.origin) ? (e.line ? srcRef(m.project.slug, m.provenance.file, e.line) : null)
-        : el("span", { class: "faint", text: `${txt(e.origin)}${e.line ? ` · line ${e.line}` : ""} (read-only)` }));
-    const list = (title, xs) => xs.length ? [el("h4", { text: `${title} (${xs.length})` }), el("ul", { class: "plain-list rel-list" }, xs.map(item))] : null;
-    return el("details", { class: "raw tech used-by", open: (n > 0 && n <= 4) || null },
-      el("summary", null, n ? `Used by ${ub.length} · uses ${us.length}` : "Used by: no references"),
-      el("div", { class: "inner" }, n ? [list("Used by", ub), list("Uses", us)]
-        : el("p", { class: "muted", text: "Nothing in this project or its known dependencies references this definition." })));
+    if (!n) return null;
+    const all = [...ub, ...us];
+    const flagged = (e) => e.status && e.status !== "resolved";
+    const nFlag = all.filter(flagged).length, nDep = all.filter((e) => !isLocal(e.origin)).length;
+    const who = (e) => [relLink(m, e), el("span", { class: "faint", text: ` (${relNoun(e.context)}${isLocal(e.origin) ? "" : `, from ${relOriginText(e.origin)}, read-only`})` })];
+    const flag = (e) => flagged(e) ? [" ", badge(String(e.status).replace(/_/g, " "), "warn")] : null;
+    // An incoming entry is the referring side; the referenced side is this page's own definition.
+    const usedItem = (e) => el("li", null, who(e), ` ${relPhrase(e, e.target_context || rel.ctx)[0]}.`, flag(e));
+    const usesItem = (e) => el("li", null, `This ${relPhrase(e)[1]} `, who(e), ".", flag(e));
+    const list = (title, xs, item) => xs.length ? [el("h4", { text: `${title} (${xs.length})` }), el("ul", { class: "plain-list rel-list" }, xs.map(item))] : null;
+    // A derived entry's line belongs to the referring definition (src_origin), not necessarily to the entry shown.
+    const source = (e) => { const o = "src_origin" in e ? e.src_origin : e.origin;
+      return isLocal(o) ? (e.line ? srcRef(m.project.slug, m.provenance.file, e.line, true) : el("span", { class: "faint", text: "—" }))
+        : el("span", { class: "faint", text: `${relOriginText(o)}${e.line ? ` line ${e.line}` : ""} (read-only)${e.source_is_definition ? " · definition" : ""}` }); };
+    const row = (dir) => (e) => [dir, relLink(m, e), e.command ? el("code", { text: e.command }) : el("span", { class: "faint", text: "—" }),
+      el("span", { text: e.relation ? String(e.relation).replace(/_/g, " ") : "—" }), flagged(e) ? badge(String(e.status).replace(/_/g, " "), "warn") : el("span", { class: "faint", text: "resolved" }), source(e)];
+    return el("details", { class: "raw tech used-by" },
+      el("summary", null, "Related content", el("span", { class: "faint", text: ` · used by ${ub.length} · uses ${us.length}${nDep ? ` · ${nDep} read-only reference${nDep === 1 ? "" : "s"}` : ""}` }),
+        nFlag ? [" ", badge(`${nFlag} unresolved`, "warn")] : null),
+      el("div", { class: "inner stack" }, list("Used by", ub, usedItem), list("Uses", us, usesItem),
+        techSection("Details: commands and source lines", false,
+          table(["Direction", "Entry", "Command", "Relation", "Status", "Source"], [...ub.map(row("used by")), ...us.map(row("uses"))]))));
   }
   const IDENTITY_TEXT = { new: "new definition", vanilla_override: "overrides vanilla", dependency_override: "overrides a dependency", extension: "extends an existing definition" };
+  // A plain new definition needs no note; overrides and extensions do.
   function identityNote(idn) {
-    if (!idn || !idn.kind) return null;
+    if (!idn || !idn.kind || idn.kind === "new") return null;
     return el("p", { class: "identity-note faint" }, "Definition: ", el("strong", { text: IDENTITY_TEXT[idn.kind] || String(idn.kind).replace(/_/g, " ") }),
       idn.origin ? ` · ${txt(idn.origin)}` : null, idn.note ? ` · ${txt(idn.note)}` : null);
   }
@@ -1088,7 +1569,7 @@
       panel("Overlapping definitions",
         ov.length ? el("ul", { class: "plain-list compat-overlaps" }, [...ov].sort((a, b) => rank(a) - rank(b)).map((o) => overlapCard(m, o)))
           : el("p", { class: "muted", text: "No overlaps found." }),
-        ov.length ? el("p", { class: "panel-note", text: "Advice only. Kosmokrator never remaps ids or reorders dependencies by itself; reordering cannot repair a duplicate new id." }) : null),
+        ov.length ? el("p", { class: "panel-note", text: "Advice only; nothing is remapped or reordered automatically." }) : null),
       guide.length ? panel(`References to check (${guide.length})`, el("ul", { class: "plain-list compat-overlaps" }, guide.map((g) => el("li", { class: "compat-overlap" },
         el("div", { class: "compat-head" }, el("code", { text: `#${txt(g.command).replace(/^#/, "")} ${txt(g.argument)}` }), " ",
           badge(txt(g.classification).replace(/_/g, " "), "warn"), " ",
@@ -1122,7 +1603,7 @@
       changes.length ? table(["Definition", "Change", "Detail"], changes) : el("p", { class: "muted", text: "No overlap would change its last contributor." }),
       sa.unresolved_references !== undefined ? el("p", { class: "faint", text: `${sa.unresolved_references} unresolved reference(s) in the preview (checked without the catalog).` }) : null,
       after.catalog_available === false ? el("p", { class: "panel-note", text: "The preview runs without the game catalog: collisions with vanilla ids and vanilla references are re-checked in the project view after saving." }) : null,
-      el("p", { class: "panel-note", text: "Last contributor means the last authored block, not the in-game result. Nothing is remapped or reordered automatically." }));
+      el("p", { class: "panel-note", text: "Last contributor is the last authored block, not the in-game result." }));
   }
 
   // ---------- dependency settings (kosmokrator.json "dependencies", SHA-guarded) ----------
@@ -1179,6 +1660,7 @@
         fresh.open = true;
         fresh.msg = { kind: "ok", text: r.written ? `Saved kosmokrator.json.${r.backup ? ` Backup: ${r.backup}` : ""}` : "Nothing changed." };
         state.models.delete(slug);
+        recordReceipt(slug, "Saved dependency settings", r, { file: r.file || "kosmokrator.json" });
         toast(r.written ? "Dependency settings saved" : "Nothing to save");
         await loadProjects(true);
         render().then(() => { const sm = $("[data-dep-summary]"); if (sm) sm.focus(); });
@@ -1233,10 +1715,10 @@
           (r.warnings || []).length ? el("ul", { class: "diag" }, r.warnings.map((w) => el("li", null, badge("check", "warn"), " ", asText(w)))) : null,
           none ? el("p", { class: "muted", text: "The saved settings already match this list; nothing would change." }) : diffView(r.diff || "", "Exact change to kosmokrator.json (diff)"),
           none ? null : reorderPrediction(m.compatibility, r.compatibility),
-          el("p", { class: "panel-note", text: "Only the project settings file is written, under the project lock and against the SHA-256 read when this editor opened, with a backup. No .dm is changed." }),
+          el("p", { class: "panel-note", text: "Writes the project settings only, with a backup. No .dm is changed." }),
           el("div", { class: "btn-row" },
-            el("button", { type: "button", class: "btn", disabled: none || busy || null, onclick: () => send(false) }, "Save dependency settings"),
-            el("button", { type: "button", class: "btn btn-ghost", disabled: busy || null, onclick: () => edited("[data-dep-preview]") }, "Back to the list")));
+            none ? null : el("button", { type: "button", class: "btn", disabled: busy || null, onclick: () => send(false) }, "Save dependency settings"),
+            el("button", { type: "button", class: none ? "btn" : "btn btn-ghost", disabled: busy || null, onclick: () => edited("[data-dep-preview]") }, "Back to the list")));
       } else {
         body = el("div", { class: "stack" }, listView(), addRow(),
           el("div", { class: "btn-row" },
@@ -1248,9 +1730,10 @@
       inner.replaceChildren(...[
         el("p", { class: "panel-note", text: txt(dr.st.note) }),
         msg, body,
-        el("p", { class: "faint" }, "Settings SHA-256 ", el("span", { class: "hash", title: dr.st.sha256, text: shortSha(dr.st.sha256) }))].filter(Boolean));
+      ].filter(Boolean));
       if (focus) { const f = inner.querySelector(focus); if (f) f.focus(); }
     }
+    escapeReview(inner, () => dr.phase === "review" && !(dr.msg && dr.msg.kind === "busy"), () => edited("[data-dep-preview]"));
     box.addEventListener("toggle", () => { dr.open = box.open; if (box.open && !inner.childNodes.length) draw(); });
     if (dr.open) draw();
     return box;
@@ -1309,7 +1792,7 @@
     return panel("With equipment",
       table(["Value", "Shown", "Status", "Note"], rows),
       (eq.notes || []).length ? el("ul", { class: "panel-note" }, eq.notes.map((n) => el("li", { text: asText(n) }))) : null,
-      el("p", { class: "panel-note", text: "Server-calculated. Only resolved values replace base stats on the sheet; estimates are marked ≈ and are not exact; \"?\" means not calculated." }));
+      el("p", { class: "panel-note", text: "≈ marks an estimate; \"?\" is not calculated." }));
   }
 
   function unitDetail(m, u) {
@@ -1338,7 +1821,7 @@
         u.recruitment.length ? u.recruitment.map((x, i) => [i ? "; " : "", x.site_name ? `${x.where} (${x.site_name})` : x.where]) : "not recruitable in this project");
     wrap.append(unitSheet({
       name: u.name || "(unnamed monster)", type: roleType,
-      sub: [el("span", { text: tiedTo.length ? tiedTo.join(", ") : "not tied to a nation" }), el("code", { text: `${u.new ? "#newmonster" : "#selectmonster"} ${txt(u.id ?? u.selector)}` })]
+      sub: [el("span", { text: tiedTo.length ? tiedTo.join(", ") : "not tied to a nation" }), el("span", { title: `${u.new ? "#newmonster" : "#selectmonster"} ${txt(u.id ?? u.selector)}`, text: `#${txt(u.id ?? u.selector)}` })]
         .filter(Boolean).map((x, i) => [i ? " · " : "", x]),
       cols,
       gear: el("div", { class: "sheet-gear-wrap" }, sheetGear(r.equipment.weapons, "Weapon", r.equipment.weapons_status), sheetGear(r.equipment.armor, "Armour", r.equipment.armor_status)),
@@ -1346,13 +1829,12 @@
       magic: sheetMagic(r.magic.paths, r.magic.random),
       lines: [eq ? equippedLines(eq) : null, recruit],
       figure: sheetFigure(txt(u.name), { idle: u.sprites.idle, attack: u.sprites.attack }),
-      note: eq ? "Protection, attack, defence, encumbrance and costs include equipment where the server resolved them; \"(base)\" marks a base fallback and ≈ an estimate (not exact). † Cost component, not the final cost. Underlined = set in this .dm; hover for source."
-        : "Base values, before equipment. † Cost component, not the final cost (the game computes it). Underlined = set in this .dm; hover for source.",
+      note: eq ? "Includes equipment where resolved; (base) = without equipment, ≈ = estimate. † Cost component, not the final cost. Underlined = set in this mod."
+        : "Base values, before equipment. † Cost component, not the final cost. Underlined = set in this mod.",
       description: u.description,
       foot: [srcRef(slug, file, u.source.line, true), " ",
         u.diagnostics.length ? [badge(`${u.diagnostics.length} validation item(s)`, "warn"), " "] : null,
-        u.unsupported.length ? [badge(`${u.unsupported.length} command(s) not modelled`, "warn"), " "] : null,
-        el("a", { class: "btn btn-small btn-ghost", href: compareHref(slug, u.id ?? u.uid, donorRef(u)), title: "Read-only, side by side with one or two catalog units" }, "Compare with vanilla units")],
+        el("a", { class: "btn btn-small btn-ghost", href: compareHref(slug, u.id ?? u.uid, donorRef(u)), title: "Side by side with one or two vanilla units" }, "Compare")],
     }));
     const idn = identityNote(u.identity), rel = usedBySection(m, relOf(m, u, "monster"));
     if (idn || rel) wrap.append(el("div", { class: "detail-meta" }, idn, rel));
@@ -1368,7 +1850,7 @@
         d.resolved ? el("span", null, el("strong", { text: txt(d.name) }), ` (catalog #${d.id}) `, badge("donor resolved", "ok"))
           : el("span", null, badge("donor unresolved", "err"), " ", txt(d.reason)))
         : el("p", { class: "muted", text: u.new ? "No #copystats: unset fields fall back to game defaults, which are not modelled." : "No donor." }),
-      el("p", { class: "panel-note", text: "Resolved values below apply this block's commands in order over the donor. Authored overrides are marked; donor values in brackets are the raw catalog value they replaced." }),
+      el("p", { class: "panel-note", text: "Values apply this block over its donor. Bracketed values are the donor's." }),
       u.unsupported.length ? el("div", null, el("h4", { text: "Commands not modelled" }), table(["Line", "Command", "Why"], u.unsupported.map((x) => [srcRef(slug, file, x.line), el("code", { text: x.raw }), x.reason]))) : null,
       u.unresolved.length ? el("div", null, el("h4", { text: "Unresolved dependencies" }), el("ul", null, u.unresolved.map((x) => el("li", null, srcRef(slug, file, x.line), " ", x.reason)))) : null));
     if (eq) tech.push(equippedPanel(eq));
@@ -1415,7 +1897,7 @@
             cells: [el("span", null, el("code", { text: a.raw }), el("div", { class: "faint", text: `${a.group}, p.${a.page}` })), srcRef(slug, file, a.line),
               a.status === "authored" ? badge("authored", "authored") : badge(a.status, "warn")] }))),
           el("p", { class: "panel-note", text: r.authored_traits_note })] : null,
-        el("p", { class: "panel-note", text: "Only a subset of catalog abilities is modelled; see the donor row for every raw column. Inherited abilities outside the modelled columns are not shown and may still apply." }))));
+        el("p", { class: "panel-note", text: "Only common abilities are shown; inherited ones may still apply." }))));
 
     // Recruitment
     tech.push(panel("Recruitment and restrictions",
@@ -1424,7 +1906,7 @@
         el("a", { href: route("p", slug, "pretenders", `project-${u.id}`) }, "Open in Pretenders")) : null,
       u.recruitment.length ? table(["Via", "Where", "Line"], u.recruitment.map((x) => [el("code", { text: x.via }), x.site_name ? `${x.where} (${x.site_name})` : x.where, srcRef(slug, file, x.line)]))
         : el("p", { class: "muted", text: "Not recruitable through any nation or site in this project." }),
-      el("p", { class: "panel-note", text: "Limits in the donor row (e.g. reclimit, reqtemple, reqlab) are raw catalog values; holy units also need temples. Confirm in game." })));
+      el("p", { class: "panel-note", text: "Donor recruitment limits are raw catalog values; confirm in game." })));
 
     const gf = r.god, extra = r.unmodelled_donor_columns || {};
     if (gf && (gf.startdom.value !== null || gf.pathcost.value !== null || (gf.homerealm.value || []).length || gf.startdom.source === "cleared" || Object.keys(extra).length)) {
@@ -1437,7 +1919,7 @@
         el("p", { class: "panel-note", text: gf.note })));
     }
     const nTech = u.unsupported.length + u.unresolved.length;
-    wrap.append(techSection(`Stat resolution: inheritance, per-field sources, costs${nTech ? ` (${nTech} item(s) not modelled or unresolved)` : ""}`, false, tech));
+    wrap.append(techSection(`Details: stat sources and costs${nTech ? ` (${nTech} not modelled or unresolved)` : ""}`, false, tech));
     wrap.append(techSection(`Authored commands (${u.authored.length})`, false, authoredTable(slug, u)));
     if (d && d.catalog_row) {
       const costKeys = new Set(["basecost", "rcost", "rpcost"]);
@@ -1448,7 +1930,7 @@
             costKeys.has(k) ? badge("raw cost component, not a final cost", "warn") : ""])))));
     }
     wrap.append(techSection(`Diagnostics (${u.diagnostics.length})`, u.diagnostics.length > 0, diagnosticsList(slug, u.diagnostics, file)));
-    wrap.append(techSection("Source block and provenance", false, sourcePanel(slug, u, "Monster")));
+    wrap.append(techSection("Source", false, sourcePanel(slug, u, "Monster")));
     wrap.append(techSection("JSON", false, jsonActions(`/api/projects/${encodeURIComponent(slug)}/monsters/${encodeURIComponent(u.id ?? u.uid)}`, () => u, "Unit JSON")));
     return wrap;
   }
@@ -1523,8 +2005,9 @@
     const entry = rep0 && (rep0.monsters || []).find((x) => x.uid === u.uid);
     const c = entry && entry.counts, unres = c ? (c.unresolved || 0) + (entry.issues || []).length : 0;
     const resets = entry ? (entry.history || []).filter((h) => h.reset).length : 0;
-    const title = entry ? `Copy and reset history: ${(entry.donors || []).length} copy · ${resets} reset · ${c.retained || 0} retained · ${c.authored || 0} set · ${c.cleared || 0} cleared · ${unres} unresolved`
-      : "Copy and reset history";
+    const nd = entry ? (entry.donors || []).length : 0;
+    const title = entry ? `Inheritance: ${nd} cop${nd === 1 ? "y" : "ies"}${resets ? ` · ${resets} reset${resets === 1 ? "" : "s"}` : ""}${unres ? ` · ${unres} unresolved` : ""}`
+      : "Inheritance";
     const inner = el("div", { class: "inner stack" });
     const box = el("details", { class: "raw tech inh" }, el("summary", null, title, entry && unres ? [" ", badge("uncertain", "warn")] : null), inner);
     const fill = (rep) => fillKids(inner, el("p", { class: "panel-note", text: "Static reading of this block over its donor. It does not run the game; unresolved items stay unresolved." }), inheritanceBody(m, u, rep));
@@ -1615,30 +2098,31 @@
     });
     return { changes, errors };
   }
-  function editorButton(slug, id, name) {
+  // `toggle` redraws only the editor section, so opening or closing keeps the page's scroll position and focus.
+  function editorButton(slug, id, name, toggle) {
     const ed = editorDraft(slug, id);
     const n = ed.st ? draftChanges(ed).changes.length : 0;
     return el("div", { class: "btn-row edit-bar" },
       el("button", { type: "button", class: "btn", "aria-expanded": ed.open ? "true" : "false", "aria-controls": `editor-${id}`,
         disabled: !CSRF || null, title: CSRF ? null : "This server did not provide an editor token; restart `kosmokrator serve` and reload.",
-        onclick: () => { ed.open = !ed.open; ed.msg = null; render().then(() => { const b = $(`[aria-controls="editor-${id}"]`); if (b) b.focus(); }); } }, ed.open ? "Close editor" : "Edit values"),
+        "aria-label": ed.open ? "Close editor" : `Edit ${txt(name) || "this monster"}`,
+        onclick: () => { ed.open = !ed.open; ed.msg = null; toggle(); } }, ed.open ? "Close editor" : "Edit"),
       n ? badge(`${n} unsaved change(s)`, "warn") : null,
       ed.msg && ed.msg.kind === "ok" ? el("span", { class: "edit-ok", role: "status", text: ed.msg.text }) : null,
-      !CSRF ? el("span", { class: "faint", text: "Editing unavailable: no editor token." }) : null,
-      el("span", { class: "faint", text: `Edits ${txt(name) || "this monster"} in the project .dm (backup kept).` }));
+      !CSRF ? el("span", { class: "faint", text: "Editing unavailable: no editor token." }) : null);
   }
   // The editor panel. `holder` is replaced in place; the draft survives re-renders and errors.
-  function monsterEditor(slug, id) {
+  function monsterEditor(slug, id, onClose) {
     const ed = editorDraft(slug, id);
     const holder = el("section", { class: "panel editor", id: `editor-${id}`, "aria-labelledby": `editor-h-${id}` });
     const url = `/api/projects/${encodeURIComponent(slug)}/monsters/${encodeURIComponent(id)}/edit`;
     const load = async () => {
-      holder.replaceChildren(el("h3", { id: `editor-h-${id}`, text: "Edit values" }), stateBox("loading", "Reading the current .dm..."));
+      holder.replaceChildren(el("h3", { id: `editor-h-${id}`, text: "Edit" }), stateBox("loading", "Reading the current .dm..."));
       try { ed.st = await getJSON(url).then((r) => r.result); ed.phase = "edit"; draw(); }
-      catch (e) { holder.replaceChildren(el("h3", { id: `editor-h-${id}`, text: "Edit values" }), errorBox(e, "the editor"),
+      catch (e) { holder.replaceChildren(el("h3", { id: `editor-h-${id}`, text: "Edit" }), errorBox(e, "the editor"),
         el("div", { class: "btn-row" }, el("button", { type: "button", class: "btn", onclick: load }, "Retry"))); }
     };
-    const focusKey = (sel) => { const t = holder.querySelector(sel); if (t) t.focus(); };
+    const focusKey = (sel) => focusIn(holder, sel);
     function numInput(key, opts = {}) {
       const s = ed.st.schema[key], f = ed.st.fields[key];
       const cur = curValue(f), val = key in ed.raw ? ed.raw[key] : (cur === null || cur === undefined ? "" : String(cur));
@@ -1778,7 +2262,8 @@
       ed.msg = { kind: "busy", text: preview ? "Checking the changes..." : "Saving..." }; draw();
       try {
         const r = await postJSON(url, { expected_sha256: ed.st.sha256, changes, preview });
-        if (preview) { ed.preview = r; ed.phase = "review"; ed.msg = null; draw("#confirm-save-" + id); return; }
+        if (preview) { ed.preview = r; ed.phase = "review"; ed.msg = null; draw(r.changed ? "#confirm-save-" + id : "[data-focus=review]"); return; }
+        recordReceipt(slug, `Saved ${txt(ed.st.name) || "monster"} (#${id})`, r);
         const key = editorKey(slug, id);
         state.editors.delete(key);
         const fresh = editorDraft(slug, id);
@@ -1808,20 +2293,21 @@
       const p = ed.preview;
       const effText = (x) => !x ? "?" : x.value === null || x.value === undefined ? "none" : `${x.value === true ? "yes" : x.value} (${txt(x.source).replace(/_/g, " ")})`;
       return el("div", { class: "stack" },
-        el("h4", { text: "Review before saving" }),
+        el("h4", { tabindex: "-1", "data-focus": "review", text: "Review before saving" }),
         table(["Field", "Change", "Effective value", "What happens"], p.plan.map((x) => [
           el("strong", { text: x.label }),
           el("span", null, badge(x.action, x.action === "remove" ? "warn" : x.action === "unchanged" ? "" : "authored"), " ", x.before ? el("code", { text: x.before }) : null, x.before && x.after ? " → " : null, x.after ? el("code", { text: x.after }) : null),
           `${effText(x.effective_before)} → ${effText(x.effective_after)}`, el("span", { class: "muted", text: x.explanation })])),
         el("details", { class: "raw" }, el("summary", null, "Exact text change (diff)"), el("div", { class: "inner" }, el("pre", { class: "code diff" }, p.diff.split("\n").map((l) => el("span", { class: "ln" + (l.startsWith("+") && !l.startsWith("+++") ? " add" : l.startsWith("-") && !l.startsWith("---") ? " del" : ""), text: l }))))),
-        el("p", { class: "panel-note", text: "Only the lines shown change. Other commands, comments, sprites, order, newlines and encoding stay as written. A backup of the previous file is kept in .kosmokrator/backups." }),
+        el("p", { class: "panel-note", text: "Only the lines shown change. A backup is kept." }),
         el("div", { class: "btn-row" },
-          el("button", { type: "button", class: "btn", id: `confirm-save-${id}`, disabled: !p.changed || null, onclick: () => send(false) }, "Save to .dm"),
-          el("button", { type: "button", class: "btn btn-ghost", onclick: () => { ed.phase = "edit"; ed.preview = null; draw(); } }, "Back to editing")));
+          p.changed ? el("button", { type: "button", class: "btn", id: `confirm-save-${id}`, onclick: () => send(false) }, "Save to .dm")
+            : el("span", { class: "muted", text: "Nothing to save: the file already says this." }),
+          el("button", { type: "button", class: p.changed ? "btn btn-ghost" : "btn", onclick: () => { ed.phase = "edit"; ed.preview = null; draw(REVIEW_TRIGGER); } }, "Back to editing")));
     }
     function draw(focusSel) {
       const st = ed.st;
-      const head = el("h3", { id: `editor-h-${id}`, text: `Edit values: ${txt(st.name) || `monster ${id}`}` });
+      const head = el("h3", { id: `editor-h-${id}`, text: `Edit ${txt(st.name) || `monster ${id}`}` });
       const intro = el("p", { class: "panel-note" }, "Writes into ", el("code", { text: `${st.opener} ${id}` }), ` (lines ${st.line}–${st.end_line} of ${st.file}). `,
         st.donor ? ["Donor: ", el("code", { text: `${txt(st.donor.command)} ${txt(st.donor.ref)}` }), st.donor.name ? ` (${st.donor.name}). ` : ". "] : "No donor. ",
         "Values set here are added as overrides or change the existing line; nothing else in the file is rewritten.");
@@ -1835,29 +2321,39 @@
           g === "magic" ? el("p", { class: "panel-note", text: "Blank means no fixed level. Clearing an authored path deletes its #magicskill line; inherited paths cannot be removed here (that needs #clearmagic)." }) : null,
           g === "god" ? el("p", { class: "panel-note", text: "#startdom and #pathcost make the monster selectable as a pretender. #gcost 10000+base means autocalc; the game computes the final cost." }) : null);
       });
-      reviewBtn = el("button", { type: "button", class: "btn", onclick: () => send(true) }, "Review changes");
+      reviewBtn = el("button", { type: "button", class: "btn", onclick: () => send(true), ...RT }, "Review changes");
       const actions = el("div", { class: "btn-row edit-actions" }, reviewBtn,
-        el("button", { type: "button", class: "btn btn-ghost", onclick: () => { state.editors.delete(editorKey(slug, id)); render(); } }, "Cancel"), countBox);
+        el("button", { type: "button", class: "btn btn-ghost", onclick: () => { state.editors.delete(editorKey(slug, id)); if (onClose) onClose(); else render(); } }, "Cancel"), countBox);
       holder.replaceChildren(...[head, intro, err, busy].filter(Boolean), el("form", { class: "edit-form", novalidate: true, onsubmit: (e) => { e.preventDefault(); if (!reviewBtn.disabled) send(true); } },
         groups, traitRows(), actions));
       updateCount();
       if (focusSel) focusKey(focusSel);
     }
-    holder.addEventListener("keydown", (e) => { if (e.key === "Escape" && ed.phase === "review") { ed.phase = "edit"; draw(); } });
+    escapeReview(holder, () => ed.phase === "review", () => { ed.phase = "edit"; draw(REVIEW_TRIGGER); });
     if (ed.st) draw(); else load();
     return holder;
   }
   // Edit button plus (when open) the editor, for project monsters only. Catalog monsters never get one.
   function editorSection(slug, id, name) {
     if (!Number.isInteger(id)) return null;
-    const ed = editorDraft(slug, id);
-    return el("div", { class: "stack" }, editorButton(slug, id, name), ed.open ? monsterEditor(slug, id) : null);
+    const box = el("div", { class: "stack" });
+    const draw = (focus) => {
+      const ed = editorDraft(slug, id);
+      fillKids(box, editorButton(slug, id, name, () => draw(true)), ed.open ? monsterEditor(slug, id, () => draw(true)) : null);
+      if (focus) { const b = box.querySelector(`[aria-controls="editor-${id}"]`); if (b) b.focus({ preventScroll: true }); }
+    };
+    draw(false);
+    return box;
   }
 
   // ---------- authoring: create/duplicate units and gods, create nations, attach art ----------
   // Each form keeps its draft in state.creates / state.arts (keyed by slug and form), so failed checks, conflicts and
   // re-renders never lose input. Every write is reviewed first (preview: true), then sent with the page's SHA-256.
-  const draftOf = (map, key, init) => { if (!map.has(key)) map.set(key, init()); return map.get(key); };
+  // Form drafts remember their starting values, so unsavedDrafts() counts them only once something was changed.
+  const draftOf = (map, key, init) => {
+    if (!map.has(key)) { const d = init(); if (d && d.form && d.formBase === undefined) d.formBase = JSON.stringify(d.form); map.set(key, d); }
+    return map.get(key);
+  };
   const projectMonsters = (m) => m.monsters.filter((u) => u.new && Number.isInteger(u.id));
   const isGod = (u) => u.resolved && u.resolved.god && u.resolved.god.startdom.value !== null && u.resolved.god.startdom.value !== undefined
     && u.resolved.god.pathcost.value !== null && u.resolved.god.pathcost.value !== undefined;
@@ -1900,7 +2396,7 @@
       (r.explanation || []).map((t) => el("p", { class: "panel-note", text: t })),
       (r.warnings || []).length ? el("ul", { class: "diag" }, r.warnings.map((w) => el("li", null, badge("check", "warn"), " ", w))) : null,
       diffView(r.diff),
-      el("p", { class: "panel-note", text: "Written under the project lock against the SHA-256 this page shows, with a backup of the previous .dm. Static checks only: nothing here proves the mod loads or is balanced. Test in Dominions 6." }),
+      el("p", { class: "panel-note", text: "Saved with a backup of the previous .dm. Static checks only: test in game." }),
       el("div", { class: "btn-row" }, el("button", { type: "button", class: "btn", onclick: onCommit }, commitLabel),
         el("button", { type: "button", class: "btn btn-ghost", onclick: onBack }, "Back to the form")));
   }
@@ -1914,8 +2410,10 @@
       done(r);
     } catch (e) { dr.msg = { kind: "err", err: e }; dr.phase = "edit"; redraw("[data-focus=err]"); }
   }
-  async function afterWrite(slug, href, message) {
+  // r and title record a save receipt (see recordReceipt); a write that changed nothing leaves none.
+  async function afterWrite(slug, href, message, r, title) {
     state.models.delete(slug);
+    if (r) recordReceipt(slug, title || message, r);
     toast(message);
     await loadProjects(true);
     if (location.hash === href) render(); else location.hash = href;
@@ -1932,6 +2430,7 @@
         recruit: "fort", site: "", startdom: "", pathcost: "", gcost: "", magic: {} } }));
     const f = dr.form;
     const holder = el("section", { class: "panel editor creator", "aria-labelledby": `create-h-${kind}` });
+    escapeReview(holder, () => dr.phase === "review", () => { dr.phase = "edit"; redraw(REVIEW_TRIGGER); });
     const url = `/api/projects/${encodeURIComponent(slug)}/create/monster`;
     const back = kind === "god" ? route("p", slug, "pretenders") : route("p", slug, "units");
     const reload = () => { state.models.delete(slug); dr.msg = null; render(); };
@@ -1967,7 +2466,7 @@
         if (String(f.gcost).trim() !== "" && !intIn(f.gcost, 0, 19999)) out.gcost = "0-19999, or leave blank.";
         for (const [p, v] of Object.entries(f.magic)) if (String(v).trim() !== "" && !intIn(v, 1, 10)) out[`magic-${p}`] = "1-10";
       }
-      if (f.mode === "duplicate" && f.role === "god") { const s = mons.find((u) => String(u.id) === f.source_id); if (s && !isGod(s)) out.role = "This unit has no #startdom/#pathcost; duplicate it as a unit, then set them with Edit values."; }
+      if (f.mode === "duplicate" && f.role === "god") { const s = mons.find((u) => String(u.id) === f.source_id); if (s && !isGod(s)) out.role = "This unit has no #startdom/#pathcost; duplicate it as a unit, then set them with Edit."; }
       return out;
     }
     let showErrors = false;
@@ -2000,8 +2499,8 @@
             state.creates.delete(key);
             const href = r.role === "god" ? routeNation(String(f.nation), "p", slug, "pretenders", `project-${r.id}`)
               : r.role === "none" ? routeNation(N_NONE, "p", slug, "units", r.id) : routeNation(String(f.nation), "p", slug, "units", r.id);
-            afterWrite(slug, href, `Created #${r.id}. Backup: ${r.backup}`);
-          }), () => { dr.phase = "edit"; redraw(); }));
+            afterWrite(slug, href, `Created #${r.id}. Backup: ${r.backup}`, r, `Created ${kind === "god" ? "pretender" : "unit"} #${r.id}`);
+          }), () => { dr.phase = "edit"; redraw(REVIEW_TRIGGER); }));
         if (focusSel) { const t = holder.querySelector(focusSel); if (t) t.focus(); }
         return;
       }
@@ -2020,7 +2519,7 @@
           const q = el("input", { class: "input", type: "search", id: `cr-q-${kind}`, value: f.donorQuery, placeholder: "Name or id, e.g. Hoplite or 199", autocomplete: "off" });
           q.addEventListener("input", () => { f.donorQuery = q.value; });
           q.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); if (q.value.trim()) searchDonors(q.value.trim()); } });
-          const btn = el("button", { type: "button", class: "btn btn-small", disabled: (state.meta && !state.meta.catalog) || null, onclick: () => { if (q.value.trim()) searchDonors(q.value.trim()); else q.focus(); } }, "Search");
+          const btn = el("button", { type: "button", class: "btn btn-small", disabled: !catalogOf(m) || null, onclick: () => { if (q.value.trim()) searchDonors(q.value.trim()); else q.focus(); } }, "Search");
           src.push(el("div", { class: "edit-field wide" }, el("label", { for: q.id, text: "Search catalog units" }), el("div", { class: "edit-control" }, q, btn), resultsBox,
             el("div", { id: "donor-picked", tabindex: "-1", class: f.donorId ? "picked" : "faint" }, f.donorId ? ["Donor: ", el("strong", { text: `${f.donorName} (#${f.donorId})` })] : "No donor chosen yet."),
             errs.donor ? el("div", { class: "field-err", text: errs.donor }) : null));
@@ -2039,7 +2538,7 @@
         src.push(labelled(sd.id, kind === "god" ? "Project god to copy" : "Project unit to copy", sd, "The whole block is copied as written (unknown commands, comments, sprite paths); only the id, name and description change.", errs.source_id));
       }
       g.push(el("fieldset", { class: "edit-group" }, el("legend", { text: "Source" }), el("div", { class: "edit-grid creator-grid" }, src),
-        f.mode === "new" ? el("p", { class: "panel-note", text: "#copystats copies the donor's stats, equipment, magic and abilities; #copyspr borrows its sprite until you upload art. Refine values afterwards with Edit values. Check the copied-unit audit in docs/NATION-DESIGN.md." }) : null));
+        f.mode === "new" ? el("p", { class: "panel-note", text: "#copystats copies the donor's stats, equipment, magic and abilities; #copyspr borrows its sprite until you upload art. Refine values afterwards with Edit." }) : null));
       // Identity
       const nm = bindInput(el("input", { class: "input", id: `cr-name-${kind}`, value: f.name, maxlength: "60", autocomplete: "off", "aria-invalid": errs.name ? "true" : null }), dr, "name");
       const ds = bindInput(el("textarea", { class: "input", id: `cr-descr-${kind}`, rows: "3", maxlength: "1999", "aria-invalid": errs.descr ? "true" : null }), dr, "descr");
@@ -2092,7 +2591,7 @@
       }
       const nErr = Object.keys(problems()).length;
       const actions = el("div", { class: "btn-row edit-actions" },
-        el("button", { type: "submit", class: "btn" }, "Review"),
+        el("button", { type: "submit", class: "btn", ...RT }, "Review"),
         el("a", { class: "btn btn-ghost", href: back, onclick: () => { state.creates.delete(key); } }, "Cancel"),
         el("span", { class: "edit-count", role: "status", text: showErrors && nErr ? `${nErr} field(s) need attention` : "Nothing is written until you confirm the review." }));
       holder.replaceChildren(...[head, err, busy].filter(Boolean), el("form", { class: "edit-form", novalidate: true, onsubmit: (e) => {
@@ -2124,6 +2623,7 @@
     const f = dr.form;
     const url = `/api/projects/${encodeURIComponent(slug)}/create/nation`;
     const holder = el("section", { class: "panel editor creator", "aria-labelledby": "nation-create-h" });
+    escapeReview(holder, () => dr.phase === "review", () => { dr.phase = "edit"; redraw(REVIEW_TRIGGER); });
     const reload = () => { state.models.delete(slug); dr.msg = null; render(); };
     let showErrors = false;
     function problems() {
@@ -2162,8 +2662,8 @@
       if (dr.phase === "review" && dr.preview) {
         holder.replaceChildren(head, busy || reviewBlock(dr.preview, "Create nation", () => runWrite(dr, url, body(), false, redraw, (r) => {
           state.creates.delete(key); rememberNation(slug, String(r.id));
-          afterWrite(slug, routeNation(String(r.id), "p", slug, "nation", r.id), `Created nation #${r.id}. Backup: ${r.backup}`);
-        }), () => { dr.phase = "edit"; redraw(); }));
+          afterWrite(slug, routeNation(String(r.id), "p", slug, "nation", r.id), `Created nation #${r.id}. Backup: ${r.backup}`, r, `Created nation #${r.id}`);
+        }), () => { dr.phase = "edit"; redraw(REVIEW_TRIGGER); }));
         if (focusSel) { const t = holder.querySelector(focusSel); if (t) t.focus(); }
         return;
       }
@@ -2196,7 +2696,7 @@
           checks("gods", "Custom pretender gods (#addgod)", gods.map((u) => [u.id, `${txt(u.name)} (#${u.id})`]), "Only project monsters with #startdom and #pathcost."),
           checks("realms", "Home realms (#homerealm, optional)", Object.entries({ 1: "North", 2: "Celtic", 3: "Mediterranean", 4: "Far East", 5: "Middle East", 6: "Middle America", 7: "Africa", 8: "India", 9: "Deeps", 10: "Default" }).map(([k, v]) => [k, `${k} ${v}`]),
             "Adds vanilla gods of these realms. Realm 10 (Default) is added only when ticked."),
-          el("div", { class: "btn-row edit-actions" }, el("button", { type: "submit", class: "btn" }, "Review"),
+          el("div", { class: "btn-row edit-actions" }, el("button", { type: "submit", class: "btn", ...RT }, "Review"),
             el("a", { class: "btn btn-ghost", href: route("p", slug, "nation"), onclick: () => { state.creates.delete(key); } }, "Cancel"),
             el("span", { class: "edit-count", text: "Nothing is written until you confirm the review." }))));
       if (focusSel) { const t = holder.querySelector(focusSel); if (t) t.focus(); }
@@ -2248,17 +2748,22 @@
   }
   function nationEditorSection(m, n) {
     if (!Number.isInteger(n.id) || !CSRF) return null;
-    const slug = m.project.slug, nd = nationDraft(slug, n.id);
-    const cnt = nd.st ? nationChanges(nd).changes.length : 0;
-    const bar = el("div", { class: "btn-row edit-bar" },
-      el("button", { type: "button", class: "btn", "aria-expanded": nd.open ? "true" : "false", "aria-controls": `nation-editor-${n.id}`,
-        onclick: () => { nd.open = !nd.open; nd.msg = null; render().then(() => { const b = $(`[aria-controls="nation-editor-${n.id}"]`); if (b) b.focus(); }); } }, nd.open ? "Close nation editor" : "Edit nation"),
-      cnt ? badge(`${cnt} unsaved change(s)`, "warn") : null,
-      nd.msg && nd.msg.kind === "ok" ? el("span", { class: "edit-ok", role: "status", text: nd.msg.text }) : null,
-      el("span", { class: "faint", text: "Identity, fort roster, gods, realms, start sites and start army; reviewed diff, backup kept." }));
-    return el("div", { class: "stack" }, bar, nd.open ? nationEditor(m, n) : null);
+    const slug = m.project.slug, box = el("div", { class: "stack" });
+    // Opening and closing redraws only this section, keeping scroll position and focus.
+    const draw = (focus) => {
+      const nd = nationDraft(slug, n.id), cnt = nd.st ? nationChanges(nd).changes.length : 0;
+      const btn = el("button", { type: "button", class: "btn", "aria-expanded": nd.open ? "true" : "false", "aria-controls": `nation-editor-${n.id}`,
+        onclick: () => { nd.open = !nd.open; nd.msg = null; draw(true); } }, nd.open ? "Close editor" : "Edit nation");
+      fillKids(box, el("div", { class: "btn-row edit-bar" }, btn,
+        cnt ? badge(`${cnt} unsaved change(s)`, "warn") : null,
+        nd.msg && nd.msg.kind === "ok" ? el("span", { class: "edit-ok", role: "status", text: nd.msg.text }) : null),
+        nd.open ? nationEditor(m, n, () => draw(true)) : null);
+      if (focus) btn.focus({ preventScroll: true });
+    };
+    draw(false);
+    return box;
   }
-  function nationEditor(m, n) {
+  function nationEditor(m, n, onClose) {
     const slug = m.project.slug, id = n.id, nd = nationDraft(slug, id);
     const url = `/api/projects/${encodeURIComponent(slug)}/nations/${encodeURIComponent(id)}/edit`;
     const holder = el("section", { class: "panel editor nation-editor", id: `nation-editor-${id}`, "aria-labelledby": `nation-editor-h-${id}` });
@@ -2285,6 +2790,7 @@
         const fresh = nationDraft(slug, id);
         fresh.msg = { kind: "ok", text: r.written ? `Saved to the .dm. Backup: ${r.backup}` : "Nothing changed." };
         state.models.delete(slug);
+        recordReceipt(slug, `Saved nation #${id}`, r);
         toast(r.written ? "Nation saved to the .dm" : "Nothing to save");
         await loadProjects(true);
         render().then(() => { const b = $(`[aria-controls="nation-editor-${id}"]`); if (b) b.focus(); });
@@ -2413,8 +2919,9 @@
         diffView(p.diff || "(no text change)"),
         el("p", { class: "panel-note", text: "Only the lines in the diff change. Defence, walls, flags, colours, AI and unknown commands, comments, order, newlines and encoding stay as written; start-site #homecom/#homemon lines are not touched. A backup of the previous .dm is kept." }),
         el("div", { class: "btn-row" },
-          el("button", { type: "button", class: "btn", disabled: !p.changed || null, onclick: () => send(false) }, "Save to .dm"),
-          el("button", { type: "button", class: "btn btn-ghost", onclick: () => { nd.phase = "edit"; nd.preview = null; draw(); } }, "Back to editing")));
+          p.changed ? el("button", { type: "button", class: "btn", onclick: () => send(false) }, "Save to .dm")
+            : el("span", { class: "muted", text: "Nothing to save: the file already says this." }),
+          el("button", { type: "button", class: p.changed ? "btn btn-ghost" : "btn", onclick: () => { nd.phase = "edit"; nd.preview = null; draw(REVIEW_TRIGGER); } }, "Back to editing")));
     }
     function draw(focusSel) {
       const st = nd.st;
@@ -2423,11 +2930,11 @@
       const intro = el("p", { class: "panel-note" }, "Writes into ", el("code", { text: `#selectnation ${id}` }), ` (lines ${st.line}–${st.end_line} of ${st.file}). ${st.basis}. `,
         st.resets.length ? ["Resets in the block: ", st.resets.map((r, i) => [i ? ", " : "", el("code", { text: r.command }), ` line ${r.line}`]), ". "] : "No resets in the block. ",
         "Kosmokrator never adds a reset; nothing is changed that you did not ask for.");
-      if (nd.phase === "review" && nd.preview) { holder.replaceChildren(head(), intro, busy || reviewPanel()); if (focusSel) { const t = holder.querySelector(focusSel); if (t) t.focus(); } return; }
+      if (nd.phase === "review" && nd.preview) { holder.replaceChildren(head(), intro, busy || reviewPanel()); focusIn(holder, focusSel); return; }
       const projUnits = st.options.units.filter((u) => u.role !== "pretender");
-      reviewBtn = el("button", { type: "submit", class: "btn" }, "Review changes");
+      reviewBtn = el("button", { type: "submit", class: "btn", ...RT }, "Review changes");
       const actions = el("div", { class: "btn-row edit-actions" }, reviewBtn,
-        el("button", { type: "button", class: "btn btn-ghost", onclick: () => { state.nationEditors.delete(`${slug}:${id}`); render(); } }, "Cancel"), countBox);
+        el("button", { type: "button", class: "btn btn-ghost", onclick: () => { state.nationEditors.delete(`${slug}:${id}`); if (onClose) onClose(); else render(); } }, "Cancel"), countBox);
       holder.replaceChildren(...[head(), intro, err, busy].filter(Boolean), el("form", { class: "edit-form", novalidate: true,
         onsubmit: (e) => { e.preventDefault(); if (!reviewBtn.disabled) send(true); } },
         identityGroup(st),
@@ -2442,9 +2949,9 @@
           checkList(st, "realms", "Home realms (#homerealm)", Object.entries(st.options.realms).map(([k, v]) => [Number(k), `${k} ${v}`]), "Realm 10 (Default) is added only when ticked.")),
         actions));
       updateCount();
-      if (focusSel) { const t = holder.querySelector(focusSel); if (t) t.focus(); }
+      focusIn(holder, focusSel);
     }
-    holder.addEventListener("keydown", (e) => { if (e.key === "Escape" && nd.phase === "review") { nd.phase = "edit"; draw(); } });
+    escapeReview(holder, () => nd.phase === "review", () => { nd.phase = "edit"; draw(REVIEW_TRIGGER); });
     if (nd.st) draw(); else load();
     return holder;
   }
@@ -2462,6 +2969,7 @@
     const dr = draftOf(state.arts, key, () => ({ open: false, frames: {}, zoom: 1, phase: "edit", preview: null, msg: null }));
     const url = `/api/projects/${encodeURIComponent(slug)}/monsters/${encodeURIComponent(u.id)}/art`;
     const holder = el("div", { class: "stack art-manager", id: `art-${u.id}` });
+    escapeReview(holder, () => dr.phase === "review", () => { dr.phase = "edit"; redraw(REVIEW_TRIGGER); });
     const reload = () => { state.models.delete(slug); dr.msg = null; render(); };
     const body = () => ({ expected_sha256: m.provenance.sha256, frames: Object.fromEntries(Object.entries(dr.frames).map(([k, v]) => [k, v.b64])) });
     async function pick(frame, file) {
@@ -2499,22 +3007,22 @@
       const zoom = el("div", { class: "btn-row seg", role: "group", "aria-label": "Preview zoom" }, [1, 2, 3, 4].map((s) =>
         el("button", { type: "button", class: "btn btn-small", "aria-pressed": dr.zoom === s ? "true" : "false", onclick: () => { dr.zoom = s; redraw(`[aria-label="Preview zoom"] [aria-pressed=true]`); } }, `${s}x`)));
       holder.replaceChildren(...[
-        el("p", { class: "panel-note", text: "PNG only, 8-bit RGBA, 1-256 px per side (64×64 recommended), at most 2 MB, alpha strictly 0 or 255. Files are stored as new art/" + (isGod(u) ? "pretenders" : "units") + `/${u.id}-<token>-<frame>.png; existing files are never overwritten or deleted. #copyspr is removed from this block so the donor's sprite no longer applies; that needs both frames when the block borrows its sprite.` }),
+        el("p", { class: "panel-note", text: "PNG, 8-bit RGBA, up to 256 px per side (64×64 recommended), 2 MB max, alpha 0 or 255. Saved as new files under art/" + (isGod(u) ? "pretenders" : "units") + "/; existing files are never overwritten. Removes #copyspr, so a borrowed sprite needs both frames." }),
         err, busy,
         el("div", { class: "art-grid" }, frameCol("idle", "Idle"), frameCol("attack", "Attack")),
-        el("div", { class: "btn-row" }, el("span", { class: "muted", text: "Preview:" }), zoom, el("span", { class: "faint", text: "1x is native size; zoom is pixelated (never smoothed). Images are not altered." })),
+        el("div", { class: "btn-row" }, el("span", { class: "muted", text: "Preview:" }), zoom),
         dr.phase === "review" && dr.preview ? reviewBlock({ ...dr.preview, explanation: (dr.preview.plan || []).map((p) => `${p.action} ${p.frame}: ${p.before ? p.before + " → " : ""}${p.after || ""}${p.explanation ? " (" + p.explanation + ")" : ""}`) },
           "Save frames", () => runWrite(dr, url, body(), false, redraw, (r) => {
             for (const f of Object.values(dr.frames)) URL.revokeObjectURL(f.url);
             state.arts.delete(key);
-            afterWrite(slug, location.hash, `Saved ${r.files.length} frame(s). Backup: ${r.backup}`);
-          }), () => { dr.phase = "edit"; redraw(); })
-          : el("div", { class: "btn-row" }, el("button", { type: "button", class: "btn", disabled: !n || !CSRF || null, onclick: () => runWrite(dr, url, body(), true, redraw) }, "Check frames"),
+            afterWrite(slug, location.hash, `Saved ${r.files.length} frame(s). Backup: ${r.backup}`, r, `Saved ${r.files.length} art frame(s) for ${txt(u.name) || "unit"} (#${u.id})`);
+          }), () => { dr.phase = "edit"; redraw(REVIEW_TRIGGER); })
+          : el("div", { class: "btn-row" }, el("button", { type: "button", class: "btn", disabled: !n || !CSRF || null, onclick: () => runWrite(dr, url, body(), true, redraw), ...RT }, "Check frames"),
             el("span", { class: "faint", text: n ? `${n} frame(s) chosen` : "Choose one or two PNG files." }))].filter(Boolean));
       if (focusSel) { const t = holder.querySelector(focusSel); if (t) t.focus(); }
     }
     redraw();
-    return techSection(`Artwork: upload or replace frames${Object.keys(dr.frames).length ? ` (${Object.keys(dr.frames).length} chosen)` : ""}`, Object.keys(dr.frames).length > 0 || dr.phase === "review", holder);
+    return techSection(`Upload art${Object.keys(dr.frames).length ? ` (${Object.keys(dr.frames).length} chosen)` : ""}`, Object.keys(dr.frames).length > 0 || dr.phase === "review", holder);
   }
 
   // ---------- build and export (project-wide) ----------
@@ -2525,8 +3033,74 @@
     if (!state.exports.has(slug)) state.exports.set(slug, { format: "zip", busy: false, result: null, error: null, list: null, listError: null, listOpen: false });
     return state.exports.get(slug);
   }
-  const unsavedDrafts = (slug) => [...state.editors.entries()]
-    .filter(([k, ed]) => k.startsWith(`${slug}:`) && ed.st && draftChanges(ed).changes.length).map(([k]) => k.split(":")[1]);
+  // ---------- unsaved drafts (every editor) ----------
+  // Drafts live in this tab's memory only. One registry lists every editor holding input the saved files do not contain
+  // yet: Export, the project header and the browser's leave-page warning all read it. A draft that matches the file again
+  // (typed back, discarded, saved or cancelled) is not listed. slug: one project; omitted: every project plus .dm import.
+  const formDirty = (dr) => !!dr && !!dr.form && dr.formBase !== undefined && JSON.stringify(dr.form) !== dr.formBase;
+  function unsavedDrafts(slug) {
+    const out = [];
+    const add = (s, label, href) => { if (slug === undefined || s === slug) out.push({ slug: s, label, href }); };
+    const head = (k) => { const i = k.indexOf(":"); return [k.slice(0, i), k.slice(i + 1)]; };
+    const hasErrOrChange = (r) => r.changes.length > 0 || Object.keys(r.errors).length > 0;
+    for (const [k, ed] of state.editors) {
+      const [s, id] = head(k);
+      if (ed.st && hasErrOrChange(draftChanges(ed))) add(s, `Unit #${id}: field edits`, hashPath("p", s, "units", id));
+    }
+    for (const [k, nd] of state.nationEditors) {
+      const [s, id] = head(k);
+      if (nd.st && hasErrOrChange(nationChanges(nd))) add(s, `Nation #${id}: edits`, routeNation(id, "p", s, "nation", id));
+    }
+    for (const [k, dr] of state.creates) {
+      if (!formDirty(dr)) continue;
+      const [s, rest] = head(k), [kind, which] = rest.split(":");
+      if (kind === "nation") add(s, "New nation", hashPath("p", s, "nation", "~new"));
+      else add(s, `${which === "new" ? "New" : `Duplicate of #${which}`} ${kind === "god" ? "pretender god" : "unit"}`,
+        hashPath("p", s, kind === "god" ? "pretenders" : "units", which === "new" ? "~new" : `~dup-${which}`));
+    }
+    for (const [k, dr] of state.arts) { const [s, id] = head(k); if (Object.keys(dr.frames).length) add(s, `Unit #${id}: artwork upload`, hashPath("p", s, "units", id)); }
+    for (const [k, dr] of state.authoring) {
+      if (k.startsWith("equipment:")) {
+        const [s, id] = head(k.slice(10));
+        if (Object.values(dr.replace || {}).some(Boolean)) add(s, `Unit #${id}: equipment`, hashPath("p", s, "units", id));
+        continue;
+      }
+      const [s, rest] = head(k), parts = rest.split(":"), kind = parts[0], key = parts.slice(1).join(":");
+      if (CONTENT_KINDS[kind]) {
+        if (key === "~new" ? draftDirty(dr) : Object.keys(dr.touched || {}).length) add(s, `${key === "~new" ? "New" : "Edited"} ${CONTENT_KINDS[kind].one}${/^\d+$/.test(key) ? ` #${key}` : ""}`, authRoute(s, kind, key));
+      } else if (kind === "heroes") {
+        if (Object.keys(dr.touched.heroes || {}).length + Object.keys(dr.touched.multiheroes || {}).length) add(s, `Heroes of nation #${key}`, routeNation(key, "p", s, "author", "heroes"));
+      } else if (kind === "playtest") {
+        if (Object.keys(dr.touched || {}).length || (dr.evidence || []).length) add(s, "Playtest record", hashPath("p", s, "author", "playtests"));
+      } else if (kind === "cmd") {
+        const ctx = parts[1], bkey = parts.slice(2).join(":"), label = (CMD_CONTEXTS.find((c) => c[0] === ctx) || [ctx, ctx])[1];
+        const opener = bkey === "~new" && (dr.opener.raw || []).some((x) => String(x ?? "").trim());
+        if (dr.ops.length || opener) add(s, `${bkey === "~new" ? "New" : "Edited"} ${label.toLowerCase()} block (advanced)`, cmdRoute(s, ctx, bkey));
+      } else if (kind === "merc" && formDirty(dr)) add(s, "New mercenary company", hashPath("p", s, "mercs", "~new"));
+    }
+    for (const [s, dr] of state.depDrafts) {
+      if (dr.st && dr.list && JSON.stringify(dr.list) !== JSON.stringify(dr.st.dependencies || [])) add(s, "Dependency settings", hashPath("p", s));
+    }
+    for (const [k, dr] of state.maps) { const [s, id] = head(k); if (draftSize(dr)) add(s, `Map ${id}: edits`, mapRoute(s, id)); }
+    for (const [s, dr] of state.mapImports) if (!dr.done && (dr.files.length || dr.id.trim())) add(s, "Map import", mapRoute(s, "~import"));
+    for (const [s, dr] of state.mapBuilds || []) if (dr.brief && dr.briefBase !== undefined && JSON.stringify(dr.brief) !== dr.briefBase) add(s, "Map job brief", mapRoute(s));
+    const imp = state.importDraft;
+    if (slug === undefined && imp && !imp.done && (imp.dm || imp.assets.length || imp.form.slug.trim() || imp.form.name.trim())) out.push({ slug: null, label: "Import a .dm", href: "#/import" });
+    return out;
+  }
+  // Header badge for the current project, refreshed after input without re-rendering the page.
+  let draftTimer = 0;
+  function syncDraftStatus() {
+    const box = $("#draft-status");
+    if (!box) return;
+    const n = unsavedDrafts(box.dataset.slug).length;
+    box.hidden = !n;
+    const a = box.querySelector("a");
+    if (a) a.textContent = `${n} unsaved draft${n === 1 ? "" : "s"}`;
+  }
+  for (const ev of ["input", "change", "click"]) document.addEventListener(ev, () => { clearTimeout(draftTimer); draftTimer = setTimeout(syncDraftStatus, 200); }, true);
+  // Drafts are in memory only: closing or reloading the tab would lose them, so the browser asks first.
+  window.addEventListener("beforeunload", (e) => { if (unsavedDrafts().length) { e.preventDefault(); e.returnValue = ""; } });
   const shortSha = (s) => (s ? `${s.slice(0, 12)}…` : "—");
   function exportPanel(m) {
     const slug = m.project.slug, p = m.provenance, v = m.validation, ui = exportUi(slug);
@@ -2570,33 +3144,34 @@
           err.code === "sha_mismatch" || err.code === "changed_during_export" ? el("button", { type: "button", class: "btn btn-small", onclick: revalidate }, "Reload saved revision") : null,
           err.code === "validation_failed" ? el("a", { class: "btn btn-small", href: route("p", slug, "validation") }, "Open validation report") : null,
           err.code === "project_locked" ? el("button", { type: "button", class: "btn btn-small", onclick: run }, "Try again") : null),
-        el("p", { class: "panel-note", text: "Nothing was written. Unsaved unit edits are untouched." }));
+        el("p", { class: "panel-note", text: "Nothing was written. Unsaved drafts are untouched." }));
     }
     function resultView(r) {
       const man = r.manifest, val = r.validation || {}, c = val.counts || {}, zip = r.format === "zip";
       const xbase = `${base}/exports/${encodeURIComponent(r.export_id)}`;
       return el("div", { class: "export-result stack" },
-        el("p", null, el("strong", { id: "export-outcome", tabindex: "-1", text: "Export written." }), " ", badge(zip ? "ZIP" : "folder", "info"), " ",
-          r.sha256 === p.sha256 ? badge("revision shown on this page", "ok") : badge("older revision than this page", "warn")),
-        el("dl", { class: "kv" },
+        el("p", null, el("strong", { id: "export-outcome", tabindex: "-1", text: zip ? "ZIP export written." : "Folder export written." }),
+          r.sha256 === p.sha256 ? null : [" ", badge("older revision than this page", "warn")]),
+        c.unverified || c.warnings ? el("p", null, `${txt(c.warnings)} warnings · ${txt(c.unverified)} unverified `,
+          el("a", { href: route("p", slug, "validation") }, "review")) : null,
+        techSection("Technical details", false, el("dl", { class: "kv" },
           el("dt", { text: "Export id" }), el("dd", { class: "mono", text: r.export_id }),
           el("dt", { text: ".dm SHA-256" }), el("dd", { class: "hash", text: r.sha256 }),
           zip ? el("dt", { text: "Archive SHA-256" }) : null, zip ? el("dd", { class: "hash", text: txt(man.archive_sha256) }) : null,
           el("dt", { text: "Location" }), el("dd", { class: "mono", text: `${slug}/${r.path}` }),
           el("dt", { text: "Manifest" }), el("dd", { class: "mono", text: `${slug}/${r.manifest_path}` }),
           el("dt", { text: "Created (UTC)" }), el("dd", { text: txt(man.created_utc) }),
-          el("dt", { text: "Validation" }), el("dd", null, badge("no errors", "ok"), " ", `${txt(c.warnings)} warnings · ${txt(c.unverified)} unverified `,
-            c.unverified || c.warnings ? el("a", { href: route("p", slug, "validation") }, "review") : null),
           el("dt", { text: "Target game" }), el("dd", { text: `Dominions ${txt(man.target_game_version)} · manual ${txt(man.manual_version)}` })),
         table(["Packaged file", "Bytes", "SHA-256"], man.files.map((f) => [el("code", { text: f.path }), txt(f.bytes), el("span", { class: "hash", text: f.sha256 })]),
           { caption: "Bytes hashed from the validated snapshot; the manifest records the same hashes." }),
+          el("p", { class: "panel-note", text: `${txt(man.disclaimer)} Not installed or published: ${txt(man.install_hint)}` })),
         (val.warnings || []).length ? el("details", { class: "raw" }, el("summary", null, `Warnings (${val.warnings.length})`),
           el("div", { class: "inner" }, diagnosticsList(slug, val.warnings, p.file))) : null,
         el("div", { class: "btn-row" },
           zip ? el("a", { class: "btn", href: `${xbase}/archive`, download: "" }, "Download ZIP") : null,
           el("a", { class: "btn btn-small", href: `${xbase}/manifest`, target: "_blank", rel: "noopener" }, "Manifest JSON"),
           zip ? el("button", { type: "button", class: "btn btn-small btn-ghost", onclick: () => copy(txt(man.archive_sha256), "Archive hash") }, "Copy archive hash") : null),
-        el("p", { class: "panel-note", text: `${txt(man.disclaimer)} Not installed or published: ${txt(man.install_hint)}` }));
+        el("p", { class: "panel-note", text: "Not installed or published. Test it in Dominions 6." }));
     }
     function listView() {
       const box = el("div", { class: "inner" });
@@ -2633,24 +3208,30 @@
         list.append(listView());
       });
       holder.replaceChildren(...[
-        el("h3", { id: "export-h" }, "Build and export ", badge("project-wide", "info")),
+        el("h3", { id: "export-h" }, "Export"),
         el("dl", { class: "kv" },
-          el("dt", { text: "Saved revision" }), el("dd", null, el("span", { class: "mono", text: p.file }), " ", el("span", { class: "hash", text: p.sha256 })),
-          el("dt", { text: "Validation" }), el("dd", null, !v ? badge("unavailable", "err") : !fresh ? badge("stale", "warn") : v.ok ? badge("no errors", "ok") : badge(`${v.counts.errors} error(s)`, "err"),
-            v ? ` ${v.counts.warnings} warnings · ${v.counts.unverified} unverified · for ${shortSha(v.sha256)}` : ""),
-          el("dt", { text: "Catalog" }), el("dd", { text: p.catalog ? `dataset ${txt(p.catalog.dataset_version || "unknown")}` : "none (vanilla references unverified)" })),
-        drafts.length ? el("p", { class: "export-drafts", role: "note" }, badge(`${drafts.length} unsaved unit draft(s)`, "warn"),
-          " Not included; only the saved .dm is exported: ", drafts.map((id, i) => [i ? ", " : "", el("a", { href: route("p", slug, "units", id) }, `#${id}`)])) : null,
+          el("dt", { text: "Validation" }), el("dd", null, !v ? badge("unavailable", "err") : !fresh ? badge("stale", "warn") : v.ok ? "No errors" : badge(`${v.counts.errors} error(s)`, "err"),
+            v ? ` · ${v.counts.warnings} warnings · ${v.counts.unverified} unverified` : ""),
+          p.catalog ? null : [el("dt", { text: "Catalog" }), el("dd", { text: "none (vanilla references unverified)" })]),
+        drafts.length ? el("div", { class: "export-drafts", role: "note" },
+          el("p", null, badge(`${drafts.length} unsaved draft${drafts.length === 1 ? "" : "s"}`, "warn"),
+            " Not included: only the saved files are exported. Save or cancel these first if they belong in this export."),
+          el("ul", { class: "plain-list" }, drafts.map((d) => el("li", null, el("a", { href: d.href }, d.label))))) : null,
         el("div", { class: "btn-row export-controls" },
-          el("button", { type: "button", class: "btn btn-small btn-ghost", disabled: ui.busy || null, onclick: revalidate }, "Re-validate saved .dm"),
+          el("button", { type: "button", class: "btn btn-small btn-ghost", disabled: ui.busy || null, onclick: revalidate }, "Re-validate"),
           el("label", { for: "export-format", class: "faint", text: "Format" }), fmt,
           el("button", { type: "button", class: "btn", disabled: ui.busy || blocked ? true : null, "aria-describedby": blocked ? "export-blocked" : null, onclick: run },
-            ui.busy ? "Exporting…" : `Export revision ${p.sha256.slice(0, 8)}`)),
+            ui.busy ? "Exporting…" : "Export")),
         blocked ? el("p", { class: "panel-note", id: "export-blocked", text: blocked }) : null,
         el("div", { role: "status", "aria-live": "polite" },
           ui.busy ? stateBox("loading", "Validating and packaging the saved revision...") : null),
         ui.error ? errorView(ui.error) : ui.result ? resultView(ui.result) : null,
-        el("p", { class: "panel-note", text: `Writes a new, uniquely named export under ${slug}/exports/ (never overwrites) from the saved .dm and the art it references, exactly as validated. Nothing is installed into the game or published. Static validation does not prove the mod loads or is balanced.` }),
+        el("p", { class: "panel-note", text: "Packages the saved .dm and its art. Nothing is installed or published." }),
+        techSection("Saved revision", false, el("dl", { class: "kv" },
+          el("dt", { text: "File" }), el("dd", { class: "mono", text: p.file }),
+          el("dt", { text: ".dm SHA-256" }), el("dd", { class: "hash", text: p.sha256 }),
+          v ? [el("dt", { text: "Validated" }), el("dd", { class: "hash", text: v.sha256 })] : null,
+          el("dt", { text: "Catalog" }), el("dd", { text: p.catalog ? `dataset ${txt(p.catalog.dataset_version || "unknown")}${p.catalog.reference_snapshot ? " (project reference snapshot; never packaged)" : ""}` : "none" }))),
         list].filter(Boolean));
     }
     draw();
@@ -2658,20 +3239,15 @@
     return holder;
   }
 
-  // ---------- export entry point (project header, every section) ----------
-  function exportHeadButton(m, active) {
+  // ---------- export status (shown on the Export tab) ----------
+  // [text, kind] only when something blocks the export; null when it can run.
+  function exportStatus(m) {
     const v = m.validation, fresh = !!v && v.sha256 === m.provenance.sha256;
-    const status = !v ? ["validation unavailable", "err"] : !fresh ? ["re-validate", "warn"]
-      : !v.ok ? [`${v.counts.errors} error${v.counts.errors === 1 ? "" : "s"}`, "err"] : ["ready", "ok"];
-    return el("div", { class: "proj-actions" },
-      el("a", { class: "btn btn-export", href: route("p", m.project.slug, "export"), "aria-current": active === "export" ? "page" : null,
-        "aria-describedby": "export-head-status" }, "Export mod"),
-      el("span", { class: `badge ${status[1]}`, id: "export-head-status", text: status[0] }));
+    return !v ? ["validation unavailable", "err"] : !fresh ? ["re-validate", "warn"]
+      : !v.ok ? [`${v.counts.errors} error${v.counts.errors === 1 ? "" : "s"}`, "err"] : null;
   }
   function viewExport(m) {
-    return el("div", { class: "stack" },
-      el("p", { class: "panel-note", text: "Package the saved revision first. Then optionally turn that export into a folder the Dominions 6 Workshop uploader accepts. Kosmokrator never uploads or publishes anything." }),
-      exportPanel(m), workshopPanel(m));
+    return el("div", { class: "stack" }, exportPanel(m), workshopPanel(m));
   }
 
   // ---------- Steam Workshop preparation ----------
@@ -2760,9 +3336,9 @@
           el("img", { class: "ws-banner", src: `${wbase}/banner.png`, width: 96, height: 96, alt: `banner.png for ${slug} (256 by 256)` }),
           el("div", null,
             el("p", null, el("strong", { id: open ? "ws-outcome" : null, tabindex: open ? "-1" : null, text: open ? "Workshop folder ready." : r.workshop_id }), " ",
-              cur ? badge("revision shown on this page", "ok") : badge("older revision", "warn"), " ", badge(`Visibility = "${txt(r.visibility)}"`, "info")),
+              cur ? null : [badge("older revision", "warn"), " "], el("span", { class: "faint", text: `Visibility: ${txt(r.visibility)}` })),
             el("p", { class: "panel-note", text: `banner.png from ${txt(b.source)}: ${txt(b.method)}.` }))),
-        el("dl", { class: "kv" },
+        techSection("Technical details", false, el("dl", { class: "kv" },
           el("dt", { text: "Content folder" }), el("dd", null, el("span", { class: "mono", text: folderText(r) }), " ",
             el("button", { type: "button", class: "btn btn-small btn-ghost", onclick: () => copy(folderText(r), "Folder path") }, "Copy path")),
           el("dt", { text: "From export" }), el("dd", { class: "mono", text: `${txt((r.source_export || {}).export_id)}` }),
@@ -2770,7 +3346,7 @@
           el("dt", { text: "ZIP SHA-256" }), el("dd", { class: "hash", text: txt(r.archive_sha256) })),
         open ? el("details", { class: "raw" }, el("summary", null, `Files in the Workshop folder (${(r.files || []).length}): all of them are uploaded`),
           el("div", { class: "inner" }, table(["File", "Bytes", "SHA-256"], (r.files || []).map((f) => [el("code", { text: f.path }), txt(f.bytes), el("span", { class: "hash", text: f.sha256 })]),
-            { caption: "The manifest and ZIP sit beside this folder, not inside it." }))) : null,
+            { caption: "The manifest and ZIP sit beside this folder, not inside it." }))) : null),
         el("div", { class: "btn-row" },
           el("a", { class: open ? "btn" : "btn btn-small", href: `${wbase}/archive`, download: "" }, "Download Workshop ZIP"),
           el("a", { class: "btn btn-small btn-ghost", href: `${wbase}/manifest`, target: "_blank", rel: "noopener" }, "Manifest JSON")));
@@ -2785,7 +3361,7 @@
         : I.state === "conflict" ? "A mod folder with this name already exists and was not installed from this project. It is left untouched." : null;
       const R = ui.install;
       return el("div", { class: "ws-step stack" },
-        el("h4", { id: "ws-install-h", text: "3. Install locally (optional)" }),
+        el("h4", { id: "ws-install-h", text: "Install locally (optional)" }),
         el("dl", { class: "kv" },
           el("dt", { text: "Mods folder" }), el("dd", null, I.mods_dir ? el("span", { class: "mono", text: I.mods_dir }) : el("span", { class: "muted", text: "none" }),
             " ", el("span", { class: "faint", text: I.source === "environment" ? `(server setting ${I.env})` : I.source === "appdata" ? "(%APPDATA%\\Dominions6\\mods)" : "" })),
@@ -2803,7 +3379,7 @@
           el("div", { class: "mono", text: R.destination }),
           el("div", { class: "faint", text: [R.written.length ? `${R.written.length} file(s) written` : "no files written", R.removed.length ? `${R.removed.length} old file(s) removed` : null,
             R.pfid_preserved ? "dom6ws_pfid kept unchanged" : null].filter(Boolean).join(" · ") })) : null,
-        el("p", { class: "panel-note", text: `Copies only the prepared files into <mods>/${slug}. The folder is fixed by the server, not this page. An existing folder is replaced only if this project installed it and nobody changed it; dom6ws_pfid is never touched.` }));
+        el("p", { class: "panel-note", text: `Copies the prepared files into <mods>/${slug}. Only an unchanged folder this project installed is replaced.` }));
     }
     function draw() {
       const D = ui.data, latest = ui.result || (D && D.prepared.find((x) => !x.error)) || null;
@@ -2816,20 +3392,21 @@
       const banner = m.project.banner;
       const vis = el("select", { class: "input", id: "ws-visibility", disabled: ui.busy ? true : null, "aria-describedby": "ws-vis-note" },
         el("option", { value: "", text: "Choose…" }),
-        ((D && D.visibility_values) || ["Public"]).map((x) => el("option", { value: x, text: `${x} (documented)` })));
+        ((D && D.visibility_values) || ["Public"]).map((x) => el("option", { value: x, text: x })));
       vis.value = ui.visibility;
       vis.addEventListener("change", () => { ui.visibility = vis.value; draw(); const s = holder.querySelector("#ws-visibility"); if (s) s.focus(); });
       const earlier = D ? D.prepared.filter((x) => !latest || x.workshop_id !== latest.workshop_id) : [];
       const steps = (D && D.upload_steps) || [];
       holder.replaceChildren(...[
         el("div", { class: "ws-head" },
-          el("h3", { id: "ws-h" }, "Steam Workshop folder ", badge("prepare only", "info")),
+          el("h3", { id: "ws-h" }, "Steam Workshop"),
           el("span", { class: "faint", text: "Upload happens inside Dominions 6." })),
         ui.loadError ? errorBox(ui.loadError, "Workshop status") : !D ? stateBox("loading", "Reading Workshop status...") : null,
         el("div", { class: "ws-step stack" },
-          el("h4", { text: "1. Choose what goes in" }),
+          el("h4", { text: "Choose what goes in" }),
           el("dl", { class: "kv" },
-            el("dt", { text: "Source" }), el("dd", null, src ? [el("span", { class: "mono", text: src.export_id }), " ", badge("current revision", "ok")]
+            el("dt", { text: "Package" }), el("dd", null, src ? [el("span", { class: "mono", text: src.export_id }),
+              el("p", { class: "panel-note", text: "Uses the artwork saved in this export. If you changed artwork, export again first." })]
               : el("span", { class: "muted", text: `No export of revision ${p.sha256.slice(0, 8)} yet; a ZIP export is made first.` })),
             el("dt", { text: "Banner" }), el("dd", null, banner && banner.status === "ok"
               ? [el("code", { text: banner.path }), el("span", { class: "faint", text: " → banner.png 256×256, centred on transparency, pixels unchanged" })]
@@ -2842,15 +3419,15 @@
           blocked ? el("p", { class: "panel-note", id: "ws-blocked", text: blocked }) : null,
           el("div", { role: "status", "aria-live": "polite" }, ui.busy === "prepare" ? stateBox("loading", "Checking the export and writing the Workshop folder...") : null)),
         ui.error ? failure(ui.error, "ws-outcome", "Not prepared") : null,
-        latest ? el("div", { class: "ws-step stack" }, el("h4", { text: "2. Prepared folder" }), preparedView(latest, !!ui.result)) : null,
+        latest ? el("div", { class: "ws-step stack" }, el("h4", { text: "Prepared folder" }), preparedView(latest, !!ui.result)) : null,
         D ? installView(latest) : null,
         el("div", { class: "ws-step stack" },
-          el("h4", { text: `${D ? 4 : 3}. Upload from the game` }),
+          el("h4", { text: "Upload from the game" }),
           el("ol", { class: "ws-steps" }, (steps.length ? steps : ["Start Dominions 6, open Mods, right-click the local entry and choose \"Upload to Steam Workshop\"."]).map((t) => el("li", { text: t }))),
           el("div", { class: "btn-row" },
             el("a", { class: "btn", href: (D && D.steam_run_url) || "steam://run/2511500" }, "Launch Dominions 6 in Steam"),
             D ? el("a", { class: "btn btn-small btn-ghost", href: D.guide, target: "_blank", rel: "noopener noreferrer" }, "Creator guide (Steam)") : null),
-          el("p", { class: "panel-note", text: "The game uploads the mod folder in its mods directory. Without a local install, copy the content folder there yourself (or unzip the Workshop ZIP into it) first. Kosmokrator holds no Steam login and sends nothing to Steam." })),
+          el("p", { class: "panel-note", text: "Upload from the game's mods folder (install or copy it there first). Kosmokrator sends nothing to Steam." })),
         earlier.length ? el("details", { class: "raw" }, el("summary", null, `Earlier Workshop folders (${earlier.length})`),
           el("div", { class: "inner stack" }, earlier.map((x) => x.error ? el("p", null, el("code", { text: x.workshop_id }), " ", badge(x.error, "warn")) : preparedView(x, false)))) : null,
       ].filter(Boolean));
@@ -2886,13 +3463,13 @@
     const holder = el("div", { class: "stack compare-view" });
     const back = el("p", null, el("a", { href: route("p", slug, "units", uid) }, `← ${txt(u.name || "unit")} sheet`));
     const hasDoc = ((state.meta && state.meta.docs) || []).some((d) => d.name === "NATION-DESIGN.md");
-    const criteria = panel("Design criteria",
+    const criteria = techSection("Design criteria", false,
       el("p", { class: "panel-note" }, "Compare with the criteria in ",
         hasDoc ? el("a", { href: route("docs", "NATION-DESIGN.md") }, "docs/NATION-DESIGN.md") : el("code", { text: "docs/NATION-DESIGN.md" }),
         ": useful roster (a purpose for each unit; compare gold, resources, recruitment capacity and upkeep), whole economy (capital-only availability, Holy limits) and the copied-unit audit (inspect the donor and the result). "
         + "No balance score is computed: base values are raw, final costs are the game's, and equal headcount is not equal investment. Test in Dominions 6."));
-    if (!state.meta || !state.meta.catalog) {
-      holder.append(back, stateBox("empty", "No game-data catalog.", "Comparison needs the local dom6inspector catalog (start the server with --catalog)."), criteria);
+    if (!catalogOf(m)) {
+      holder.append(back, stateBox("empty", "No game-data catalog.", "Comparison needs the local dom6inspector catalog (start the server with --catalog) or this project's reference snapshot."), criteria);
       return holder;
     }
     const setRefs = (list) => { location.hash = compareHref(slug, uid, [...new Set(list)].slice(0, MAX_REFS)); };
@@ -2930,8 +3507,7 @@
         : el("span", { class: "muted", text: "No reference chosen yet." }),
         dr.length && !refs.includes(dr[0]) ? el("button", { type: "button", class: "btn btn-small", onclick: () => setRefs([dr[0], ...refs].slice(0, MAX_REFS)) }, `Use donor ${txt(u.donor.name)} (#${dr[0]})`) : null),
       el("div", { class: "edit-field wide" }, el("label", { for: "cmp-q", text: "Search catalog units" }),
-        el("div", { class: "edit-control" }, q, el("button", { type: "button", class: "btn btn-small", onclick: search }, "Search")), results),
-      el("p", { class: "panel-note", text: "Read-only: choosing a reference never changes the unit. Up to two vanilla units; the choice is kept in the address." }));
+        el("div", { class: "edit-control" }, q, el("button", { type: "button", class: "btn btn-small", onclick: search }, "Search")), results));
     const tableBox = el("div", { "aria-live": "polite" });
     holder.append(back, el("h3", { tabindex: "-1", id: "compare-title", text: `Compare: ${txt(u.name || "(unnamed)")}` }), picker, tableBox, criteria);
     if (!refs.length) {
@@ -3031,9 +3607,9 @@
       : el("span", null, `${c.unit.unresolved.length} unresolved · catalog ${txt(c.unit.provenance.dataset_version || "version unknown")}`));
     return panel("Side by side",
       el("div", { class: "table-wrap cmp-wrap" }, el("table", { class: "cmp-table" },
-        el("caption", { text: "Raw base values and cost components side by side. Differences under a reference show the project unit's value minus that reference; they are not a balance verdict." }),
+        el("caption", { text: "Base values and cost components. A difference shows the project unit minus that reference; it is not a balance verdict." }),
         el("thead", null, el("tr", null, el("th", { scope: "col", text: "Field" }), head)), el("tbody", null, rows))),
-      el("p", { class: "panel-note", text: "Base values exclude weapons and armour. The catalog is the third-party dom6inspector data and may differ from the installed game. Underlined values are set in this .dm." }));
+      el("p", { class: "panel-note", text: "Base values exclude equipment. Underlined values are set in this .dm." }));
   }
 
   // ---------- pretenders ----------
@@ -3050,12 +3626,6 @@
   const godTail = (g) => `${g.source}-${g.id}`;
   const godStatusBadge = (s) => badge(...(GOD_STATUS[s] || [s || "not listed", "warn"]));
   const magicText = (g) => Object.entries(g.starting_magic.paths).map(([p, v]) => `${p}${v.level}`).join(" ") || "no fixed magic";
-  function dpText(d) {
-    if (!d || d.authored_value === null || d.authored_value === undefined) return "unset";
-    if (d.interpretation === "autocalc_encoded") return `autocalc ${d.base >= 0 ? "+" : ""}${d.base}`;
-    if (d.interpretation === "fixed") return `fixed ${d.authored_value}`;
-    return String(d.authored_value);
-  }
   function godArt(g, frame, scale, alt) {
     const a = g.art[frame];
     if (a && a.status === "available" && a.url) return spriteImg(a.url, alt, scale, el("div", { class: "preview-missing", text: "Preview unavailable" }));
@@ -3072,14 +3642,12 @@
     return q.split(/\s+/).every((t) => hay.includes(t));
   }
   function godCard(slug, g, cand) {
-    const via = cand.via.map((v) => v.kind === "homerealm" ? `realm ${v.realm}` : v.kind === "addgod" ? "#addgod" : "catalog nation list");
     return el("a", { class: "god-card", href: route("p", slug, "pretenders", godTail(g)), "aria-label": `${txt(g.name)}, ${g.source === "project" ? "custom" : "vanilla"} god, ${(GOD_STATUS[cand.status] || [cand.status || "not listed for this selection"])[0]}` },
       el("div", { class: "sprite-box" }, godArt(g, "idle", 1, "")),
       el("div", { class: "god-body" },
         el("div", { class: "nm", text: g.name || "(unnamed)" }),
         cand.status === "eligible" ? null : el("div", { class: "btn-row" }, godStatusBadge(cand.status)),
-        el("div", { class: "facts", text: `#${g.id} · dominion ${txt(g.startdom.value ?? "?")} · path cost ${txt(g.pathcost.value ?? "?")} · ${magicText(g)}` }),
-        el("div", { class: "facts", text: `design points: ${dpText(g.design_points)} (not final)${via.length ? ` · via ${[...new Set(via)].join(", ")}` : ""}` }),
+        el("div", { class: "facts", text: `Dominion ${txt(g.startdom.value ?? "?")} · path cost ${txt(g.pathcost.value ?? "?")} · ${magicText(g)}` }),
         cand.cheapgod ? el("div", { class: "facts", text: `cheapgod: ${cand.cheapgod.discount} points less` }) : null,
         cand.reasons.length ? el("div", { class: "faint", text: cand.reasons.join("; ") }) : null));
   }
@@ -3117,29 +3685,31 @@
     search.addEventListener("input", () => { state.godQuery = search.value; fill(); });
     search.addEventListener("keydown", (e) => { if (e.key === "Escape") { search.value = ""; state.godQuery = ""; fill(); } });
     const c = nv.counts;
-    const realmText = nv.realms.length ? nv.realms.map((r) => [el("span", { text: `${r.realm} ${txt(r.name)}` }), " ", r.line ? srcRef(slug, file, r.line) : badge("catalog baseline", "info"), " "]) : "none declared";
+    const realmText = nv.realms.length ? nv.realms.map((r, i) => [i ? ", " : "", el("span", { text: `${r.realm} ${txt(r.name)}` })]) : "none declared";
     fill();
     return el("div", { class: "stack pretender-view" }, createButtons(m, "god"),
-      panel(`Pretender availability: ${txt(nv.name || nv.nation)}`,
+      panel(`Pretenders for ${txt(nv.name || nv.nation)}`,
           el("dl", { class: "kv" },
-            el("dt", { text: "Basis" }), el("dd", { text: nv.basis }),
             el("dt", { text: "Home realms" }), el("dd", null, realmText),
-            el("dt", { text: "Default realm 10" }), el("dd", null, nv.default_realm_10.included ? badge("declared", "ok") : badge("not declared", "warn")),
-            el("dt", { text: "Restrictions" }), el("dd", null, nv.noundeadgods ? [el("code", { text: "#noundeadgods" }), " ", srcRef(slug, file, nv.noundeadgods)] : "none interpreted"),
-            el("dt", { text: "Listed" }), el("dd", null, badge(`${c.eligible} statically eligible`, "ok"), " ", badge(`${c.provisional} provisional`, "warn"), " ", badge(`${c.excluded} excluded`, c.excluded ? "err" : "")),
-            el("dt", { text: "Sources" }), el("dd", { text: `${c.custom} custom · ${c.vanilla_realm} vanilla realm · ${c.explicit} explicit` })),
-          el("p", { class: "panel-note", text: "Static reading of the .dm and the catalog. It does not prove that a god appears in game. Design points are encodings, never final costs." })),
+            el("dt", { text: "Listed" }), el("dd", null, `${c.eligible} eligible`,
+              c.provisional ? [" ", badge(`${c.provisional} provisional`, "warn")] : null, c.excluded ? [" ", badge(`${c.excluded} excluded`, "err")] : null)),
+          el("p", { class: "panel-note", text: "Static check only; confirm gods in game." })),
       el("div", { class: "unit-filter", role: "search" }, search,
         mkSel("Filter by status", "godStatus", [["all", "All statuses"], ["eligible", "Statically eligible"], ["provisional", "Provisional"], ["excluded", "Excluded"]]),
         mkSel("Filter by source", "godSource", [["all", "All sources"], ["custom", "Custom (project)"], ["vanilla", "Vanilla realm"], ["explicit", "Explicit (#addgod)"]])),
       status,
       el("section", { class: "stack", "aria-label": "Custom national gods" }, customHead, customBox),
       el("details", { class: "raw tech", open: state.godSource === "vanilla" || null }, el("summary", null, vanillaHead),
-        el("div", { class: "inner stack" },
-          el("p", { class: "panel-note", text: "Vanilla gods of the declared realms from the catalog's realms.csv; thumbnails are the catalog's own sprites, served read-only. Only gods of the declared realms are listed, not every catalog monster." }), vanillaBox)),
+        el("div", { class: "inner stack" }, vanillaBox)),
       nv.unresolved.length ? panel("Unresolved constraints and dependencies", el("ul", null, nv.unresolved.map((u) => el("li", null, badge(u.kind.replace(/_/g, " "), "warn"), " ", u.line ? [srcRef(slug, file, u.line), " "] : null, u.message)))) : null,
-      techSection(`Advanced: explicit god commands (${nv.commands.length}), assumptions and JSON`, false,
-        panel("Explicit god commands",
+      techSection("Details: realms, god commands and JSON", false,
+        panel("Availability basis", el("dl", { class: "kv" },
+          el("dt", { text: "Basis" }), el("dd", { text: nv.basis }),
+          el("dt", { text: "Home realms" }), el("dd", null, nv.realms.length ? nv.realms.map((r) => [el("span", { text: `${r.realm} ${txt(r.name)}` }), " ", r.line ? srcRef(slug, file, r.line) : badge("catalog baseline", "info"), " "]) : "none declared"),
+          el("dt", { text: "Default realm 10" }), el("dd", { text: nv.default_realm_10.included ? "declared" : "not declared" }),
+          el("dt", { text: "Restrictions" }), el("dd", null, nv.noundeadgods ? [el("code", { text: "#noundeadgods" }), " ", srcRef(slug, file, nv.noundeadgods)] : "none interpreted"),
+          el("dt", { text: "Sources" }), el("dd", { text: `${c.custom} custom · ${c.vanilla_realm} vanilla realm · ${c.explicit} explicit` }))),
+        panel(`Explicit god commands (${nv.commands.length})`,
           nv.commands.length ? table(["Line", "Command", "Target", "Effect"], nv.commands.map((x) => [srcRef(slug, file, x.line), el("code", { text: `${x.command} ${x.args.join(" ")}` }),
             x.target ? (x.target.source === "project" ? el("a", { href: route("p", slug, "pretenders", `project-${x.target.id}`) }, `${txt(x.target.name)} (#${x.target.id})`) : el("span", null, `${txt(x.target.name)} `, badge(x.target.source || "unresolved", x.target.source ? "info" : "warn"))) : "—",
             el("span", { class: "muted", text: x.effect })]))
@@ -3197,11 +3767,10 @@
     const gm = g.source === "project" ? m.monsters.find((x) => x.id === g.id && x.new) : null;
     return el("div", { class: "stack pretender-view sheet-view" }, back,
       gm ? createButtons(m, "god", g.id) : null,
-      g.source === "project" ? editorSection(slug, g.id, g.name) : el("p", { class: "faint", text: "Vanilla catalog pretender: read-only. Only gods defined in this project's .dm can be edited." }),
+      g.source === "project" ? editorSection(slug, g.id, g.name) : el("p", { class: "faint", text: "Vanilla pretender (read-only)." }),
       unitSheet({
         name: g.name || "(unnamed)", type: "Pretender",
-        sub: [g.source === "project" ? "Custom pretender" : "Vanilla pretender (catalog)",
-          g.source === "project" ? el("code", { text: `#newmonster ${g.id}` }) : el("code", { text: `catalog #${g.id}` }),
+        sub: [g.source === "project" ? "Custom pretender" : "Vanilla pretender", `#${g.id}`,
           g.pretender_only ? "not recruitable" : null].filter(Boolean).map((x, i) => [i ? " · " : "", x]),
         cols,
         gear: g.equipment ? el("div", { class: "sheet-gear-wrap" }, sheetGear(g.equipment.weapons, "Weapon", g.equipment.weapons_status), sheetGear(g.equipment.armor, "Armour", g.equipment.armor_status)) : null,
@@ -3209,10 +3778,10 @@
         magic: sheetMagic(sheetPaths, g.starting_magic.random),
         lines: [
           el("p", { class: "sheet-line" }, `+${txt(g.pathcost.value ?? "?")} pts per magic path · Dominion ${txt(g.startdom.value ?? "?")} · Home realm ${homerealm}`),
-          unmodelled ? el("p", { class: "sheet-line muted" }, `${unmodelled} donor ${unmodelled === 1 ? "ability is" : "abilities are"} not modelled; see technical details below.`) : null,
+          unmodelled ? el("p", { class: "sheet-line muted" }, `${unmodelled} donor ${unmodelled === 1 ? "ability" : "abilities"} not modelled (see Details).`) : null,
           availability],
         figure: sheetFigure(txt(g.name), { idle: idle.url ? { url: idle.url } : null, attack: attack.url ? { url: attack.url } : null }),
-        note: "Base values before equipment. † Design points as written (an encoding); the game computes the final cost. Underlined values are set in this .dm; hover a value for its source.",
+        note: "Base values before equipment. † Design points as written; the game computes the final cost. Underlined values are set in this mod.",
         foot: [g.source === "project" && g.provenance.line ? srcRef(slug, file, g.provenance.line, true) : el("span", { class: "faint", text: "catalog data, read-only" }), " ",
           g.source === "project" ? el("a", { href: route("p", slug, "units", g.id) }, "Open monster detail") : null],
       }),
@@ -3224,7 +3793,7 @@
           el("span", null, a.reasons.length ? a.reasons.join("; ") : "—", a.cheapgod ? el("div", { class: "faint", text: `cheapgod ${a.cheapgod.discount}` }) : null)]))
           : el("p", { class: "muted", text: "Not listed for any nation in this project." }),
         el("p", { class: "panel-note", text: "Statically eligible means the documented rules found no obstacle. It is not verified in game." })),
-      techSection(`God design and per-field sources${nTech ? ` (${nTech} item(s) not modelled or unresolved)` : ""}`, false,
+      techSection(`Details: god design and sources${nTech ? ` (${nTech} not modelled or unresolved)` : ""}`, false,
         el("div", { class: "grid-2" },
           panel("God design",
             el("dl", { class: "kv" },
@@ -3259,7 +3828,7 @@
     if (sel && !list.length) return stateBox("error", `Site ${sel} not found.`, "");
     const head = sel ? el("p", null, el("a", { href: route("p", slug, "sites") }, `← Sites for ${nationScopeText(m)}`),
       inSelectedNation(m, list[0].start_site_of) ? null : [" ", badge("outside filter", "warn"), el("span", { class: "faint", text: ` not a start site of ${nationScopeText(m)}` })])
-      : el("p", { class: "faint", text: `${list.length} of ${m.sites.length} site definitions for ${nationScopeText(m)}. A site belongs to a nation through that nation's #startsite.` });
+      : el("p", { class: "faint", text: list.length === m.sites.length ? `${list.length} site${list.length === 1 ? "" : "s"}` : `${list.length} of ${m.sites.length} sites` });
     if (!list.length) return el("div", { class: "stack" }, head, stateBox("empty", `No sites for ${nationScopeText(m)}.`, "Choose another nation, \"Not tied to a nation\" or \"All nations\" above."));
     const body = (s) => [
       panel(`${txt(s.name || "(unnamed site)")}`,
@@ -3276,11 +3845,10 @@
         s.base ? el("p", { class: "panel-note" }, `Modifies catalog site ${txt(s.base.name || s.base.id)}.`) : null,
         sel ? identityNote(s.identity) : null),
       sel ? usedBySection(m, relOf(m, s, "site")) : null,
-      sel ? siteEditLink(m, s) : null,
-      panel("Authored commands", authoredTable(slug, s)),
-      sel ? sourcePanel(slug, s, "Site") : null,
-      sel ? panel("JSON", jsonActions(`/api/projects/${encodeURIComponent(slug)}/sites/${encodeURIComponent(s.id)}`, () => s, "Site JSON"))
-        : el("p", null, el("a", { href: route("p", slug, "sites", s.id) }, "Open site detail, source and JSON"))];
+      sel ? siteEditLink(m, s, "Edit site") : null,
+      sel ? techSection("Details: commands, source and JSON", false, panel(`Authored commands (${s.authored.length})`, authoredTable(slug, s)), sourcePanel(slug, s, "Site"),
+        panel("JSON", jsonActions(`/api/projects/${encodeURIComponent(slug)}/sites/${encodeURIComponent(s.id)}`, () => s, "Site JSON")))
+        : [panel("Authored commands", authoredTable(slug, s)), el("p", null, el("a", { href: route("p", slug, "sites", s.id) }, "Open site"))]];
     if (sel) return el("div", { class: "stack" }, head, list.map((s) => el("div", { class: "stack", id: `site-${s.id}` }, body(s))));
     // The list is a card grid; each card keeps the complete site panels in its disclosure.
     const card = (s) => {
@@ -3290,43 +3858,50 @@
       return el("article", { class: "item-card", id: `site-${s.id}` },
         el("div", { class: "item-card-head" },
           el("div", null, el("h2", null, el("a", { href: route("p", slug, "sites", s.id) }, name)),
-            el("p", { class: "faint" }, facts.length ? joinParts(facts) : "Path, level and rarity not authored"),
+            el("p", { class: "faint" }, facts.length ? joinParts(facts) : "No path or level set"),
             el("p", { class: "muted" }, s.gems.length ? ["Income: ", gemList(s.gems)] : "No gem income"),
             s.start_site_of.length ? el("p", null, badge("start site", "copper")) : null)),
+        siteEditLink(m, s),
         el("details", { class: "raw" },
-          el("summary", null, `${s.new ? "#newsite" : "#selectsite"} ${txt(s.id ?? s.selector)} - site panels and authored commands`),
+          el("summary", { "aria-label": `Details for ${name}` }, "Details"),
           el("div", { class: "inner stack" }, body(s))));
     };
     return el("div", { class: "stack" }, head, el("div", { class: "item-grid" }, list.map(card)));
   }
 
-  // "Edit this site" appears only once the Create & edit site list confirms an editable block with this id.
-  function siteEditLink(m, s) {
-    if (!Number.isInteger(s.id)) return null;
+  // "Edit" appears only once the editor's list confirms an editable block for this entry (sites by id, spells by opener line).
+  function contentEditLink(m, kind, match, name, label) {
     const slug = m.project.slug, box = el("p", { class: "cross-link", hidden: true });
-    authLoad(`${apiBase(slug)}/content/sites`).then((st) => {
-      const it = (st.items || []).find((x) => String(x.key) === String(s.id));
+    authLoad(`${apiBase(slug)}/content/${kind}`).then((st) => {
+      const it = (st.items || []).find(match);
       if (!it || !it.editable || !box.isConnected) return;
-      box.append(el("a", { class: "btn btn-small", href: route("p", slug, "author", "sites", it.key) }, "Edit this site"),
-        " ", el("span", { class: "faint", text: "Opens it in Create & edit." }));
+      // The link opens the structured form directly (even if it was closed earlier).
+      box.append(el("a", { class: "btn btn-small", href: authRoute(slug, kind, it.key), "aria-label": `Edit ${name}`,
+        onclick: () => { authDraft(`${slug}:${kind}:${it.key}`).open = true; } }, label || "Edit"));
       box.hidden = false;
     }, () => {});
     return box;
   }
+  function siteEditLink(m, s, label) {
+    if (!Number.isInteger(s.id)) return null;
+    return contentEditLink(m, "sites", (x) => String(x.key) === String(s.id), txt(s.name || "this site"), label);
+  }
 
   // One parsed-only block from other_definitions: summary, source line, authored commands, verbatim source and JSON.
-  function otherDefDetails(m, d, extra) {
+  // `card` gives the disclosure a plain "Details" summary for use under a card's name and art.
+  function otherDefDetails(m, d, extra, card) {
     const slug = m.project.slug;
     return el("details", { class: "raw" },
-      el("summary", null, `${d.opener} ${txt(d.id ?? d.selector ?? "")} ${d.name ? "- " + d.name : ""}  `, badge(d.kind, "info"), " ", badge("parsed only", "warn")),
+      card ? el("summary", { "aria-label": `Details for ${txt(d.name || d.opener)}` }, "Details")
+        : el("summary", null, `${d.opener} ${txt(d.id ?? d.selector ?? "")} ${d.name ? "- " + d.name : ""}  `, badge(d.kind, "info")),
       el("div", { class: "inner stack" }, el("p", { class: "panel-note" }, d.status, " · ", srcRef(slug, d.source.file, d.source.line)),
         extra || null, authoredTable(slug, d), codeBlock(d.source.text, d.source.line),
         jsonActions(`/api/projects/${encodeURIComponent(slug)}/other_definitions/${encodeURIComponent(d.uid.split(":")[1])}`, () => d, "Definition JSON")));
   }
   function viewOther(m) {
-    if (!m.other_definitions.length) return stateBox("empty", "No other definitions.", "Weapons, armour, spells, items and uncurated blocks would be listed here (parsed only, not interpreted).");
+    if (!m.other_definitions.length) return stateBox("empty", "No other definitions.");
     return el("div", { class: "stack" },
-      el("p", { class: "muted", text: "These blocks are parsed and listed verbatim. The browser does not interpret or verify them." }),
+      el("p", { class: "faint", text: `${m.other_definitions.length} block${m.other_definitions.length === 1 ? "" : "s"}` }),
       m.other_definitions.map((d) => otherDefDetails(m, d)));
   }
 
@@ -3361,19 +3936,20 @@
     const { assets, a, cat } = itemIcon(m, d);
     const preview = a ? spriteImg(a.browser_preview, d.name || a.path, 2, el("span", { text: "Preview unavailable" }))
       : cat ? (() => {
-        const img = spriteImg(cat.url, `${d.name || "item"} catalog icon`, 2, el("span", { class: "muted", text: "No custom icon" }));
-        const cap = el("span", { class: "faint item-icon-src", text: `Catalog icon #${cat.id}` });
-        img.addEventListener("error", () => cap.remove(), { once: true });
-        return [img, cap];
+        const img = spriteImg(cat.url, `${d.name || "item"} vanilla icon`, 2, el("span", { class: "muted", text: "No custom icon" }));
+        img.title = `Vanilla icon #${cat.id}`;
+        return img;
       })()
       : el("span", { class: "muted", text: assets.length ? "Missing icon" : "No custom icon" });
     const facts = [...itemForging(d), itemType(d)].filter(Boolean);
     return el("article", { class: "item-card" },
       el("div", { class: "item-card-head" }, el("div", { class: "item-card-icon" }, preview),
         el("div", null, el("h2", { text: d.name || `${d.opener} ${d.id ?? d.selector ?? ""}` }),
-          el("p", { class: "faint" }, facts.length ? joinParts(facts) : "Authored metadata unavailable"))),
+          el("p", { class: "faint" }, facts.length ? joinParts(facts) : "No forging data"))),
       arg("descr") ? el("p", { class: "item-card-description", text: arg("descr") }) : null,
-      otherDefDetails(m, d, itemArtwork(m, d)));
+      el("p", { class: "cross-link" }, el("a", { class: "btn btn-small", href: cmdRoute(m.project.slug, "item", `item:line:${d.source.line}`),
+        "aria-label": `Advanced edit of ${txt(d.name || "this item")}: raw command lines` }, "Advanced edit")),
+      otherDefDetails(m, d, itemArtwork(m, d), true));
   }
   // Spell cards share the item-card layout and show only what the block itself authors.
   const SPELL_SCHOOLS = { "-1": "Unresearchable", 0: "Conjuration", 1: "Alteration", 2: "Evocation", 3: "Construction", 4: "Enchantment", 5: "Thaumaturgy", 6: "Blood", 7: "Divine" };
@@ -3404,10 +3980,11 @@
     return el("article", { class: "item-card" },
       el("div", { class: "item-card-head" },
         el("div", null, el("h2", { text: d.name || `${d.opener} ${d.id ?? d.selector ?? ""}` }),
-          el("p", { class: "faint", text: facts.join(" · ") || "School and research not authored" }),
+          el("p", { class: "faint", text: facts.join(" · ") || "No school set" }),
           reqs.length ? el("p", { class: "muted" }, joinParts(reqs)) : null)),
       arg("descr") ? el("p", { class: "item-card-description", text: arg("descr") }) : null,
-      otherDefDetails(m, d));
+      contentEditLink(m, "spells", (x) => x.line === d.source.line, txt(d.name || "this spell")),
+      otherDefDetails(m, d, null, true));
   }
   const BROWSE_KINDS = {
     spell: { label: "Spells", one: "spell", plural: "spells", openers: "#newspell / #selectspell" },
@@ -3416,16 +3993,12 @@
   const browseQuery = {};
   function viewKindBrowse(m, kind) {
     const K = BROWSE_KINDS[kind], all = otherOfKind(m, kind), slug = m.project.slug;
-    const note = el("p", { class: "muted" }, `${K.label} blocks (${K.openers}) parsed from this project's .dm and listed verbatim. `,
-      "The browser does not interpret their effects or verify them, and they are project-wide: not filtered by nation. To change one, use ",
-      el("a", { href: route("p", slug, "author", K.plural) }, `Create & edit → ${K.label}`), ".");
-    if (!all.length) return el("div", { class: "stack" }, note,
-      stateBox("empty", `No ${K.plural} in this project.`, `No ${K.openers} blocks were parsed from the .dm. Other definitions lists every parsed-only block.`));
+    if (!all.length) return stateBox("empty", `No ${K.plural} in this project.`, CSRF ? `Use New ${K.one} to add one.` : "");
     const key = `${slug}:${kind}`;
-    const search = el("input", { class: "input", type: "search", id: `browse-q-${kind}`, placeholder: "Search name, id, selector or command",
-      "aria-label": `Search ${K.plural}`, value: browseQuery[key] || "", autocomplete: "off" });
+    const search = el("input", { class: "input", type: "search", id: `browse-q-${kind}`, placeholder: `Search ${K.plural}`,
+      "aria-label": `Search ${K.plural} by name, id or command`, value: browseQuery[key] || "", autocomplete: "off" });
     const status = el("p", { class: "faint", role: "status", "aria-live": "polite" });
-    const listEl = el("div", { class: "item-grid" });
+    const listEl = el("div", { class: kind === "spell" ? "item-grid spell-grid" : "item-grid" });
     const hay = (d) => [d.name, d.id, d.selector, d.opener, ...(d.authored || []).map((c) => c.command)].map((v) => txt(v).toLowerCase()).join(" ");
     const fill = () => {
       const q = search.value.trim().toLowerCase();
@@ -3437,7 +4010,7 @@
     search.addEventListener("input", () => { browseQuery[key] = search.value; fill(); });
     search.addEventListener("keydown", (e) => { if (e.key === "Escape" && search.value) { search.value = ""; browseQuery[key] = ""; fill(); } });
     fill();
-    return el("div", { class: "stack" }, note, el("div", { class: "unit-filter" }, search), status, listEl);
+    return el("div", { class: "stack" }, el("div", { class: "unit-filter" }, search), status, listEl);
   }
 
   function viewAssets(m) {
@@ -3454,8 +4027,7 @@
         el("div", { class: "path", text: a.path }),
         missing ? badge("referenced but missing", "err") : el("div", { class: "facts" },
           [a.format && a.format.toUpperCase(), a.width && `${a.width}×${a.height}`, a.depth && `${a.depth}-bit`, `${a.bytes} bytes`].filter(Boolean).join(" · "),
-          a.format === "tga" ? el("div", { class: "faint", text: "Browsers cannot show TGA; previewed via a local PNG conversion." }) : null),
-        a.sha256 ? el("div", { class: "hash", title: "SHA-256" }, a.sha256) : null,
+          null),
         (a.problems || []).map((p) => badge(p, "err")),
         el("div", { class: "facts" }, a.used_by.length ? ["Used by: ", a.used_by.map((x, i) => [i ? ", " : "",
           x.uid.startsWith("monster:") ? el("a", { href: route("p", slug, "units", x.uid.split(":")[1]) }, txt(x.name || x.uid))
@@ -3498,12 +4070,18 @@
     const sec = (title, items) => panel(`${title} (${items.length})`, items.length ? diagnosticsList(slug, items, v.file) : el("p", { class: "muted", text: "None." }));
     const ins = m.inspection;
     return el("div", { class: "stack" },
-      el("p", null, v.ok ? badge("no errors", "ok") : badge("has errors", "err"), " ", el("span", { class: "muted", text: `${v.file} · sha256 ${v.sha256.slice(0, 16)}… · manual ${v.manual_version} · target ${v.target_game_version}` })),
-      sec("Errors", v.errors), sec("Warnings", v.warnings), sec("Unverified", v.unverified),
-      ins ? panel("Inspection", el("p", { text: `${ins.statement_count} statements · ${ins.syntax_issues.length} syntax issues · ${ins.stray_text.length} stray text lines · ${ins.unverified_commands.length} unverified commands` })) : null,
+      el("p", null, v.ok ? "No errors." : badge(`${v.errors.length} error${v.errors.length === 1 ? "" : "s"}`, "err")),
+      sec("Errors", v.errors), v.warnings.length ? sec("Warnings", v.warnings) : null, v.unverified.length ? sec("Unverified", v.unverified) : null,
       compatibilitySection(m),
-      panel("Limitations", el("ul", null, v.limitations.map((l) => el("li", { text: l })))),
-      panel("JSON", jsonActions(`/api/projects/${encodeURIComponent(slug)}/validation`, () => v, "Validation JSON")));
+      techSection("Details", false,
+        el("dl", { class: "kv" },
+          el("dt", { text: "File" }), el("dd", { class: "mono", text: v.file }),
+          el("dt", { text: "SHA-256" }), el("dd", { class: "hash", text: v.sha256 }),
+          el("dt", { text: "Manual" }), el("dd", { text: txt(v.manual_version) }),
+          el("dt", { text: "Target game" }), el("dd", { text: txt(v.target_game_version) }),
+          ins ? [el("dt", { text: "Inspection" }), el("dd", { text: `${ins.statement_count} statements · ${ins.syntax_issues.length} syntax issues · ${ins.stray_text.length} stray text lines · ${ins.unverified_commands.length} unverified commands` })] : null),
+        panel("Limitations", el("ul", null, v.limitations.map((l) => el("li", { text: l })))),
+        panel("JSON", jsonActions(`/api/projects/${encodeURIComponent(slug)}/validation`, () => v, "Validation JSON"))));
   }
 
   // ---------- docs ----------
@@ -3593,16 +4171,41 @@
     } catch (e) { body.replaceChildren(errorBox(e, "the document")); }
   }
 
-  // ---------- authoring hub ("Create & edit"): spells, sites, weapons, armour, heroes, reference, playtests ----------
+  // ---------- authoring hub (the Edit tab): weapons, armour, events, heroes, advanced commands, reference, playtests ----------
+  // Spells, sites, items and mercenaries are edited inside their own sections (see SECTION_EDITORS); the forms are shared.
   // Every form keeps its draft in state.authoring (per project and kind/item), reviews with preview:true, then saves with
   // preview:false against the SHA-256 the page loaded. A 409 reloads the file and keeps the draft.
   const apiBase = (slug) => `/api/projects/${encodeURIComponent(slug)}`;
   // Sections grouped for the section picker; keys (and so routes) are unchanged.
+  // [key, label, description, advanced]; the landing page lists the same entries with their descriptions.
   const AUTH_GROUPS = [
-    ["Definitions", [["spells", "Spells"], ["sites", "Sites"], ["weapons", "Weapons"], ["armors", "Armour"], ["items", "Items"], ["mercs", "Mercenaries"], ["events", "Events"]]],
-    ["Nation", [["heroes", "Heroes"]]],
-    ["Tools", [["commands", "Advanced commands"], ["reference", "Reference"], ["playtests", "Playtests"]]],
+    ["Structured forms", [["weapons", "Weapons", "Field form for #newweapon / #selectweapon blocks, with a vanilla or project template."],
+      ["armors", "Armour", "Field form for #newarmor / #selectarmor blocks, with a vanilla or project template."],
+      ["heroes", "Heroes", "Hero and multihero slots of the nation chosen in the Nation selector."]]],
+    ["Advanced line editors", [["events", "Events", "Raw #newevent lines from the event modding manual; no structured form exists.", true],
+      ["commands", "All manual commands", "Any block type, any documented command. Use it when a structured form does not cover a field.", true]]],
+    ["Reference and records", [["reference", "Reference lookup", "Quick vanilla spell, site, weapon and armour lookup with Use as template."],
+      ["playtests", "Playtests", "Observations from real games, tied to the .dm revision played."]]],
   ];
+  // Browse and edit share one section for these: "#/p/<slug>/<section>" browses, "<section>/edit/<key>" opens the editor.
+  // Old "#/p/<slug>/author/<section>/<key>" links are redirected there by the router.
+  const SECTION_EDITORS = { spells: ["New spell", "edit", "~new"], sites: ["New site", "edit", "~new"], items: ["New item", "edit", "~new"], mercs: ["New company", "~new"] };
+  const authRoute = (slug, sub, ...rest) => SECTION_EDITORS[sub] ? route("p", slug, sub, "edit", ...rest) : route("p", slug, "author", sub, ...rest);
+  // Items and existing mercenary companies have no structured form: their Edit mode is the advanced line editor.
+  const ADVANCED_SECTIONS = new Set(["items", "mercs"]);
+  const advancedTag = () => badge("Advanced", "warn");
+  // Browse/Edit switch at the top of those sections; Browse also offers the New action.
+  function sectionModes(m, tab, editing, arg) {
+    const slug = m.project.slug, [newLabel, ...newPath] = SECTION_EDITORS[tab], creating = !editing && arg === "~new";
+    const mode = (on, href, text) => el("a", { class: "btn btn-small", href, "aria-current": on ? "page" : null }, text);
+    return el("div", { class: "btn-row section-modes" },
+      el("nav", { class: "btn-row seg mode-switch", "aria-label": `${TABS.find((t) => t[0] === tab)[1]} view` },
+        mode(!editing && !creating, route("p", slug, tab), "Browse"), mode(editing, route("p", slug, tab, "edit"), ADVANCED_SECTIONS.has(tab) ? "Advanced edit" : "Edit")),
+      editing ? null : CSRF ? el("a", { class: "btn btn-small", href: route("p", slug, tab, ...newPath), "aria-current": creating ? "page" : null }, newLabel)
+        : creating ? null : noToken());
+  }
+  // The guarded editor of one section: the field form for spells and sites, the line editor for items and mercenaries.
+  const sectionEditor = (m, tab, key) => CONTENT_KINDS[tab] ? contentView(m, tab, key) : commandsHub(m, tab, [key]);
   const CONTENT_KINDS = {
     sites: { one: "site", label: "Sites", projectTemplates: true, templateRequired: false },
     spells: { one: "spell", label: "Spells", projectTemplates: false, templateRequired: true },
@@ -3618,23 +4221,37 @@
   const fmtBytes = (n) => n >= 1048576 ? `${(n / 1048576).toFixed(2)} MB` : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} bytes`;
   // replaceChildren() would print null/false as text; drop them first.
   const fillKids = (node, ...kids) => node.replaceChildren(...kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false));
+  // Leaving a review (Back or Escape) returns focus to the control that opened it (marked with RT); when that control
+  // is gone or disabled, focusIn falls back to the editor heading.
+  const REVIEW_TRIGGER = "[data-review-trigger]";
+  const RT = { "data-review-trigger": "" };
+  const escapeReview = (holder, inReview, back) => holder.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !e.defaultPrevented && inReview()) { e.preventDefault(); back(); }
+  });
   const focusIn = (root, sel) => {
     if (!sel) return;
-    const t = root.querySelector(sel);
+    let t = root.querySelector(sel);
+    if (t && t.disabled) t = root.querySelector("h3[tabindex], h4[tabindex], h3");
     if (!t) return;
     if (!t.hasAttribute("tabindex") && !/^(INPUT|SELECT|TEXTAREA|BUTTON|A)$/.test(t.tagName)) t.setAttribute("tabindex", "-1");
     t.focus();
   };
 
-  // GET cache for authoring data, keyed by URL; cleared for a project after any write.
+  // GET cache for authoring data, keyed by URL; cleared for a project after any write. Bounded: the least recently
+  // used entries are dropped (a dropped entry is simply fetched again).
+  const AUTH_CACHE_MAX = 200;
   function authLoad(url, force) {
     if (force || !state.authData.has(url)) state.authData.set(url, getJSON(url).then((r) => r.result));
     const p = state.authData.get(url);
+    state.authData.delete(url);
+    state.authData.set(url, p);
+    while (state.authData.size > AUTH_CACHE_MAX) state.authData.delete(state.authData.keys().next().value);
     p.catch(() => { if (state.authData.get(url) === p) state.authData.delete(url); });
     return p;
   }
   function invalidateAuth(slug) {
     for (const k of [...state.authData.keys()]) if (!slug || k.startsWith(apiBase(slug) + "/")) state.authData.delete(k);
+    for (const k of [...inspCache.keys()]) if (!slug || k.startsWith(apiBase(slug) + "/")) inspCache.delete(k);
   }
   // Loads url, then fills the box with draw(result). A missing route (backend not updated) shows the server message.
   function asyncView(url, what, draw) {
@@ -3828,25 +4445,42 @@
       (r.explanation || []).map((t) => el("p", { class: "panel-note", text: t })),
       r.note ? el("p", { class: "panel-note", text: r.note }) : null,
       typeof r.diff === "string" && r.diff ? diffView(r.diff) : el("p", { class: "faint", text: "No text change." }),
-      el("p", { class: "panel-note", text: "Written under the project lock against the SHA-256 this page loaded, with a backup of the previous .dm. Static checks only: nothing here proves the mod loads or is balanced. Test in Dominions 6." }),
+      el("p", { class: "panel-note", text: "Saved with a backup of the previous .dm. Static checks only: test in game." }),
       el("div", { class: "btn-row" },
-        el("button", { type: "button", class: "btn", disabled: (r.changes && !r.changes.length) || null, onclick: onSave }, saveLabel),
-        el("button", { type: "button", class: "btn btn-ghost", onclick: onBack }, "Back to the form"),
+        r.changes && !r.changes.length ? el("span", { class: "muted", text: "Nothing to save." })
+          : el("button", { type: "button", class: "btn", onclick: onSave }, saveLabel),
+        el("button", { type: "button", class: r.changes && !r.changes.length ? "btn" : "btn btn-ghost", onclick: onBack }, "Back to the form"),
         onCancel ? el("button", { type: "button", class: "btn btn-ghost", onclick: onCancel }, "Cancel (discard)") : null));
   }
 
+  // Landing of Advanced tools: what each tool is for, and where the structured editors of other definitions live.
+  function authoringHome(m) {
+    const slug = m.project.slug;
+    const where = [["Units", "units", "Edit on a unit's page; New unit and Duplicate in the list."], ["Nation", "nation", "Edit nation on the nation's page; New nation there too."],
+      ["Sites", "sites", "Edit on a site card or page."], ["Spells", "spells", "Edit on a spell card."],
+      ["Items", "items", "Advanced edit (raw lines) on an item card."], ["Mercenaries", "mercs", "New company form; existing companies use Advanced edit."]];
+    return el("div", { class: "stack auth-home" },
+      el("p", { class: "panel-note", text: "Most editing happens where you browse. These tools cover the definitions without a section of their own, raw manual commands, vanilla lookup and playtest notes." }),
+      AUTH_GROUPS.map(([g, items]) => el("section", { class: "panel", "aria-label": g }, el("h3", { text: g }),
+        el("ul", { class: "tool-list" }, items.map(([k, l, d, adv]) => el("li", null,
+          el("a", { href: route("p", slug, "author", k) }, l), adv ? [" ", advancedTag()] : null, el("span", { class: "faint", text: ` ${d}` })))),
+        g === "Reference and records" ? el("p", { class: "panel-note" }, "For filters, units, items, events and mercenaries, browse the ",
+          el("a", { href: route("p", slug, "inspector") }, "Vanilla catalog"), ". Only its site, spell, weapon and armour entries offer Use as template; the other categories are for browsing.") : null)),
+      el("section", { class: "panel", "aria-label": "Editing in other sections" }, el("h3", { text: "Editing in other sections" }),
+        el("ul", { class: "tool-list" }, where.map(([l, tab, d]) => el("li", null, el("a", { href: route("p", slug, tab) }, l), el("span", { class: "faint", text: ` ${d}` }))))));
+  }
   function viewAuthoring(m, sub, rest) {
     const slug = m.project.slug;
-    // Bare #/p/<slug>/author opens Spells; old /author/sites links still open Sites.
-    sub = sub || "spells";
-    const pick = el("select", { class: "input", id: "auth-section" }, AUTH_GROUPS.map(([g, items]) =>
-      el("optgroup", { label: g }, items.map(([k, l]) => el("option", { value: k, text: l })))));
-    pick.value = sub;
-    pick.addEventListener("change", () => { location.hash = route("p", slug, "author", pick.value); });
-    const nav = el("nav", { class: "nation-bar subtabs", "aria-label": "Create & edit sections" },
-      el("label", { for: "auth-section", text: "Section" }), pick);
+    // Bare #/p/<slug>/author opens the Advanced tools overview; every section keeps its own route.
+    const pick = el("select", { class: "input", id: "auth-section" }, el("option", { value: "", text: "Overview" }), AUTH_GROUPS.map(([g, items]) =>
+      el("optgroup", { label: g }, items.map(([k, l, , adv]) => el("option", { value: k, text: adv ? `${l} (advanced)` : l })))));
+    pick.value = sub || "";
+    pick.addEventListener("change", () => { location.hash = pick.value ? route("p", slug, "author", pick.value) : route("p", slug, "author"); });
+    const nav = el("nav", { class: "nation-bar subtabs", "aria-label": "Advanced tools sections" },
+      el("label", { for: "auth-section", text: "Tool" }), pick);
     let body;
-    if (CONTENT_KINDS[sub]) body = contentView(m, sub, rest[0]);
+    if (!sub) body = authoringHome(m);
+    else if (CONTENT_KINDS[sub]) body = contentView(m, sub, rest[0]);
     else if (sub === "heroes") body = heroesView(m);
     else if (CMD_SUBS[sub] || sub === "commands") body = commandsHub(m, sub, rest);
     else if (sub === "reference") body = referenceView(m, rest[0], rest[1]);
@@ -3863,21 +4497,22 @@
       const items = st.items || [];
       const selected = sel && sel !== "~new" ? items.find((i) => String(i.key) === String(sel)) : null;
       const list = el("ul", { class: "auth-list", "aria-label": K.label }, items.map((it) => el("li", null,
-        el("a", { class: "auth-item", href: route("p", slug, "author", kind, it.key), "aria-current": it === selected ? "true" : null },
+        el("a", { class: "auth-item", href: authRoute(slug, kind, it.key), "aria-current": it === selected ? "true" : null,
+          onclick: () => { const d = state.authoring.get(`${slug}:${kind}:${it.key}`); if (d) d.open = true; } },
           el("span", { class: "nm", text: it.name || "(unnamed)" }),
-          el("span", { class: "sub" }, [it.id !== null && it.id !== undefined ? `#${it.id}` : null, `line ${it.line}`].filter(Boolean).join(" · "),
+          el("span", { class: "sub" }, it.id !== null && it.id !== undefined ? `#${it.id}` : null,
             it.editable ? null : [" ", badge("read-only", "warn")])))));
       const newDraft = state.authoring.get(`${slug}:${kind}:~new`);
       const left = el("div", { class: "unit-pane auth-pane" },
-        CSRF ? el("div", { class: "btn-row" }, el("a", { class: "btn btn-small", href: route("p", slug, "author", kind, "~new"), "aria-current": sel === "~new" ? "page" : null }, `New ${K.one}`),
-          newDraft && Object.keys(newDraft.touched).length ? badge("unsaved draft", "warn") : null) : noToken(),
-        el("p", { class: "faint", text: `${items.length} ${K.label.toLowerCase()} in ${txt(st.dm)}` }),
-        items.length ? list : stateBox("empty", `No ${K.label.toLowerCase()} blocks yet.`, `Use New ${K.one} to add one.`));
+        CSRF ? el("div", { class: "btn-row" }, el("a", { class: "btn btn-small", href: authRoute(slug, kind, "~new"), "aria-current": sel === "~new" ? "page" : null }, `New ${K.one}`),
+          draftBadge(newDraft)) : noToken(),
+        el("p", { class: "faint", text: `${items.length} ${items.length === 1 ? K.one : K.label.toLowerCase()}` }),
+        items.length ? list : stateBox("empty", `No ${K.label.toLowerCase()} yet.`, `Use New ${K.one} to add one.`));
       let right;
       if (sel === "~new") right = CSRF ? contentForm(m, kind, st, null) : noToken();
       else if (sel && !selected) right = stateBox("error", `${K.one} "${sel}" not found.`, "It may have moved after a save (spells are keyed by their line). Choose it again from the list.");
       else if (selected) right = contentDetail(m, kind, st, selected, url);
-      else right = el("div", { class: "stack" }, stateBox("empty", `Select a ${K.one}.`, `Choose one from the list, or start a new ${K.one}.`), contentNotes(st));
+      else right = el("div", { class: "stack" }, stateBox("empty", `Choose ${K.one}.`), contentNotes(st));
       return el("div", { class: "split" }, left, el("div", { class: "auth-detail" }, right));
     });
   }
@@ -3890,39 +4525,43 @@
     const slug = m.project.slug, K = CONTENT_KINDS[kind], fields = st.fields || [], file = st.dm;
     const authored = fields.filter((f) => it.value_lines && it.value_lines[f.key]);
     const tp = it.template || {};
-    const dkey = `${slug}:${kind}:${it.key}`, dr = state.authoring.get(dkey);
-    const open = dr && dr.open;
-    const pending = dr ? Object.keys(dr.touched).length : 0;
-    const editBar = !it.editable ? stateBox("empty", "Not editable here.", it.blocked_reason || "This block uses commands the form cannot safely rewrite.")
-      : !CSRF ? noToken()
-      : el("div", { class: "btn-row edit-bar" },
-        el("button", { type: "button", class: "btn", "aria-expanded": open ? "true" : "false", "aria-controls": `auth-form-${safeId(dkey)}`, onclick: () => {
-          const d = authDraft(dkey); d.open = !d.open; render();
-        } }, open ? "Close editor" : "Edit values"),
-        pending ? badge(`${pending} unsaved change(s)`, "warn") : null);
+    const dkey = `${slug}:${kind}:${it.key}`;
+    // Arriving here (from a card's Edit or the list) opens the form at once; Close or Cancel keeps it closed until reopened.
+    // The bar and form redraw in place, so toggling keeps the scroll position and focus.
+    const editBox = el("div", { class: "stack" });
+    const drawEdit = (focus) => {
+      if (!it.editable) { fillKids(editBox, stateBox("empty", "Not editable here.", it.blocked_reason || "This block uses commands the form cannot safely rewrite.")); return; }
+      if (!CSRF) { fillKids(editBox, noToken()); return; }
+      const dr = state.authoring.get(dkey), open = dr ? dr.open !== false : true, pending = dr ? Object.keys(dr.touched).length : 0;
+      const btn = el("button", { type: "button", class: "btn", "aria-expanded": open ? "true" : "false", "aria-controls": `auth-form-${safeId(dkey)}`, onclick: () => {
+        const d = authDraft(dkey); d.open = !open; drawEdit(true);
+      } }, open ? "Close editor" : "Edit");
+      fillKids(editBox, el("div", { class: "btn-row edit-bar" }, btn, pending ? badge(`${pending} unsaved change(s)`, "warn") : null),
+        open ? contentForm(m, kind, st, it) : null);
+      if (focus) btn.focus({ preventScroll: true });
+    };
+    drawEdit(false);
     // The editor sits right under the heading; reference panels and raw data follow.
     return el("div", { class: "stack" },
       panel(`${txt(it.name || "(unnamed)")}${it.id !== null && it.id !== undefined ? ` (#${it.id})` : ""}`,
-        el("p", { class: "panel-note" }, `Lines ${it.line}–${it.end_line} of `, srcRef(slug, file, it.line, true), ". ", it.editable ? badge("editable", "ok") : badge("read-only", "warn")),
+        el("p", { class: "panel-note" }, srcRef(slug, file, it.line, true), it.editable ? null : [" ", badge("read-only", "warn")]),
         kind === "sites" && m.sites.some((x) => Number.isInteger(x.id) && String(x.id) === String(it.key))
-          ? el("p", { class: "cross-link" }, el("a", { href: route("p", slug, "sites", it.key) }, "Browse in Sites"), el("span", { class: "faint", text: " Recruits, start-site nations, source and JSON." })) : null,
+          ? el("p", { class: "cross-link" }, el("a", { href: route("p", slug, "sites", it.key) }, "Open in Sites")) : null,
         identityNote(it.identity)),
-      editBar,
-      open && it.editable && CSRF ? contentForm(m, kind, st, it) : null,
+      editBox,
       usedBySection(m, relOf(m, it, { sites: "site", spells: "spell", weapons: "weapon", armors: "armor" }[kind])),
       panel("Authored in this .dm",
         authored.length ? table(["Field", "Value", "Line"], authored.map((f) => [el("strong", { text: f.label }),
           el("code", { text: fmtValue(f, it.values[f.key], st.options, fields) }), srcRef(slug, file, it.value_lines[f.key])]))
           : el("p", { class: "muted", text: "No modelled values are written in this block." }),
-        el("p", { class: "panel-note", text: "Values not listed here come from the template or the game's defaults." }),
-        (it.unmanaged || []).length ? null : el("p", { class: "faint", text: "Every command in this block is modelled by the form." })),
+        el("p", { class: "panel-note", text: "Unlisted values come from the template or game defaults." })),
       panel("Template defaults",
         tp.source ? el("p", null, "Template: ", el("strong", { text: `${txt(tp.name || "?")} (#${txt(tp.id)})` }), " ", badge(tp.source === "catalog" ? "vanilla catalog" : "project", tp.source === "catalog" ? "info" : "copper"),
           tp.source === "catalog" && REF_CATS.some((x) => x[0] === kind) ? [" ", el("a", { href: route("p", slug, "author", "reference", kind, tp.id) }, "Open in Reference")] : null,
-          tp.source === "project" ? [" ", el("a", { href: route("p", slug, "author", kind, String(tp.id)) }, "Open project template")] : null)
+          tp.source === "project" ? [" ", el("a", { href: authRoute(slug, kind, String(tp.id)) }, "Open project template")] : null)
           : el("p", { class: "muted", text: "No template: this block starts from nothing (or selects an existing entry by id)." }),
         tp.catalog_row ? techSection(`Raw catalog row (${Object.keys(tp.catalog_row).length} columns) — not effective in game`, false,
-          el("p", { class: "panel-note", text: "Raw columns of the template's catalog row, shown for reference. They are not resolved into effective in-game values; the game applies its own copy rules." }),
+          el("p", { class: "panel-note", text: "Raw catalog columns of the template, for reference." }),
           table(["Catalog column", "Raw value"], Object.entries(tp.catalog_row).map(([k, v]) => [el("code", { text: k }), el("code", { text: txt(v) })]))) : null),
       (it.unmanaged || []).length ? panel(`Not modelled (${it.unmanaged.length})`,
         el("ul", { class: "verbatim" }, it.unmanaged.map((u) => el("li", null, srcRef(slug, file, u.line), " ", el("code", { text: u.raw })))),
@@ -3930,6 +4569,15 @@
       techSection("Source", false, el("div", { class: "btn-row" }, el("button", { type: "button", class: "btn btn-small", onclick: () => copy(it.source_text || "", "Source block") }, "Copy block")),
         codeBlock(it.source_text || "", it.first_line || it.line)),
       techSection("JSON", false, el("p", { class: "faint", text: `The URL lists every ${K.one} in the project; Copy JSON copies only this one.` }), jsonActions(url, () => it, `${K.one} JSON`)));
+  }
+  // Dirty state of a new-entry draft, shared by the list badge and Use as template: filled fields and a chosen template.
+  const filledRaw = (v) => (Array.isArray(v) ? v.length > 0 : typeof v === "boolean" ? v : v !== null && v !== undefined && String(v).trim() !== "");
+  const draftFilled = (dr) => (dr ? Object.keys(dr.touched || {}).filter((k) => filledRaw(dr.touched[k])) : []);
+  const draftDirty = (dr) => !!dr && (draftFilled(dr).length > 0 || !!dr.template);
+  function draftBadge(dr) {
+    if (!draftDirty(dr)) return null;
+    const n = draftFilled(dr).length;
+    return badge(n ? `unsaved draft · ${n} field${n === 1 ? "" : "s"}` : "unsaved draft · template chosen", "warn");
   }
   function authDraft(dkey, init) {
     return draftOf(state.authoring, dkey, () => ({ open: false, touched: {}, template: null, tsrc: "catalog", search: { q: "", results: null, searching: false },
@@ -3941,7 +4589,12 @@
     const dr = authDraft(dkey, { open: true });
     const holder = el("section", { class: "panel editor creator", id: `auth-form-${safeId(dkey)}`, "aria-labelledby": `${idp}-h` });
     const reload = () => { state.authData.delete(url); dr.msg = null; render(); };
-    const cancel = () => { state.authoring.delete(dkey); location.hash === route("p", slug, "author", kind, edit ? it.key : "") ? render() : (location.hash = route("p", slug, "author", kind, ...(edit ? [it.key] : []))); };
+    // Cancel discards the draft; an existing entry's form then stays closed until Edit is pressed again.
+    const cancel = () => {
+      state.authoring.delete(dkey);
+      if (edit) authDraft(dkey).open = false;
+      location.hash === authRoute(slug, kind, edit ? it.key : "") ? render() : (location.hash = authRoute(slug, kind, ...(edit ? [it.key] : [])));
+    };
     function problems() {
       const { values, errors } = fieldChanges(fields, dr.touched, edit ? it.values : null);
       if (!edit && fields.some((f) => f.key === "name") && !(values.name && String(values.name).trim())) errors.name = errors.name || "Enter a name.";
@@ -4007,7 +4660,7 @@
         q.addEventListener("input", () => { s.q = q.value; });
         q.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); search(); } });
         parts.push(el("div", { class: "edit-field wide" }, el("label", { for: q.id, text: `Search vanilla ${K.label.toLowerCase()}` }),
-          el("div", { class: "edit-control" }, q, el("button", { type: "button", class: "btn btn-small", disabled: (state.meta && !state.meta.catalog) || null, onclick: search }, "Search")), resultsBox));
+          el("div", { class: "edit-control" }, q, el("button", { type: "button", class: "btn btn-small", disabled: !catalogOf(m) || null, onclick: search }, "Search")), resultsBox));
         drawResults();
       }
       return el("fieldset", { class: "edit-group" }, el("legend", { text: K.templateRequired ? "Template (required)" : "Template (optional)" }),
@@ -4032,18 +4685,22 @@
         fillKids(holder, head, busy || authReview(dr.preview, fields, st.options, edit ? "Save to .dm" : `Create ${K.one}`,
           () => runWrite(dr, url, body(), false, redraw, (r) => {
             state.authoring.delete(dkey); invalidateAuth(slug);
-            afterWrite(slug, route("p", slug, "author", kind, ...(r.key !== undefined && r.key !== null ? [r.key] : edit ? [it.key] : [])),
-              r.written ? `Saved to the .dm.${r.backup ? ` Backup: ${r.backup}` : ""}` : "Nothing changed.");
-          }), () => { dr.phase = "edit"; redraw(); }, cancel));
+            // The saved entry opens with its form closed, so the updated values are what the page shows first.
+            const savedKey = r.key !== undefined && r.key !== null ? r.key : edit ? it.key : null;
+            if (savedKey !== null) authDraft(`${slug}:${kind}:${savedKey}`).open = false;
+            const nm = txt(r.name || (edit ? it.name : dr.touched.name) || "");
+            afterWrite(slug, authRoute(slug, kind, ...(savedKey !== null ? [savedKey] : [])),
+              r.written ? `Saved to the .dm.${r.backup ? ` Backup: ${r.backup}` : ""}` : "Nothing changed.", r, `${edit ? "Saved" : "Created"} ${K.one}${nm ? ` ${nm}` : ""}`);
+          }), () => { dr.phase = "edit"; redraw(REVIEW_TRIGGER); }, cancel));
         focusIn(holder, focusSel);
         return;
       }
       const ctx = (f) => ({ dr, idp, cur: edit ? it.values[f.key] : undefined, err: errs[f.key], opts: st.options || {}, fields, edit, slug, file: st.dm,
         line: edit && it.value_lines ? it.value_lines[f.key] : null, changed: updateCount, redraw });
-      reviewBtn = el("button", { type: "submit", class: "btn" }, "Review changes");
+      reviewBtn = el("button", { type: "submit", class: "btn", ...RT }, "Review changes");
       const intro = el("p", { class: "panel-note" }, edit
-        ? `Changes lines inside this block only (lines ${it.line}–${it.end_line} of ${st.dm}). Clearing a field removes its authored line; unmodelled lines are kept as written.`
-        : `Appends a new ${K.one} block to ${st.dm}. Only fields you fill are written.`);
+        ? "Changes this block only. Clearing a field removes its line; other lines stay as written."
+        : `Adds a new ${K.one} to the end of the .dm. Only filled fields are written.`);
       const unknownField = sErr && !fields.some((f) => f.key === sErr.field) && sErr.field !== "template";
       fillKids(holder, ...[head, intro, err, busy].filter(Boolean),
         unknownField ? el("p", { class: "field-err", text: `${sErr.field}: ${sErr.message}` }) : null,
@@ -4059,7 +4716,7 @@
       updateCount();
       focusIn(holder, focusSel);
     }
-    holder.addEventListener("keydown", (e) => { if (e.key === "Escape" && dr.phase === "review") { dr.phase = "edit"; redraw(); } });
+    escapeReview(holder, () => dr.phase === "review", () => { dr.phase = "edit"; redraw(REVIEW_TRIGGER); });
     redraw(dr.msg && dr.msg.kind === "err" ? "[data-focus=err]" : null);
     return holder;
   }
@@ -4075,7 +4732,7 @@
   const TEXT_ARGS = new Set(["str", "img", "file", "sitename"]);
   const REF_NOUN = { mon: "monster", monneg: "monster", site: "site", weapon: "weapon", armor: "armour", item: "item", spell: "spell", nation: "nation", nationref: "nation" };
   const cmdSubOf = (ctx) => Object.keys(CMD_SUBS).find((k) => CMD_SUBS[k][0] === ctx);
-  const cmdRoute = (slug, ctx, key) => cmdSubOf(ctx) ? route("p", slug, "author", cmdSubOf(ctx), ...(key ? [key] : []))
+  const cmdRoute = (slug, ctx, key) => cmdSubOf(ctx) ? authRoute(slug, cmdSubOf(ctx), ...(key ? [key] : []))
     : route("p", slug, "author", "commands", ctx, ...(key ? [key] : []));
   const choiceList = (a) => (a.choices || []).map((c) => (c !== null && typeof c === "object" ? [c.value, txt(c.label ?? c.value)] : [c, txt(c)]));
   // Manual labels are often just "#command"; cmdLabel is null when the label adds nothing to the command name.
@@ -4170,6 +4827,10 @@
 
   function commandsHub(m, sub, rest) {
     const slug = m.project.slug;
+    if (sub === "mercs") return el("div", { class: "stack" },
+      el("p", { class: "panel-note" }, "Line editor for ", el("code", { text: "#newmerc" }), " blocks. ",
+        el("a", { href: route("p", slug, "mercs") }, "Browse"), " has the readable list and ", el("a", { href: route("p", slug, "mercs", "~new") }, "New company"), "."),
+      commandsView(m, "merc", rest[0], "Mercenaries", "mercenary"));
     if (CMD_SUBS[sub]) return commandsView(m, CMD_SUBS[sub][0], rest[0], CMD_SUBS[sub][1], CMD_SUBS[sub][2]);
     const ctx = CMD_CONTEXTS.some((c) => c[0] === rest[0]) ? rest[0] : "item";
     const sel = el("select", { class: "input", id: "cmd-context" }, CMD_CONTEXTS.map(([k, l]) => el("option", { value: k, text: l })));
@@ -4178,8 +4839,7 @@
     const label = CMD_CONTEXTS.find((c) => c[0] === ctx)[1];
     return el("div", { class: "stack" },
       el("div", { class: "nation-bar", role: "group", "aria-label": "Command context" },
-        el("label", { for: "cmd-context", text: "Block type" }), sel,
-        el("span", { class: "faint", text: "Every manual command. Prefer a dedicated form where one exists." })),
+        el("label", { for: "cmd-context", text: "Block type" }), sel),
       commandsView(m, ctx, rest[1], label, ctx, true));
   }
 
@@ -4193,21 +4853,27 @@
         const dr = state.authoring.get(`${slug}:cmd:${ctx}:${b.key}`);
         return el("li", null, el("a", { class: "auth-item", href: cmdRoute(slug, ctx, b.key), "aria-current": b === selected ? "true" : null },
           el("span", { class: "nm", text: b.name || "(unnamed)" }),
-          el("span", { class: "sub" }, [`${txt(b.opener)}${b.id !== null && b.id !== undefined ? ` ${b.id}` : ""}`, `line ${b.line}`].join(" · "),
+          el("span", { class: "sub" }, `${txt(b.opener)}${b.id !== null && b.id !== undefined ? ` ${b.id}` : ""}`,
             (b.used_by || []).length ? [" ", badge(`used by ${b.used_by.length}`, "info")] : null,
             dr && dr.ops.length ? [" ", badge("unsaved", "warn")] : null)));
       }));
       const left = el("div", { class: "unit-pane auth-pane" },
         CSRF ? el("div", { class: "btn-row" }, el("a", { class: "btn btn-small", href: cmdRoute(slug, ctx, "~new"), "aria-current": sel === "~new" ? "page" : null }, `New ${one}`),
           newDr && newDr.ops.length ? badge("unsaved draft", "warn") : null) : noToken(),
-        el("p", { class: "faint", text: `${blocks.length} block(s) in ${txt(st.dm)}` }),
-        blocks.length ? list : stateBox("empty", `No ${title.toLowerCase()} blocks yet.`, CSRF ? `Use New ${one} to add one.` : ""));
+        el("p", { class: "faint", text: `${blocks.length} block${blocks.length === 1 ? "" : "s"}` }),
+        blocks.length ? list : stateBox("empty", `No ${title.toLowerCase()} yet.`, CSRF ? `Use New ${one} to add one.` : ""));
       let right;
       if (sel === "~new") right = CSRF ? cmdEditor(m, ctx, st, null, url, one) : noToken();
       else if (sel && !selected) right = stateBox("error", `Block "${sel}" not found.`, "Blocks are keyed by their opener line, which moves when lines above it change. Choose it again from the list.");
       else if (selected) right = cmdBlockDetail(m, ctx, st, selected, url, one);
-      else right = stateBox("empty", `Select ${/^[aeiou]/i.test(one) ? "an" : "a"} ${one} block.`, advanced ? "Choose a block, or start a new one." : `Choose one from the list, or start a new ${one}.`);
-      return el("div", { class: "split" }, left, el("div", { class: "auth-detail" }, right));
+      else right = stateBox("empty", `Select ${/^[aeiou]/i.test(one) ? "an" : "a"} ${one} block.`);
+      // Every view of this editor says what it is: raw manual commands, used where no structured form exists.
+      const structured = { monster: "Units", nation: "Nation", site: "Sites", spell: "Spells", weapon: "Weapons", armor: "Armour" }[ctx];
+      return el("div", { class: "stack" },
+        el("p", { class: "advanced-note" }, advancedTag(), " ", `Line editor for raw ${title.toLowerCase()} commands from the modding manual. `,
+          structured ? `For common fields, prefer the structured form in ${structured}. ` : `There is no structured form for existing ${title.toLowerCase()}; `,
+          "every change is previewed as an exact diff before it is saved."),
+        el("div", { class: "split" }, left, el("div", { class: "auth-detail" }, right)));
     });
   }
 
@@ -4234,7 +4900,7 @@
           el("td", null, srcRef(slug, st.dm, r.line)),
           el("td", null, el("code", { text: cmdName(r.command) })),
           el("td", null, a && a.args ? a.args : el("code", { class: "cmd-raw", text: (r.args || []).map(argText).join(" ") })),
-          el("td", null, a ? a.ctl : r.editable === false ? badge("read-only", "warn") : badge("editable", "ok")));
+          el("td", null, a ? a.ctl : r.editable === false ? badge("read-only", "warn") : null));
       }))));
   }
 
@@ -4246,6 +4912,9 @@
     const byCmd = new Map((st.commands || []).map((c) => [c.command, c]));
     const usedBy = (block && block.used_by) || [];
     const holder = el("section", { class: "panel editor cmd-editor", "aria-labelledby": `${idp}-h` });
+    // A removal preview returns to the remove button; any other review to the review button.
+    const backFromReview = () => { const del = dr.mode === "delete"; dr.phase = "edit"; dr.preview = null; dr.mode = block ? "edit" : "new"; redraw(del ? "[data-delete-trigger]" : REVIEW_TRIGGER); };
+    escapeReview(holder, () => dr.phase === "review", backFromReview);
     const postUrl = `${apiBase(slug)}/commands`;
     const reload = () => { state.authData.delete(url); dr.msg = null; dr.phase = "edit"; dr.preview = null; render(); };
     const openerSpec = () => openers.find((o) => o.command === dr.opener.command);
@@ -4282,7 +4951,8 @@
         const wasDelete = dr.mode === "delete";
         state.authoring.delete(dkey); invalidateAuth(slug);
         afterWrite(slug, wasDelete || !block ? cmdRoute(slug, ctx, r && r.key && !wasDelete ? r.key : null) : cmdRoute(slug, ctx, block.key),
-          wasDelete ? "Block removed. Backup kept." : block ? "Saved. Backup kept." : `New ${one} saved. Backup kept.`);
+          wasDelete ? "Block removed. Backup kept." : block ? "Saved. Backup kept." : `New ${one} saved. Backup kept.`, r,
+          wasDelete ? `Removed ${one} ${txt(block.name || block.key)}` : block ? `Saved ${one} ${txt(block.name || block.key)}` : `Created ${one}`);
       });
     }
     function openerGroup() {
@@ -4377,7 +5047,7 @@
     function deleteControl() {
       if (!block) return null;
       return el("div", { class: "cmd-delete" },
-        el("button", { type: "button", class: "btn btn-small btn-ghost", disabled: usedBy.length || null, "aria-describedby": `${idp}-del-note`,
+        el("button", { type: "button", class: "btn btn-small btn-ghost", disabled: usedBy.length || null, "aria-describedby": `${idp}-del-note`, "data-delete-trigger": "",
           onclick: () => { dr.mode = "delete"; send(true); } }, "Remove entire block…"),
         el("span", { class: "faint", id: `${idp}-del-note`, text: usedBy.length ? `Disabled: used by ${usedBy.length} definition(s) listed above. Remove those references first.`
           : "Shows the exact removal for review first; nothing is deleted until you confirm." }));
@@ -4392,18 +5062,18 @@
           el("ul", null, r.used_by.map((u) => el("li", { text: `${txt(u.name || u.key)} (${txt(u.context)}${u.command ? `, ${u.command}` : ""})` })))) : null,
         (r.warnings || []).length ? el("ul", { class: "diag" }, r.warnings.map((w) => el("li", null, badge("check", "warn"), " ", txt(w)))) : null,
         diffView(r.diff || "", "Exact change to the .dm (diff)"),
-        el("p", { class: "panel-note", text: `Checked against SHA-256 ${shortSha(r.before_sha256 || st.sha256)}. Saving writes under the project lock with a backup of the previous .dm. Static checks only; test in Dominions 6.` }),
+        el("p", { class: "panel-note", title: `Checked against SHA-256 ${txt(r.before_sha256 || st.sha256)}`, text: "Saved with a backup of the previous .dm. Static checks only: test in game." }),
         el("div", { class: "btn-row" },
           el("button", { type: "button", class: "btn", disabled: (del && (r.used_by || []).length) || null, onclick: () => send(false) }, del ? "Remove block" : block ? "Save changes" : `Create ${one}`),
-          el("button", { type: "button", class: "btn btn-ghost", onclick: () => { dr.phase = "edit"; dr.preview = null; dr.mode = block ? "edit" : "new"; redraw(); } }, "Back to the editor")));
+          el("button", { type: "button", class: "btn btn-ghost", onclick: backFromReview }, "Back to the editor")));
     }
     function redraw(focusSel) {
-      const head = el("h3", { id: `${idp}-h`, text: block ? `Edit ${txt(block.name || one)}` : `New ${one}` });
+      const head = el("h3", { id: `${idp}-h` }, block ? `Edit ${txt(block.name || one)}` : `New ${one}`, " ", advancedTag());
       const msg = dr.msg && dr.msg.kind === "err" ? writeError(dr.msg.err, reload) : dr.msg && dr.msg.kind === "busy" ? stateBox("loading", dr.msg.text) : null;
       if (dr.phase === "review" && dr.preview) { fillKids(holder, head, msg, reviewPanel()); focusIn(holder, focusSel); return; }
       // A delete preview that failed returns here; keep the mode while the request is still running.
       if (dr.mode === "delete" && !(dr.msg && dr.msg.kind === "busy")) dr.mode = block ? "edit" : "new";
-      reviewBtn = el("button", { type: "button", class: "btn", onclick: () => send(true) }, block ? "Review changes" : `Review new ${one}`);
+      reviewBtn = el("button", { type: "button", class: "btn", onclick: () => send(true), ...RT }, block ? "Review changes" : `Review new ${one}`);
       fillKids(holder, head,
         msg,
         block ? rowsGroup() : openerGroup(),
@@ -4440,6 +5110,7 @@
     const dr = authDraft(dkey, { touched: { heroes: {}, multiheroes: {} } });
     const mons = (st.options && st.options.monsters) || [];
     const holder = el("section", { class: "panel editor creator", "aria-labelledby": "heroes-h" });
+    escapeReview(holder, () => dr.phase === "review", () => { dr.phase = "edit"; redraw(REVIEW_TRIGGER); });
     const reload = () => { state.authData.delete(url); dr.msg = null; render(); };
     const cancel = () => { state.authoring.delete(dkey); render(); };
     const groups = [["heroes", "Heroes (#hero1–#hero10)", 10], ["multiheroes", "Multiheroes (#multihero1–#multihero7)", 7]];
@@ -4493,12 +5164,13 @@
         fillKids(holder, head, busy || authReview(dr.preview, fieldsSpec, { monsters: mons }, "Save to .dm",
           () => runWrite(dr, url, { expected_sha256: st.sha256, ...changes() }, false, redraw, (r) => {
             state.authoring.delete(dkey); invalidateAuth(slug);
-            afterWrite(slug, route("p", slug, "author", "heroes"), r.written ? `Saved heroes.${r.backup ? ` Backup: ${r.backup}` : ""}` : "Nothing changed.");
-          }), () => { dr.phase = "edit"; redraw(); }, cancel));
+            afterWrite(slug, route("p", slug, "author", "heroes"), r.written ? `Saved heroes.${r.backup ? ` Backup: ${r.backup}` : ""}` : "Nothing changed.", r,
+              `Saved heroes of ${txt(st.nation ? st.nation.name : n.name)} (#${n.id})`);
+          }), () => { dr.phase = "edit"; redraw(REVIEW_TRIGGER); }, cancel));
         focusIn(holder, focusSel);
         return;
       }
-      reviewBtn = el("button", { type: "submit", class: "btn" }, "Review changes");
+      reviewBtn = el("button", { type: "submit", class: "btn", ...RT }, "Review changes");
       fillKids(holder, ...[head, err, busy].filter(Boolean),
         st.nation && st.nation.vanilla ? el("p", { class: "panel-note" }, badge("vanilla nation", "info"), " This project modifies a vanilla nation's hero list.") : null,
         (st.notes || []).length ? el("ul", { class: "panel-note" }, st.notes.map((x) => el("li", { text: x }))) : null,
@@ -4561,24 +5233,73 @@
       el("label", { for: "ref-q", class: "sr-only", text: "Search the catalog" }), q,
       el("button", { type: "submit", class: "btn btn-small" }, "Search"));
     drawResults();
-    const left = el("div", { class: "unit-pane auth-pane" }, el("p", { class: "faint", text: "Vanilla game data from the catalog. Read-only." }), form, resultsBox);
+    const left = el("div", { class: "unit-pane auth-pane" },
+      el("p", { class: "faint" }, "Vanilla data, read-only. Quick lookup by name or id; the ",
+        el("a", { href: inspHref(slug, rs.cat) }, "Vanilla catalog"), " has filters and every category."), form, resultsBox);
     const right = cat && id ? asyncView(`${apiBase(slug)}/reference/${encodeURIComponent(cat)}/${encodeURIComponent(id)}`, "the reference entry", (d) => referenceDetail(m, cat, d))
-      : stateBox("empty", "Choose an entry.", "Search on the left, then open a result to see its labelled values, raw catalog row and provenance.");
+      : stateBox("empty", "Choose an entry.", "Search, then open a result.");
     return el("div", { class: "split" }, left, el("div", { class: "auth-detail" }, right));
   }
-  function referenceDetail(m, cat, d) {
+  // Shared by Reference and the Vanilla catalog: start a new project spell, site, weapon or armour from a catalog entry.
+  // An existing new-entry draft with filled fields or another template is never replaced silently: the user chooses to
+  // keep it, swap only the template (keeping the filled fields) or start clean.
+  function useAsTemplate(m, cat, d, cls) {
     const slug = m.project.slug, K = CONTENT_KINDS[cat];
+    if (!K || !CSRF || d.id === null || d.id === undefined) return null;
+    const dkey = `${slug}:${cat}:~new`, label = `${txt(d.name)} (#${d.id})`, pid = `tpl-decide-${safeId(cat)}-${safeId(d.id)}`;
+    const box = el("div", { class: "tpl-use" });
+    const open = () => { location.hash = authRoute(slug, cat, "~new"); };
+    // Deliberate replacement: the new template, and no stale errors, review or server message from the old draft.
+    const apply = (keepFields) => {
+      const old = state.authoring.get(dkey);
+      if (!keepFields) state.authoring.delete(dkey);
+      const dr = keepFields && old ? old : authDraft(dkey, { open: true });
+      Object.assign(dr, { template: { source: "catalog", id: d.id, name: d.name }, tsrc: "catalog", preview: null, phase: "edit", msg: null, showErrors: false, open: true });
+      open();
+    };
+    const btn = el("button", { type: "button", class: cls || "btn", "aria-expanded": "false", "aria-controls": pid, onclick: () => decide() }, `Use as template for a new ${K.one}`);
+    const close = () => { fillKids(box, btn); btn.setAttribute("aria-expanded", "false"); btn.focus(); };
+    async function decide() {
+      const dr = state.authoring.get(dkey), tp = dr && dr.template;
+      const same = !!tp && tp.source === "catalog" && String(tp.id) === String(d.id), filled = draftFilled(dr);
+      if (!draftDirty(dr)) { apply(false); return; }
+      if (same && !filled.length) { open(); return; }
+      let names = filled;
+      try { const fs = specOf((await authLoad(`${apiBase(slug)}/content/${cat}`)).fields); names = filled.map((k) => (fs.find((f) => f.key === k) || { label: k }).label); }
+      catch (_) { /* keys are shown as written */ }
+      const cur = tp ? `${txt(tp.name || "?")} (#${txt(tp.id)}${tp.source === "project" ? ", a project entry" : ""})` : "no template";
+      const n = filled.length, nf = `${n} filled field${n === 1 ? "" : "s"}`;
+      const panelBox = el("div", { class: "state tpl-decide", id: pid, role: "group", "aria-labelledby": `${pid}-h` },
+        el("div", null,
+          el("p", { id: `${pid}-h`, tabindex: "-1" }, el("strong", { text: `You already have an unsaved new ${K.one} draft. ` }),
+            `It uses ${cur}${n ? ` and has ${nf}: ${names.join(", ")}.` : "."}`),
+          el("p", { class: "faint", text: same
+            ? `It already uses ${label}. Keep draft opens it unchanged; starting clean discards your ${nf}.`
+            : n ? `Replace template keeps your ${nf}; they override ${label}'s values, and everything you did not fill comes from ${label}. Start clean discards the draft.`
+              : `Replace template swaps ${cur} for ${label}. Keep draft opens it unchanged.` }),
+          el("div", { class: "btn-row" },
+            el("button", { type: "button", class: "btn btn-small", onclick: open }, "Keep draft"),
+            same ? null : el("button", { type: "button", class: "btn btn-small", onclick: () => apply(true) }, n ? `Replace template, keep ${nf}` : "Replace template"),
+            n ? el("button", { type: "button", class: "btn btn-small btn-ghost", onclick: () => apply(false) }, `Start clean from ${label}`) : null,
+            el("button", { type: "button", class: "btn btn-small btn-ghost", onclick: close }, "Cancel"))));
+      panelBox.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); } });
+      fillKids(box, btn, panelBox);
+      btn.setAttribute("aria-expanded", "true");
+      panelBox.querySelector(`#${pid}-h`).focus();
+    }
+    box.append(btn);
+    return box;
+  }
+  function referenceDetail(m, cat, d) {
+    const slug = m.project.slug;
     const effects = Array.isArray(d.effects) ? d.effects : [];
     const effCols = [...new Set(effects.flatMap((x) => Object.keys(x || {})))];
-    const useBtn = K && CSRF ? el("button", { type: "button", class: "btn", onclick: () => {
-      const dr = authDraft(`${slug}:${cat}:~new`, { open: true });
-      dr.template = { source: "catalog", id: d.id, name: d.name }; dr.tsrc = "catalog"; dr.preview = null; dr.phase = "edit";
-      location.hash = route("p", slug, "author", cat, "~new");
-    } }, `Use as template for a new ${K.one}`) : null;
+    const useBtn = el("div", { class: "btn-row" }, useAsTemplate(m, cat, d),
+      el("a", { class: "btn btn-small btn-ghost", href: inspHref(slug, cat, d.id) }, "Open in Vanilla catalog"));
     const url = `${apiBase(slug)}/reference/${encodeURIComponent(cat)}/${encodeURIComponent(d.id)}`;
     return el("div", { class: "stack" },
-      panel(`${txt(d.name)} (#${txt(d.id)})`, el("p", { class: "panel-note" }, badge("vanilla catalog", "info"), ` ${txt(d.category || cat)}`),
-        el("div", { class: "btn-row" }, useBtn),
+      panel(`${txt(d.name)} (#${txt(d.id)})`, el("p", { class: "panel-note", text: `Vanilla ${txt(d.category || cat)}` }),
+        useBtn,
         (d.labelled || []).length ? table(["Field", "Value", "Note"], d.labelled.map((x) => [el("strong", { text: txt(x.label) }), el("code", { text: txt(x.value) }), el("span", { class: "faint", text: txt(x.note) })]))
           : el("p", { class: "muted", text: "No labelled values." }),
         d.summon ? el("p", null, "Summons: ", el("strong", { text: `${txt(d.summon.monster_name || "?")} (#${txt(d.summon.monster_id)})` })) : null,
@@ -4605,13 +5326,13 @@
       const kv = (r) => el("dl", { class: "kv" }, fields.map((f) => [el("dt", { text: f.label }), el("dd", { text: r[f.key] === null || r[f.key] === undefined || r[f.key] === "" ? "—" : fmtValue(f, r[f.key]) })]),
         el("dt", { text: "Evidence" }), el("dd", null, (r.evidence || []).length ? el("ul", { class: "plain-list" }, r.evidence.map((x) => el("li", null, badge(x.kind, ""), " ", el("span", { text: txt(x.reference) }), x.sha256 ? el("span", { class: "hash", text: ` sha256 ${x.sha256}` }) : null))) : "none"));
       return [
-        panel("About playtest records",
-          el("p", null, el("strong", { text: "These are observations, not verdicts. " }), "Each record is what a tester wrote down after playing, tied to the SHA-256 of the .dm they played. Kosmokrator does not check them and makes no balance claims."),
-          el("p", { class: "panel-note" }, "Current .dm SHA-256: ", el("span", { class: "hash", text: txt(st.current_sha256) })),
-          st.note ? el("p", { class: "panel-note", text: st.note }) : null),
+        panel(null,
+          el("p", { class: "panel-note", text: "Observations from real games, tied to the .dm revision played. Not verified; no balance claims." }),
+          techSection("Technical details", false, el("p", { class: "panel-note" }, "Current .dm SHA-256: ", el("span", { class: "hash", text: txt(st.current_sha256) })),
+            st.note ? el("p", { class: "panel-note", text: st.note }) : null)),
         recs.length ? el("div", { class: "stack" }, recs.map((r) => el("article", { class: "panel playtest", "aria-label": `Playtest ${txt(r.created_utc)}` },
           el("h3", { text: `${txt(r.created_utc || "undated")} — ${txt(r.result_summary || "no summary")}` }),
-          el("p", { class: "panel-note" }, r.matches_current ? badge("current revision", "ok") : badge("older revision", "warn"), " .dm ", el("span", { class: "hash", text: shortSha(r.dm_sha256), title: txt(r.dm_sha256) }),
+          el("p", { class: "panel-note" }, r.matches_current ? "Current revision" : badge("older revision", "warn"), " · .dm ", el("span", { class: "hash", text: shortSha(r.dm_sha256), title: txt(r.dm_sha256) }),
             r.matches_current ? null : el("span", { class: "faint", text: " — the .dm has changed since this record; its observations may not apply." })),
           kv(r))))
           : stateBox("empty", "No playtest records yet.", "Add one below after playing this revision in Dominions 6."),
@@ -4624,6 +5345,7 @@
     const slug = m.project.slug, dkey = `${slug}:playtest`;
     const dr = authDraft(dkey, { touched: {}, evidence: [] });
     const holder = el("section", { class: "panel editor creator", "aria-labelledby": "pt-h" });
+    escapeReview(holder, () => dr.phase === "review", () => { dr.phase = "edit"; redraw(REVIEW_TRIGGER); });
     const reload = () => { state.authData.delete(url); dr.msg = null; render(); };
     const cancel = () => { state.authoring.delete(dkey); render(); };
     function problems() {
@@ -4660,9 +5382,9 @@
           el("div", { class: "btn-row" },
             el("button", { type: "button", class: "btn", onclick: () => runWrite(dr, url, { expected_sha256: st.current_sha256, record: record() }, false, redraw, (res) => {
               state.authoring.delete(dkey); invalidateAuth(slug);
-              afterWrite(slug, route("p", slug, "author", "playtests"), res.written ? "Playtest record saved." : "Nothing saved.");
+              afterWrite(slug, route("p", slug, "author", "playtests"), res.written ? "Playtest record saved." : "Nothing saved.", res, "Saved playtest record");
             }) }, "Save record"),
-            el("button", { type: "button", class: "btn btn-ghost", onclick: () => { dr.phase = "edit"; redraw(); } }, "Back to the form"),
+            el("button", { type: "button", class: "btn btn-ghost", onclick: () => { dr.phase = "edit"; redraw(REVIEW_TRIGGER); } }, "Back to the form"),
             el("button", { type: "button", class: "btn btn-ghost", onclick: cancel }, "Cancel (discard)"))));
         focusIn(holder, focusSel);
         return;
@@ -4682,7 +5404,7 @@
           el("div", { class: "field-err", id: `pt-ev-e${i}`, "aria-live": "polite", text: errs[`evidence.${i}`] || "" }));
       });
       fillKids(holder, ...[head, err, busy].filter(Boolean),
-        el("p", { class: "panel-note", text: "Record what you saw in a real game of this revision. Keep claims to observations; the record is tied to the current .dm SHA-256." }),
+        el("p", { class: "panel-note", text: "Record what you observed in a real game of this revision." }),
         el("form", { class: "edit-form", novalidate: true, onsubmit: (e) => {
           e.preventDefault(); dr.showErrors = true;
           if (Object.keys(problems().errors).length) { redraw("[aria-invalid=true], .field-err:not(:empty)"); return; }
@@ -4694,7 +5416,7 @@
             el("button", { type: "button", class: "btn btn-small", id: "pt-ev-add", disabled: dr.evidence.length >= evMax || null, onclick: () => { dr.evidence.push({ kind: evKinds[0], reference: "", sha256: "" }); redraw(`#pt-ev-r${dr.evidence.length - 1}`); } }, "Add evidence"),
             errs.evidence ? el("div", { class: "field-err", role: "alert", text: errs.evidence }) : null,
             el("p", { class: "panel-note", text: "References are text only (a file name, path or note); files are not uploaded." })),
-          el("div", { class: "btn-row edit-actions" }, el("button", { type: "submit", class: "btn" }, "Review"),
+          el("div", { class: "btn-row edit-actions" }, el("button", { type: "submit", class: "btn", ...RT }, "Review"),
             el("button", { type: "button", class: "btn btn-ghost", onclick: cancel }, "Cancel"), statusLine("Nothing is saved until you confirm the review."))));
       focusIn(holder, focusSel);
     }
@@ -4727,6 +5449,7 @@
   function viewImport() {
     const dr = state.importDraft || (state.importDraft = { form: { slug: "", name: "" }, dm: null, assets: [], phase: "edit", preview: null, msg: null, showErrors: false, done: null, reading: 0 });
     const holder = el("section", { class: "panel editor creator", "aria-labelledby": "imp-h" });
+    escapeReview(holder, () => dr.phase === "review", () => { dr.phase = "edit"; redraw(REVIEW_TRIGGER); });
     const url = "/api/import";
     const body = () => ({ slug: dr.form.slug.trim(), name: dr.form.name.trim() || null, dm: { filename: dr.dm.filename, base64: dr.dm.b64 },
       assets: dr.assets.map((a) => ({ path: a.path.trim().replace(/\\/g, "/"), base64: a.b64 })) });
@@ -4746,7 +5469,7 @@
       const sErr = serverFieldErr(dr);
       const errs = dr.showErrors ? importProblems(dr) : {};
       if (sErr) errs[/^assets?/.test(sErr.field) ? "assets" : sErr.field.replace(/\..*$/, "")] = sErr.message;
-      const head = el("h2", { id: "imp-h", tabindex: "-1", text: "Import an existing .dm as a new project" });
+      const head = el("h2", { id: "imp-h", tabindex: "-1", text: "New project from a .dm" });
       const busy = dr.reading ? stateBox("loading", "Reading files...") : dr.msg && dr.msg.kind === "busy" ? stateBox("loading", dr.msg.text) : null;
       const er = dr.msg && dr.msg.kind === "err" ? dr.msg.err : null;
       const err = !er ? null : er.error && er.error.code === "project_exists"
@@ -4756,7 +5479,7 @@
       if (dr.done) {
         const r = dr.done, slug = typeof r.project === "string" ? r.project : (r.project && r.project.slug) || dr.form.slug.trim();
         fillKids(holder, head, el("div", { class: "state", role: "status", tabindex: "-1", "data-focus": "done" },
-          el("strong", { text: "Imported." }), el("p", null, "Project folder created with ", el("code", { text: txt(r.dm_path) }), ` (sha256 ${shortSha(r.sha256)}).`),
+          el("strong", { text: "Imported." }), el("p", null, "Project folder created with ", el("code", { text: txt(r.dm_path) }), "."),
           r.note ? el("p", { class: "panel-note", text: r.note }) : null,
           el("div", { class: "btn-row" }, el("a", { class: "btn", href: hashPath("p", slug) }, "Open the project"),
             el("button", { type: "button", class: "btn btn-ghost", onclick: () => { state.importDraft = null; render(); } }, "Import another"))));
@@ -4767,18 +5490,19 @@
         const r = dr.preview;
         fillKids(holder, head, busy || el("div", { class: "stack" },
           el("h4", { tabindex: "-1", "data-focus": "review", text: "Review before importing" }),
-          el("dl", { class: "kv" }, el("dt", { text: "Project" }), el("dd", { class: "mono", text: typeof r.project === "string" ? r.project : JSON.stringify(r.project) }),
+          el("dl", { class: "kv" }, el("dt", { text: "Project" }), el("dd", { class: "mono", text: typeof r.project === "string" ? r.project : JSON.stringify(r.project) })),
+          techSection("Technical details", false, el("dl", { class: "kv" },
             el("dt", { text: ".dm" }), el("dd", { class: "mono", text: txt(r.dm_path) }), el("dt", { text: "SHA-256" }), el("dd", { class: "hash", text: txt(r.sha256) }),
-            el("dt", { text: "Encoding" }), el("dd", { text: txt(r.encoding) }), el("dt", { text: "Newlines" }), el("dd", { text: txt(r.newlines) })),
+            el("dt", { text: "Encoding" }), el("dd", { text: txt(r.encoding) }), el("dt", { text: "Newlines" }), el("dd", { text: txt(r.newlines) }))),
           (r.assets || []).length ? table(["Asset", "Bytes", "SHA-256", "Referenced by the .dm"], r.assets.map((a) => [el("code", { text: a.path }), txt(a.bytes), el("span", { class: "hash", text: shortSha(a.sha256), title: txt(a.sha256) }),
-            a.referenced ? badge("referenced", "ok") : badge("not referenced", "warn")])) : el("p", { class: "muted", text: "No asset files." }),
+            a.referenced ? "yes" : badge("not referenced", "warn")])) : el("p", { class: "muted", text: "No asset files." }),
           (r.missing_assets || []).length ? el("div", null, el("h4", { text: "Referenced by the .dm but not provided" }), el("ul", null, r.missing_assets.map((p) => el("li", null, el("code", { text: p }))))) : null,
           (r.warnings || []).length ? el("ul", { class: "diag" }, r.warnings.map((w) => el("li", null, badge("check", "warn"), " ", el("span", { text: w })))) : null,
           r.note ? el("p", { class: "panel-note", text: r.note }) : null,
-          el("p", { class: "panel-note", text: "Creates a new project folder. An existing project is never overwritten. The .dm bytes are kept exactly as uploaded." }),
+          el("p", { class: "panel-note", text: "Creates a new project folder; existing projects are never overwritten." }),
           el("div", { class: "btn-row" },
             el("button", { type: "button", class: "btn", onclick: () => runWrite(dr, url, body(), false, redraw, (res) => { dr.done = res; dr.phase = "edit"; loadProjects(true); redraw("[data-focus=done]"); toast("Imported"); }) }, "Import"),
-            el("button", { type: "button", class: "btn btn-ghost", onclick: () => { dr.phase = "edit"; redraw(); } }, "Back to the form"))));
+            el("button", { type: "button", class: "btn btn-ghost", onclick: () => { dr.phase = "edit"; redraw(REVIEW_TRIGGER); } }, "Back to the form"))));
         focusIn(holder, focusSel);
         return;
       }
@@ -4802,7 +5526,7 @@
       });
       const total = importTotal(dr);
       fillKids(holder, ...[head, err, busy].filter(Boolean),
-        el("p", { class: "panel-note", text: "Copies a .dm (and optionally its image files) into a new project folder in this workspace. Review first; nothing is written until you confirm. Existing projects are never overwritten." }),
+        el("p", { class: "panel-note", text: "Copies a .dm and its images into a new project. Nothing is written until you confirm." }),
         el("form", { class: "edit-form", novalidate: true, onsubmit: (e) => {
           e.preventDefault(); dr.showErrors = true;
           if (Object.keys(importProblems(dr)).length) { redraw("[aria-invalid=true], .field-err:not(:empty)"); return; }
@@ -4821,7 +5545,7 @@
             rows.length ? el("ul", { class: "plain-list" }, rows) : el("p", { class: "faint", text: "No assets added." })),
           el("p", { class: total > MAX_IMPORT_BYTES ? "field-err" : "faint", role: "status", "aria-live": "polite",
             text: `Selected: ${fmtBytes(total)} of the ${fmtBytes(MAX_IMPORT_BYTES)} total limit.${errs.size ? ` ${errs.size}` : ""}` }),
-          el("div", { class: "btn-row edit-actions" }, el("button", { type: "submit", class: "btn", disabled: !CSRF || dr.reading > 0 || null }, "Review import"),
+          el("div", { class: "btn-row edit-actions" }, el("button", { type: "submit", class: "btn", disabled: !CSRF || dr.reading > 0 || null, ...RT }, "Review import"),
             el("button", { type: "button", class: "btn btn-ghost", onclick: () => { state.importDraft = null; render(); } }, "Cancel"),
             CSRF ? statusLine("Nothing is written until you confirm the review.") : noToken())));
       focusIn(holder, focusSel);
@@ -4884,6 +5608,7 @@
           draft.busy = true; draw();
           try {
             const saved = await postJSON(url, { ...request(), preview: false }); state.authoring.delete(key);
+            recordReceipt(slug, `Saved equipment for ${txt(unit.name) || "unit"} (#${unit.id})`, saved);
             state.models.delete(slug); invalidateAuth(); toast(saved.written ? "Equipment saved with a source backup." : "Equipment already matches; no source change."); render();
           } catch (error) { draft.error = error; draft.preview = null; draft.busy = false; draw(); }
         } }));
@@ -4891,6 +5616,990 @@
     }
     details.addEventListener("toggle", () => { if (details.open) { if (!draft.data && !draft.busy) load(false); else draw(); } });
     return details;
+  }
+
+  // ---------- vanilla inspector (read-only, per project) ----------
+  // GET .../inspector (counts, provenance), .../inspector/<cat>?q=&c=field:op[:value]&sort=&order=&page=&per_page=
+  // (one bounded page; c repeats and is AND-ed), .../inspector/<cat>/filters (common filters, columns, sorts) and
+  // .../inspector/<cat>/<id> (detail) read the catalog this project reads: its reference snapshot, else the live
+  // catalog. Images come only from the existing id-based sprite and icon routes. Nothing here writes.
+  // List state lives in the hash query (q, c, sort, order, per, page), so detail links, category links, bookmarks and
+  // Back keep it; within one category the list and detail update in place instead of re-rendering the page.
+  const INSP_CATS = [["units", "Units"], ["sites", "Sites"], ["events", "Events"], ["mercs", "Mercenaries"], ["items", "Items"],
+    ["spells", "Spells"], ["weapons", "Weapons"], ["armors", "Armour"], ["nations", "Nations"]];
+  const INSP_PER_PAGE = 40, INSP_PAGE_SIZES = [20, 40, 60, 100], INSP_MAX_CONDS = 8;
+  const INSP_OPS = [["gte", "at least", "≥"], ["lte", "at most", "≤"], ["between", "between", "between"], ["eq", "equals", "="], ["ne", "does not equal", "≠"],
+    ["gt", "greater than", ">"], ["lt", "less than", "<"], ["has", "has a value", "has a value"], ["none", "is blank or 0", "is blank or 0"], ["contains", "contains", "contains"]];
+  const INSP_NUM_OPS = new Set(["gt", "gte", "lt", "lte", "between"]);
+  const INSP_VALUE_OPS = new Set(["eq", "ne", "contains", "gt", "gte", "lt", "lte", "between"]);
+  const INSP_NUM_RE = /^-?\d+(\.\d+)?$/;
+  const INSP_KEYS = ["q", "c", "sort", "order", "per", "page", "age", "nation", "role"];
+  const INSP_AGE_ABBR = { 1: "EA", 2: "MA", 3: "LA" };
+  const SITE_PATH_LETTER = { Fire: "F", Air: "A", Water: "W", Earth: "E", Astral: "S", Death: "D", Nature: "N", Glamour: "G", Blood: "B", Holy: "H" };
+  const inspDefaults = () => ({ q: "", conds: [], sort: "id", order: "asc", per: state.inspPer || INSP_PER_PAGE, page: 1, age: "", nation: "", role: "" });
+  const inspDraft = (slug, cat) => draftOf(state.inspector, `${slug}:${cat}`, inspDefaults);
+  const inspCondParam = (c) => c.op === "between" ? `${c.field}:between:${c.value}..${c.value2}` : INSP_VALUE_OPS.has(c.op) ? `${c.field}:${c.op}:${c.value}` : `${c.field}:${c.op}`;
+  function inspParseCond(s) {
+    const m = /^([^:]+):([^:]+)(?::([\s\S]*))?$/.exec(String(s));
+    if (!m) return null;
+    const c = { field: m[1], op: m[2], value: m[3] || "", value2: "" };
+    if (c.op === "between") { const i = c.value.indexOf(".."); c.value2 = i < 0 ? "" : c.value.slice(i + 2); c.value = i < 0 ? c.value : c.value.slice(0, i); }
+    return c;
+  }
+  // List parameters of one state, defaults left out.
+  function inspParams(d) {
+    const p = new URLSearchParams();
+    if (d.q.trim()) p.set("q", d.q.trim());
+    for (const k of ["age", "nation", "role"]) if (d[k]) p.set(k, d[k]);
+    for (const c of d.conds) p.append("c", inspCondParam(c));
+    if (d.sort && d.sort !== "id") p.set("sort", d.sort);
+    if (d.order === "desc") p.set("order", "desc");
+    if (d.per !== INSP_PER_PAGE) p.set("per", String(d.per));
+    if (d.page > 1) p.set("page", String(d.page));
+    return p;
+  }
+  // The list state named by a hash query, or null when it names none (then the remembered state applies).
+  function inspFromQuery(qs) {
+    if (!INSP_KEYS.some((k) => qs.has(k))) return null;
+    const per = parseInt(qs.get("per") || "", 10), page = parseInt(qs.get("page") || "", 10);
+    return { q: (qs.get("q") || "").slice(0, 60), conds: qs.getAll("c").map(inspParseCond).filter(Boolean),
+      sort: qs.get("sort") || "id", order: qs.get("order") === "desc" ? "desc" : "asc",
+      per: per >= 1 ? Math.min(per, 100) : INSP_PER_PAGE, page: page >= 1 ? page : 1,
+      age: /^[123]$/.test(qs.get("age") || "") ? qs.get("age") : "", nation: /^(\d{1,4}|national|none)$/.test(qs.get("nation") || "") ? qs.get("nation") : "",
+      role: /^(troop|commander|capital|hero)$/.test(qs.get("role") || "") ? qs.get("role") : "" };
+  }
+  const inspSameState = (a, b) => inspParams(a).toString() === inspParams(b).toString();
+  // Hash link to a category (and entry) carrying that category's list state; ?n= stays first.
+  function inspHref(slug, cat, id, d) {
+    const base = route("p", slug, "inspector", ...(cat ? [cat] : []), ...(id !== undefined && id !== null && id !== "" ? [id] : []));
+    const ds = d || (cat && state.inspector.get(`${slug}:${cat}`));
+    const extra = ds ? inspParams(ds).toString() : "";
+    return extra ? base + (base.includes("?") ? "&" : "?") + extra : base;
+  }
+  const inspItemIcon = (slug, id) => (Number.isInteger(id) && id > 0 && id < 10000 ? `${apiBase(slug)}/item-icons/${id}.png` : null);
+  function inspListUrl(slug, cat, d) {
+    const p = inspParams({ ...d, per: INSP_PER_PAGE, page: 1 });
+    p.delete("per"); p.delete("page");
+    p.set("page", String(d.page || 1)); p.set("per_page", String(d.per || INSP_PER_PAGE));
+    return `${apiBase(slug)}/inspector/${encodeURIComponent(cat)}?${p}`;
+  }
+
+  // Bounded GET cache for inspector reads: settled results (LRU), one shared request per URL, and requests that
+  // nobody waits for any more are aborted. Cleared with invalidateAuth().
+  const INSP_CACHE_MAX = 60;
+  const inspCache = new Map(), inspInflight = new Map();
+  const INSP_ABORTED = { error: { code: "aborted", message: "Superseded by a newer request." } };
+  const inspAborted = (e) => !!(e && e.error && e.error.code === "aborted");
+  function inspGet(url, signal) {
+    if (inspCache.has(url)) { const v = inspCache.get(url); inspCache.delete(url); inspCache.set(url, v); return Promise.resolve(v); }
+    let f = inspInflight.get(url);
+    if (!f) {
+      const ctrl = new AbortController();
+      f = { ctrl, users: 0 };
+      f.p = getJSON(url, { signal: ctrl.signal }).then((r) => {
+        inspCache.set(url, r.result);
+        while (inspCache.size > INSP_CACHE_MAX) inspCache.delete(inspCache.keys().next().value);
+        return r.result;
+      });
+      f.p.then(() => {}, () => {}).then(() => { if (inspInflight.get(url) === f) inspInflight.delete(url); });
+      inspInflight.set(url, f);
+    }
+    f.users++;
+    return new Promise((resolve, reject) => {
+      let done = false;
+      const finish = () => { if (done) return false; done = true; f.users--; return true; };
+      if (signal) {
+        const quit = () => {
+          if (!finish()) return;
+          if (f.users <= 0 && inspInflight.get(url) === f) { inspInflight.delete(url); f.ctrl.abort(); }
+          reject(INSP_ABORTED);
+        };
+        if (signal.aborted) { quit(); return; }
+        signal.addEventListener("abort", quit, { once: true });
+      }
+      f.p.then((v) => { if (finish()) resolve(v); }, (e) => { if (finish()) reject(e); });
+    });
+  }
+
+  // Compact provenance: snapshot or live catalog, data version and revision; every field in a disclosure.
+  function inspProvenance(pv) {
+    if (!pv) return null;
+    return el("details", { class: "insp-prov" },
+      el("summary", { class: "faint", text: `Vanilla data from dom6inspector · read-only${pv.dataset_version ? ` · game ${pv.dataset_version}` : ""}` }),
+      el("p", { class: "faint insp-attr", text: txt(pv.attribution) }),
+      el("dl", { class: "kv" }, Object.entries(pv).filter(([k]) => k !== "attribution").map(([k, v]) =>
+        [el("dt", { text: k }), el("dd", { class: "mono", text: v && typeof v === "object" ? JSON.stringify(v) : txt(v) })])));
+  }
+  // Thumbnail for one list row: unit sprites, item icons and merc commander sprites; other categories show none.
+  function inspThumb(slug, cat, r) {
+    if (cat === "units") return previewThumb(catalogSprite(slug, r.id), "No sprite");
+    if (cat === "mercs") return previewThumb(r.commander ? catalogSprite(slug, r.commander.id) : null, "No commander");
+    if (cat === "items") return previewThumb(inspItemIcon(slug, r.id), "No icon");
+    return null;
+  }
+  // Readable facts from the server's row summary (no raw cost encodings); units add their nations.
+  function inspRowSub(cat, r, label) {
+    const f = r.fields || {}, vals = r.values || {};
+    const parts = [];
+    if (cat === "mercs") parts.push(r.commander ? txt(r.commander.name || "#" + r.commander.id) : null,
+      r.troop ? `${txt(f.nrunits)} × ${txt(r.troop.name || "#" + r.troop.id)}` : "no troops");
+    else if (r.summary) parts.push(...r.summary);
+    else parts.push(...Object.entries(f).filter(([k]) => !(k in vals)).slice(0, 3).map(([k, v]) => `${k} ${txt(v)}`));
+    if (cat === "units" && r.nations) {
+      const ns = r.nations.map((n) => `${INSP_AGE_ABBR[n.era] || ""} ${n.name}`.trim());
+      if (ns.length) parts.push(ns.length > 2 ? `${ns.slice(0, 2).join(", ")} +${ns.length - 2}` : ns.join(", "));
+    }
+    // Values of the filtered and sorted columns, so the reason a row matched is visible.
+    parts.push(...Object.entries(vals).map(([k, v]) => `${label(k)} ${txt(v) || "blank"}`));
+    if (r.filter_value !== undefined) parts.push(`= ${txt(r.filter_value) || "(empty)"}`);
+    return parts.filter(Boolean).join(" · ");
+  }
+
+  let inspMounted = null;  // the inspector currently on screen, for in-place route updates
+  function viewInspector(m, cat, id) {
+    const slug = m.project.slug;
+    inspMounted = null;
+    if (!catalogOf(m)) return stateBox("empty", "No game-data catalog for this project.",
+      "Create a reference snapshot under Overview, or start the server with --catalog.");
+    cat = INSP_CATS.some((c) => c[0] === cat) ? cat : "units";
+    // The address wins when it names a list state; otherwise the remembered one is written into it (no new entry).
+    const d = inspDraft(slug, cat), fromUrl = inspFromQuery(hashQuery());
+    if (fromUrl) Object.assign(d, fromUrl);
+    else if (inspParams(d).toString()) history.replaceState(null, "", inspHref(slug, cat, id, d));
+    const nav = el("nav", { class: "btn-row insp-cats", "aria-label": "Catalog categories" },
+      INSP_CATS.map(([k, l]) => el("a", { class: "btn btn-small", href: inspHref(slug, k), "aria-current": k === cat ? "page" : null, "data-cat": k }, l, el("span", { class: "count", text: "" }))));
+    const provBox = el("div");
+    inspGet(`${apiBase(slug)}/inspector`).then((s) => {
+      for (const c of s.categories || []) {
+        const link = nav.querySelector(`[data-cat="${c.key}"]`);
+        if (!link) continue;
+        link.querySelector(".count").textContent = c.available ? ` ${c.count}` : " –";
+        if (!c.available) link.title = `${c.file} is not in this catalog`;
+      }
+      fillKids(provBox, inspProvenance(s.provenance));
+    }, (e) => fillKids(provBox, errorBox(e, "catalog counts")));
+    const detail = inspDetail(m, cat);
+    const list = inspList(m, cat, d, {
+      currentId: () => detail.id,
+      onState: () => { const a = nav.querySelector(`[data-cat="${cat}"]`); if (a) a.setAttribute("href", inspHref(slug, cat, null, d)); },
+    });
+    detail.show(id);
+    const root = el("div", { class: "stack inspector" }, nav, list.tools,
+      el("div", { class: "split insp-split" }, list.pane, detail.node), provBox);
+    inspMounted = {
+      root, slug, cat, nkey: state.nation && state.nation.key,
+      // True when the route was applied in place (same project, category and nation, inspector still on screen).
+      update(slug2, cat2, id2, nkey) {
+        if (!root.isConnected || slug2 !== slug || (INSP_CATS.some((c) => c[0] === cat2) ? cat2 : "units") !== cat || nkey !== this.nkey) return false;
+        // An address without list parameters (a plain tab link) keeps the remembered state, as a fresh view does.
+        const want = inspFromQuery(hashQuery());
+        if (want && !inspSameState(want, d)) list.apply(want);
+        else if (!want && inspParams(d).toString()) history.replaceState(null, "", inspHref(slug, cat, id2, d));
+        const changed = String(id2 ?? "") !== String(detail.id ?? "");
+        if (changed) detail.show(id2);
+        list.markCurrent(id2);
+        return { changed };
+      },
+    };
+    return root;
+  }
+
+  function inspList(m, cat, d, hooks) {
+    const slug = m.project.slug, label = INSP_CATS.find((c) => c[0] === cat)[1], noun = label.toLowerCase();
+    const metaUrl = `${apiBase(slug)}/inspector/${encodeURIComponent(cat)}/filters`;
+    let meta = null, last = null, seq = 0, ctrl = null, timer = 0, editIndex = -1, edField = "";
+    const fieldInfo = (k) => (meta && meta.columns.find((c) => c.key === k)) || null;
+    const commonOf = (k) => (meta && meta.common.find((c) => c.field === k)) || null;
+    const fieldLabel = (k) => { const c = commonOf(k) || fieldInfo(k); return (c && c.label) || k; };
+    const choiceLabel = (k, v) => { const c = commonOf(k), ch = c && (c.choices || []).find((x) => x.value === v); return ch && ch.label ? ch.label : v; };
+    const opSym = (op) => (INSP_OPS.find((o) => o[0] === op) || [op, op, op])[2];
+    const opWord = (op) => (INSP_OPS.find((o) => o[0] === op) || [op, op])[1];
+    const condText = (c) => c.op === "between" ? `${fieldLabel(c.field)} ${c.value}–${c.value2}`
+      : INSP_VALUE_OPS.has(c.op) ? `${fieldLabel(c.field)} ${opSym(c.op)} ${choiceLabel(c.field, c.value)}` : `${fieldLabel(c.field)} ${opSym(c.op)}`;
+    const condSpeech = (c) => c.op === "between" ? `${fieldLabel(c.field)} between ${c.value} and ${c.value2}`
+      : `${fieldLabel(c.field)} ${opWord(c.op)}${INSP_VALUE_OPS.has(c.op) ? ` ${choiceLabel(c.field, c.value)}` : ""}`;
+
+    // ----- toolbar: search and a few everyday filters; sort, page size and column conditions under Advanced -----
+    const q = el("input", { class: "input", type: "search", id: "insp-q", value: d.q, maxlength: "60", autocomplete: "off", placeholder: `Name or id${cat === "events" ? " or description" : ""}  ( / )` });
+    const sortSel = el("select", { class: "input", id: "insp-sort" });
+    const orderBtn = el("button", { type: "button", class: "btn btn-small insp-order", id: "insp-order" });
+    const perSel = el("select", { class: "input", id: "insp-per" }, INSP_PAGE_SIZES.map((n) => el("option", { value: String(n), text: `${n} per page` })));
+    const resetBtn = el("button", { type: "button", class: "btn btn-small btn-ghost", onclick: () => reset() }, "Reset all");
+    const simpleBox = el("div", { class: "insp-simple", role: "group", "aria-label": `${label} filters` });
+    const chips = el("ul", { class: "insp-chips", "aria-label": "Column filters" });
+    const chipsRow = el("div", { class: "insp-chips-row" });
+    // Condition editor: searchable column chooser (combobox), operator, value(s).
+    const colIn = el("input", { class: "input", id: "insp-col", type: "text", role: "combobox", autocomplete: "off", spellcheck: "false", maxlength: "60",
+      "aria-autocomplete": "list", "aria-expanded": "false", "aria-controls": "insp-col-list", placeholder: "Search columns, e.g. hp, flying" });
+    const colList = el("ul", { class: "insp-col-list", id: "insp-col-list", role: "listbox", "aria-label": "Columns", hidden: true });
+    const opSel = el("select", { class: "input", id: "insp-op" });
+    const valBox = el("span", { class: "insp-vals" });
+    const condErr = el("p", { class: "insp-cond-err", id: "insp-cond-err", role: "alert" });
+    const addBtn = el("button", { type: "submit", class: "btn btn-small insp-add" }, "Add filter");
+    const cancelBtn = el("button", { type: "button", class: "btn btn-small btn-ghost", hidden: true, onclick: () => closeEditor(true) }, "Cancel");
+    const editorHint = el("span", { class: "faint insp-hint" });
+    const form = el("form", { class: "insp-cond", "aria-label": "Add a column filter", novalidate: true },
+      el("span", { class: "insp-col-wrap" }, el("label", { for: "insp-col", class: "insp-lbl", text: "Column" }), colIn, colList),
+      el("span", { class: "insp-field" }, el("label", { for: "insp-op", class: "insp-lbl", text: "Condition" }), opSel),
+      valBox, el("span", { class: "insp-actions" }, addBtn, cancelBtn), editorHint, condErr);
+    const status = el("p", { class: "insp-status", role: "status", "aria-live": "polite" });
+    const sem = el("p", { class: "faint insp-sem" });
+    const advSum = el("summary", { text: "Advanced" });
+    const adv = el("details", { class: "insp-adv", open: d.sort !== "id" || d.order !== "asc" || null }, advSum,
+      el("div", { class: "insp-row" },
+        el("span", { class: "insp-field" }, el("label", { for: "insp-sort", class: "insp-lbl", text: "Sort" }), sortSel, orderBtn),
+        el("span", { class: "insp-field" }, el("label", { for: "insp-per", class: "insp-lbl", text: "Per page" }), perSel)),
+      form, chipsRow, sem);
+    const tools = el("section", { class: "insp-tools", "aria-label": `Filter ${noun}` },
+      el("div", { class: "insp-row" },
+        el("div", { class: "unit-filter insp-search", role: "search" }, el("label", { for: "insp-q", class: "sr-only", text: `Search ${noun}` }), q),
+        simpleBox, resetBtn),
+      adv, status);
+
+    const listBox = el("div", { class: "insp-results", id: "insp-results", "aria-label": `${label} results` });
+    const pager = el("div");
+    const pane = el("div", { class: "unit-pane auth-pane insp-pane" }, listBox, pager);
+
+    // ----- state changes -----
+    const pushUrl = (push) => {
+      const href = inspHref(slug, cat, hooks.currentId(), d);
+      if (location.hash !== href) history[push ? "pushState" : "replaceState"](null, "", href);
+      hooks.onState();
+    };
+    // Apply a change: new page 1 unless paging, URL entry (pushed for discrete actions), then load.
+    function change(mut, opts) {
+      mut(d);
+      if (!(opts && opts.keepPage)) d.page = 1;
+      pushUrl(!(opts && opts.replace));
+      syncTools();
+      load();
+    }
+    function apply(want) {  // from the address (Back/Forward or a link); no new history entry
+      Object.assign(d, want);
+      q.value = d.q;
+      closeEditor(false);
+      syncTools();
+      hooks.onState();
+      load();
+    }
+    const anyFilter = () => !!(d.conds.length || d.q.trim() || d.age || d.nation || d.role);
+    function reset() {
+      change((x) => Object.assign(x, inspDefaults(), { per: x.per }));
+      q.value = "";
+      closeEditor(false);
+      q.focus();
+    }
+
+    // ----- loading: previous results stay visible (dimmed) until the new page arrives -----
+    function load() {
+      const mine = ++seq, url = inspListUrl(slug, cat, d);
+      if (ctrl) ctrl.abort();
+      ctrl = new AbortController();
+      listBox.setAttribute("aria-busy", "true");
+      pane.classList.toggle("is-updating", !!last);
+      if (!last) fillKids(listBox, stateBox("loading", `Reading ${noun}...`));
+      else status.dataset.busy = "1";
+      drawStatus();
+      inspGet(url, ctrl.signal).then((r) => { if (mine === seq) { last = r; done(); draw(r); } }, (e) => {
+        if (mine !== seq || inspAborted(e)) return;
+        done();
+        const conds = anyFilter() || d.sort !== "id";
+        fillKids(listBox, errorBox(e, `catalog ${noun}`),
+          el("div", { class: "btn-row" },
+            el("button", { type: "button", class: "btn btn-small", onclick: () => { inspCache.delete(url); load(); } }, "Retry"),
+            conds ? el("button", { type: "button", class: "btn btn-small btn-ghost", onclick: () => reset() }, "Reset filters") : null),
+          null);
+        last = null;
+        fillKids(pager);
+        drawStatus(e);
+      });
+    }
+    function done() { listBox.removeAttribute("aria-busy"); pane.classList.remove("is-updating"); delete status.dataset.busy; }
+    function drawStatus(err) {
+      const r = last;
+      const sortTxt = d.sort === "id" && d.order === "asc" ? "" : ` · sorted by ${fieldLabel(d.sort === "id" ? "Id" : d.sort === "name" ? "Name" : d.sort)} ${orderText()}`;
+      const busy = status.dataset.busy ? " · updating..." : "";
+      if (err) { status.textContent = "Could not load results."; return; }
+      if (!r) { status.textContent = `Loading ${noun}...`; return; }
+      const filtered = r.matches !== r.total, from = (r.page - 1) * r.per_page;
+      const [a, b] = r.range || [from + 1, from + r.results.length];
+      status.textContent = r.matches
+        ? `${r.matches.toLocaleString()} ${filtered ? `of ${r.total.toLocaleString()} ` : ""}${noun}${r.pages > 1 ? ` · ${a}–${b}` : ""}${sortTxt}${busy}`
+        : `No ${noun} match${busy}`;
+    }
+    function orderText() {
+      const kind = d.sort === "name" ? "text" : d.sort === "id" ? "number" : ((fieldInfo(d.sort) || {}).kind || "number");
+      return kind === "text" ? (d.order === "desc" ? "Z–A" : "A–Z") : (d.order === "desc" ? "high to low" : "low to high");
+    }
+    function draw(r) {
+      // The server clamps a page past the end (a bookmark after filters changed); the address follows it.
+      if (d.page !== r.page) { d.page = r.page; pushUrl(false); }
+      drawStatus();
+      sem.textContent = r.semantics || "";
+      if (!r.results.length) {
+        fillKids(listBox, stateBox("empty", `No ${noun} match.`, anyFilter() ? "Try fewer filters." : "This catalog table is empty."),
+          anyFilter() ? el("div", { class: "btn-row" }, el("button", { type: "button", class: "btn btn-small", onclick: () => reset() }, "Clear filters")) : null);
+        fillKids(pager);
+        return;
+      }
+      const id = hooks.currentId();
+      const list = el("ul", { class: "unit-list insp-list", "aria-label": `Catalog ${noun}, page ${r.page} of ${r.pages}` }, r.results.map((x) => el("li", null,
+        el("a", { class: "unit-item", href: inspHref(slug, cat, x.id, d), "data-id": String(x.id), "aria-current": String(x.id) === String(id ?? "") ? "true" : null },
+          inspThumb(slug, cat, x),
+          el("span", null, el("div", { class: "nm", text: x.name || "(unnamed)" }), el("div", { class: "sub", text: inspRowSub(cat, x, fieldLabel) }))))));
+      list.addEventListener("keydown", (e) => {
+        if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+        const links = [...list.querySelectorAll("a")], i = links.indexOf(document.activeElement);
+        if (i < 0) return;
+        e.preventDefault();
+        if (e.key === "ArrowUp" && i === 0) { q.focus(); return; }
+        links[Math.max(0, Math.min(links.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))].focus();
+      });
+      const hadFocus = listBox.contains(document.activeElement) || pager.contains(document.activeElement);
+      fillKids(listBox, list);
+      const go = (p) => change((x) => { x.page = p; }, { keepPage: true });
+      fillKids(pager, r.pages > 1 ? el("nav", { class: "btn-row insp-pager", "aria-label": "Pages" },
+        el("button", { type: "button", class: "btn btn-small", disabled: r.page <= 1 || null, onclick: () => go(1), "aria-label": "First page" }, "«"),
+        el("button", { type: "button", class: "btn btn-small", disabled: r.page <= 1 || null, onclick: () => go(r.page - 1) }, "Previous"),
+        el("span", { class: "faint insp-pageno", text: `${r.page} / ${r.pages}` }),
+        el("button", { type: "button", class: "btn btn-small", disabled: r.page >= r.pages || null, onclick: () => go(r.page + 1) }, "Next"),
+        el("button", { type: "button", class: "btn btn-small", disabled: r.page >= r.pages || null, onclick: () => go(r.pages), "aria-label": "Last page" }, "»")) : null);
+      if (hadFocus) { const a = list.querySelector("a"); if (a) a.focus({ preventScroll: true }); }
+      list.scrollTop = 0;
+      // Keep the open entry visible inside the scrolling list (the page itself does not scroll).
+      const cur = list.querySelector('[aria-current="true"]');
+      if (cur) list.scrollTop = Math.max(0, cur.parentElement.offsetTop - list.offsetTop - list.clientHeight / 2);
+    }
+    function markCurrent(id) {
+      for (const a of listBox.querySelectorAll("a.unit-item")) {
+        if (a.dataset.id === String(id ?? "")) a.setAttribute("aria-current", "true"); else a.removeAttribute("aria-current");
+      }
+    }
+
+    // ----- toolbar drawing -----
+    function syncTools() {
+      // A bookmarked size outside the menu (still at most 100) gets its own entry.
+      if (![...perSel.options].some((o) => o.value === String(d.per))) perSel.append(el("option", { value: String(d.per), text: `${d.per} per page` }));
+      perSel.value = String(d.per);
+      const sorts = meta ? [...meta.sorts] : [{ key: "id", label: "Id" }, { key: "name", label: "Name" }];
+      for (const c of d.conds) if (!sorts.some((s) => s.key === c.field) && (!meta || (fieldInfo(c.field) || {}).kind !== "text")) sorts.push({ key: c.field, label: fieldLabel(c.field) });
+      if (!sorts.some((s) => s.key === d.sort)) sorts.push({ key: d.sort, label: fieldLabel(d.sort) });
+      fillKids(sortSel, sorts.map((s) => el("option", { value: s.key, text: s.label + (s.key !== "id" && s.key !== "name" && s.label !== s.key ? ` (${s.key})` : "") })));
+      sortSel.value = d.sort;
+      const ot = orderText();
+      orderBtn.textContent = d.order === "desc" ? `↓ ${ot}` : `↑ ${ot}`;
+      orderBtn.setAttribute("aria-label", `Sort order: ${ot}. Activate to reverse.`);
+      resetBtn.disabled = !(anyFilter() || d.sort !== "id" || d.order !== "asc") || null;
+      // Conditions set by an everyday filter show in its dropdown; only the others are chips.
+      const advanced = d.conds.map((c, i) => [c, i]).filter(([c]) => !isOwned(c));
+      fillKids(chips, advanced.map(([c, i]) => el("li", { class: `insp-chip${i === editIndex ? " is-editing" : ""}` },
+        el("button", { type: "button", class: "insp-chip-t", title: "Edit this filter", "aria-label": `Edit filter: ${condSpeech(c)}`, onclick: () => openEditor(c.field, i) }, condText(c)),
+        el("button", { type: "button", class: "insp-chip-x", "aria-label": `Remove filter: ${condSpeech(c)}`, onclick: () => removeCond(i) }, "×"))));
+      fillKids(chipsRow, advanced.length ? [el("span", { class: "insp-lbl", text: "Column filters (all must match)" }), chips] : null);
+      advSum.textContent = advanced.length ? `Advanced (${advanced.length})` : "Advanced";
+      if (meta && advanced.length) adv.open = true;
+      addBtn.disabled = editIndex < 0 && d.conds.length >= INSP_MAX_CONDS || null;
+      drawSimple();
+    }
+    function removeCond(i) {
+      if (editIndex === i) closeEditor(false);
+      else if (editIndex > i) editIndex--;
+      change((x) => { x.conds = x.conds.filter((_, j) => j !== i); });
+      // Keep keyboard focus in the chip row at the same position (or the search box when it empties).
+      const xs = chips.querySelectorAll(".insp-chip-x");
+      (xs[Math.min(i, xs.length - 1)] || q).focus();
+    }
+
+    // ----- everyday filters: a list parameter (age, nation, role) or one column condition per choice -----
+    const ownedBy = (spec, c) => (spec.param ? null : (spec.choices || []).find((ch) => ch.cond && ch.cond === inspCondParam(c))) || null;
+    const isOwned = (c) => !!(meta && (meta.simple || []).some((s) => ownedBy(s, c)));
+    const nationSpec = () => (meta && (meta.simple || []).find((s) => s.param === "nation")) || null;
+    function drawSimple() {
+      if (!meta) return;
+      const had = simpleBox.contains(document.activeElement) ? document.activeElement.id : "";
+      fillKids(simpleBox, (meta.simple || []).map(simpleSelect));
+      if (had) { const n = document.getElementById(had); if (n) n.focus(); }
+    }
+    function simpleSelect(s) {
+      const id = `insp-s-${s.key}`, age = Number(d.age) || 0;
+      const owned = s.param ? null : d.conds.map((c) => ownedBy(s, c)).find(Boolean);
+      const cur = s.param ? d[s.param] || "" : owned ? owned.value : "";
+      const sel = el("select", { class: "input", id, disabled: s.param === "role" && d.nation === "none" || null });
+      const opt = (v, t) => el("option", { value: v, text: t });
+      if (s.param === "nation") {
+        // An age narrows the nation list; units without a nation have no age.
+        sel.append(opt("", "All"), ...(s.special || []).filter((x) => !(age && x.value === "none")).map((x) => opt(x.value, x.label)),
+          ...[1, 2, 3].filter((a) => !age || a === age).map((a) => el("optgroup", { label: `${INSP_AGE_ABBR[a]} nations` },
+            s.choices.filter((n) => n.era === a).map((n) => opt(n.value, `${INSP_AGE_ABBR[a]} ${n.label}`)))));
+      } else sel.append(opt("", "All"), ...(s.choices || []).map((ch) => opt(ch.value, ch.label)));
+      // A bookmarked value that is no longer offered stays visible so it can be cleared.
+      if (cur && ![...sel.options].some((o) => o.value === cur)) sel.append(opt(cur, cur));
+      sel.value = cur;
+      sel.addEventListener("change", () => setSimple(s, sel.value));
+      return el("span", { class: "insp-field" }, el("label", { for: id, class: "insp-lbl", text: s.label }), sel);
+    }
+    function setSimple(s, v) {
+      if (!s.param && v && !d.conds.some((c) => ownedBy(s, c)) && d.conds.length >= INSP_MAX_CONDS) {
+        status.textContent = `At most ${INSP_MAX_CONDS} filters. Remove a column filter under Advanced first.`;
+        return;
+      }
+      change((x) => {
+        if (s.param) {
+          x[s.param] = v;
+          const ns = nationSpec(), n = ns && ns.choices.find((c) => c.value === x.nation);
+          // A nation outside the chosen age, or "No nation" with an age, is cleared rather than kept invalid.
+          if (s.param === "age" && v && (x.nation === "none" || (n && String(n.era) !== v) || (/^\d+$/.test(x.nation) && ns && !n))) x.nation = "";
+          if (x.nation === "none") x.role = "";
+        } else {
+          x.conds = x.conds.filter((c) => !ownedBy(s, c));
+          const ch = (s.choices || []).find((c) => c.value === v);
+          if (ch) x.conds = [...x.conds, inspParseCond(ch.cond)];
+        }
+      });
+    }
+
+    // ----- condition editor -----
+    function opsFor(k) {
+      const info = fieldInfo(k), kind = info ? info.kind : "number", common = commonOf(k);
+      let ops = INSP_OPS.map((o) => o[0]);
+      if (kind === "text") ops = ["eq", "ne", "contains", "has", "none"];
+      if (common && common.kind === "choice") ops = kind === "text" ? ["eq", "ne", "has", "none"] : ["eq", "ne", "gte", "lte", "between", "has", "none"];
+      return ops;
+    }
+    function openEditor(k, index, keepOp) {
+      editIndex = index;
+      edField = k;
+      const existing = index >= 0 && d.conds[index] && d.conds[index].field === k ? d.conds[index] : null;
+      colIn.value = k;
+      const ops = opsFor(k), common = commonOf(k);
+      fillKids(opSel, ops.map((o) => el("option", { value: o, text: opWord(o) })));
+      opSel.value = existing ? existing.op : keepOp && ops.includes(keepOp) ? keepOp : common && common.kind === "choice" ? "eq" : ops[0];
+      drawValues(existing);
+      addBtn.textContent = index >= 0 ? "Update filter" : "Add filter";
+      cancelBtn.hidden = false;
+      condErr.textContent = "";
+      const info = fieldInfo(k);
+      editorHint.textContent = info ? `${info.kind === "empty" ? "blank in every row" : `${info.kind}, ${info.filled} non-blank`}${info.min !== undefined ? ` · range ${info.min} to ${info.max}` : ""}` : "";
+      syncTools();
+      const first = valBox.querySelector("input, select");
+      (first && !first.disabled ? first : opSel).focus();
+    }
+    function closeEditor(focusBack) {
+      editIndex = -1; edField = "";
+      colIn.value = ""; fillKids(opSel); fillKids(valBox); editorHint.textContent = ""; condErr.textContent = "";
+      addBtn.textContent = "Add filter"; cancelBtn.hidden = true;
+      closeCols();
+      syncToolsLight();
+      if (focusBack) colIn.focus();
+    }
+    const syncToolsLight = () => { for (const li of chips.children) li.classList.remove("is-editing"); };
+    function drawValues(existing) {
+      const op = opSel.value, k = edField, common = commonOf(k), info = fieldInfo(k);
+      fillKids(valBox);
+      if (!INSP_VALUE_OPS.has(op)) return;
+      const numeric = INSP_NUM_OPS.has(op) || (info && info.kind !== "text" && op !== "contains");
+      const hint = info && info.min !== undefined ? `${info.min} to ${info.max}` : "value";
+      const mk = (id, v, lbl) => {
+        if (common && common.kind === "choice" && (op === "eq" || op === "ne")) {
+          const s = el("select", { class: "input", id }, el("option", { value: "", text: "Choose a value" }),
+            common.choices.map((c) => el("option", { value: c.value, text: `${c.label ? `${c.label} (${c.value})` : c.value} · ${c.count}` })));
+          s.value = v || "";
+          return [el("label", { for: id, class: "insp-lbl", text: lbl }), s];
+        }
+        return [el("label", { for: id, class: "insp-lbl", text: lbl }),
+          el("input", { class: "input insp-num", id, type: "text", inputmode: numeric ? "decimal" : "text", maxlength: "60", autocomplete: "off", value: v || "", placeholder: numeric ? hint : "text", "aria-describedby": "insp-cond-err" })];
+      };
+      valBox.append(el("span", { class: "insp-field" }, mk("insp-v1", existing && existing.value, op === "between" ? "From" : "Value")));
+      if (op === "between") valBox.append(el("span", { class: "insp-field" }, mk("insp-v2", existing && existing.value2, "to")));
+    }
+    function submitCond() {
+      const k = edField || colIn.value.trim(), op = opSel.value;
+      const v1 = valBox.querySelector("#insp-v1"), v2 = valBox.querySelector("#insp-v2");
+      const value = v1 ? v1.value.trim() : "", value2 = v2 ? v2.value.trim() : "";
+      for (const x of [colIn, v1, v2]) if (x) x.removeAttribute("aria-invalid");
+      const fail = (msg, node) => { condErr.textContent = msg; if (node) { node.setAttribute("aria-invalid", "true"); node.focus(); } };
+      if (!k || (meta && !fieldInfo(k))) return fail(k ? `No column named "${k}" in ${noun}. Pick one from the list.` : "Choose a column first.", colIn);
+      if (!edField) { openEditor(k, editIndex); return; }  // a typed column name: choose its condition next
+      if (!op) return fail("Choose a condition.", opSel);
+      if (INSP_VALUE_OPS.has(op) && !value) return fail("Enter a value.", v1);
+      if (INSP_NUM_OPS.has(op) && !INSP_NUM_RE.test(value)) return fail(`"${value}" is not a number. Use digits, an optional minus sign and decimal point.`, v1);
+      if (op === "between" && !INSP_NUM_RE.test(value2)) return fail("Enter a number for the upper bound.", v2);
+      if (op === "between" && Number(value2) < Number(value)) return fail("The lower bound is above the upper bound.", v1);
+      const cond = { field: k, op, value: INSP_VALUE_OPS.has(op) ? value : "", value2: op === "between" ? value2 : "" };
+      const at = editIndex;
+      if (at < 0 && d.conds.length >= INSP_MAX_CONDS) return fail(`At most ${INSP_MAX_CONDS} filters. Remove one first.`);
+      closeEditor(false);
+      change((x) => { x.conds = at >= 0 ? x.conds.map((c, j) => (j === at ? cond : c)) : [...x.conds, cond]; });
+      colIn.focus();
+    }
+    form.addEventListener("submit", (e) => { e.preventDefault(); submitCond(); });
+    opSel.addEventListener("change", () => {
+      const v1 = valBox.querySelector("#insp-v1"), keep = v1 ? v1.value : "";
+      drawValues(null);
+      const n1 = valBox.querySelector("#insp-v1");
+      if (n1 && keep && n1.tagName === "INPUT") n1.value = keep;
+      condErr.textContent = "";
+    });
+
+    // Column combobox: filters every column by key or label; arrow keys move, Enter picks, Escape closes.
+    let colHits = [], colActive = -1;
+    function closeCols() { colList.hidden = true; colIn.setAttribute("aria-expanded", "false"); colIn.removeAttribute("aria-activedescendant"); colActive = -1; }
+    function drawCols() {
+      if (!meta) { fillKids(colList, el("li", { class: "faint", role: "presentation", text: "Loading columns..." })); colList.hidden = false; colIn.setAttribute("aria-expanded", "true"); return; }
+      const t = colIn.value.trim().toLowerCase();
+      const all = meta.columns;
+      const score = (c) => (c.key.toLowerCase() === t ? 0 : c.key.toLowerCase().startsWith(t) ? 1 : (c.label || "").toLowerCase().startsWith(t) ? 2 : 3);
+      const hits = all.filter((c) => !t || c.key.toLowerCase().includes(t) || (c.label || "").toLowerCase().includes(t))
+        .sort((a, b) => score(a) - score(b) || (a.kind === "empty") - (b.kind === "empty") || (!!b.label - !!a.label) || a.key.localeCompare(b.key));
+      colHits = hits.slice(0, 60);
+      colActive = colHits.length ? 0 : -1;
+      fillKids(colList, colHits.length ? colHits.map((c, i) => el("li", { id: `insp-col-o${i}`, role: "option", class: "insp-col-opt", "aria-selected": i === colActive ? "true" : "false", "data-key": c.key,
+        onmousedown: (e) => e.preventDefault(), onclick: () => pickCol(c.key) },
+        el("code", { text: c.key }), c.label ? el("span", { text: c.label }) : null,
+        el("span", { class: "faint", text: c.kind === "empty" ? "blank in every row" : `${c.kind} · ${c.filled} filled` })))
+        : el("li", { class: "faint", role: "presentation", text: `No column matches "${colIn.value.trim()}".` }),
+        hits.length > colHits.length ? el("li", { class: "faint", role: "presentation", text: `${hits.length - colHits.length} more; keep typing to narrow.` }) : null);
+      colList.hidden = false;
+      colIn.setAttribute("aria-expanded", "true");
+      setActive(colActive);
+    }
+    function setActive(i) {
+      colActive = i;
+      [...colList.querySelectorAll('[role="option"]')].forEach((o, j) => o.setAttribute("aria-selected", j === i ? "true" : "false"));
+      const o = colList.querySelector(`#insp-col-o${i}`);
+      if (o) { colIn.setAttribute("aria-activedescendant", o.id); o.scrollIntoView({ block: "nearest" }); } else colIn.removeAttribute("aria-activedescendant");
+    }
+    // Picking a column while editing a chip changes that chip's column; otherwise it starts a new filter.
+    function pickCol(k) { closeCols(); openEditor(k, editIndex, opSel.value); }
+    colIn.addEventListener("input", () => { edField = ""; drawCols(); });
+    colIn.addEventListener("click", () => { if (colList.hidden) drawCols(); });
+    colIn.addEventListener("blur", () => setTimeout(closeCols, 120));
+    colIn.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        if (colList.hidden) { drawCols(); return; }
+        if (colHits.length) setActive((colActive + (e.key === "ArrowDown" ? 1 : -1) + colHits.length) % colHits.length);
+      } else if (e.key === "Enter") {
+        if (!colList.hidden && colActive >= 0 && colHits[colActive]) { e.preventDefault(); pickCol(colHits[colActive].key); }
+      } else if (e.key === "Escape") {
+        if (!colList.hidden) { e.preventDefault(); closeCols(); } else if (edField || colIn.value) { e.preventDefault(); closeEditor(true); }
+      }
+    });
+
+    // ----- inputs -----
+    q.addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => change((x) => { x.q = q.value; }, { replace: true }), 250);
+    });
+    q.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && q.value) { clearTimeout(timer); q.value = ""; change((x) => { x.q = ""; }); }
+      if (e.key === "Enter") { clearTimeout(timer); if (q.value !== d.q) change((x) => { x.q = q.value; }, { replace: true }); }
+      if (e.key === "ArrowDown") { const a = listBox.querySelector("a"); if (a) { e.preventDefault(); a.focus(); } }
+    });
+    sortSel.addEventListener("change", () => {
+      const k = sortSel.value, kind = k === "name" ? "text" : ((fieldInfo(k) || {}).kind || "number");
+      // Numbers read best high to low on first choice; ids and names keep ascending.
+      change((x) => { x.sort = k; x.order = k !== "id" && kind !== "text" ? "desc" : "asc"; });
+    });
+    orderBtn.addEventListener("click", () => change((x) => { x.order = x.order === "desc" ? "asc" : "desc"; }));
+    perSel.addEventListener("change", () => { const n = Math.min(100, Math.max(1, parseInt(perSel.value, 10) || INSP_PER_PAGE)); state.inspPer = n; change((x) => { x.per = n; }); });
+
+    function loadMeta() {
+      inspGet(metaUrl).then((r) => { meta = r; syncTools(); if (last) { drawStatus(); draw(last); } }, (e) => {
+        fillKids(simpleBox, errorBox(e, "filter choices"), el("button", { type: "button", class: "btn btn-small", onclick: () => { fillKids(simpleBox); loadMeta(); } }, "Retry"));
+      });
+    }
+    syncTools();
+    loadMeta();
+    load();
+    return { tools, pane, apply, markCurrent };
+  }
+
+  // Detail pane: the previous entry stays (dimmed) while the next loads; obsolete requests are cancelled.
+  function inspDetail(m, cat) {
+    const slug = m.project.slug;
+    const node = el("div", { class: "auth-detail insp-detail", id: "insp-detail", "aria-live": "off" });
+    let seq = 0, ctrl = null;
+    const api = { node, id: null, show };
+    function show(id) {
+      api.id = id === undefined || id === "" ? null : id;
+      const mine = ++seq;
+      if (ctrl) ctrl.abort();
+      ctrl = null;
+      node.classList.remove("is-updating");
+      node.removeAttribute("aria-busy");
+      if (api.id === null) { fillKids(node, stateBox("empty", "Choose an entry from the list.")); return; }
+      if (!/^\d{1,6}$/.test(String(id))) { fillKids(node, stateBox("error", "Not a catalog id.", String(id))); return; }
+      const url = `${apiBase(slug)}/inspector/${encodeURIComponent(cat)}/${encodeURIComponent(id)}`;
+      ctrl = new AbortController();
+      node.setAttribute("aria-busy", "true");
+      if (node.querySelector(".insp-body")) node.classList.add("is-updating");
+      else fillKids(node, stateBox("loading", "Loading..."));
+      inspGet(url, ctrl.signal).then((d) => {
+        if (mine !== seq) return;
+        node.classList.remove("is-updating");
+        node.removeAttribute("aria-busy");
+        try {
+          const body = cat === "units" ? inspUnit(m, d) : cat === "mercs" ? inspMerc(m, d) : cat === "events" ? inspEvent(m, d)
+            : cat === "items" ? inspItem(m, d) : inspGeneric(m, cat, d);
+          const tpl = CONTENT_KINDS[cat] ? useAsTemplate(m, cat, d, "btn btn-small") : null;
+          fillKids(node, el("div", { class: "stack insp-body" }, body,
+            tpl ? el("div", { class: "cross-link" }, tpl, el("span", { class: "faint", text: `Starts a new draft in ${txt(m.project.mod_name || m.project.name || slug)}; nothing is written until you review it.` }))
+              : CONTENT_KINDS[cat] ? null : el("p", { class: "faint", text: "Browsing only. Use as template is offered for sites, spells, weapons and armour." }),
+            techSection("Raw catalog row", false,
+            d.catalog_row ? table(["Catalog column", "Raw value"], Object.entries(d.catalog_row).map(([k, v]) => [el("code", { text: k }), el("code", { text: txt(v) })])) : el("p", { class: "muted", text: "No raw row." })),
+            techSection("JSON", false, jsonActions(url, () => d, "Catalog entry JSON"))));
+        } catch (e) { fillKids(node, stateBox("error", "This entry failed to render.", String((e && e.message) || e))); }
+      }, (e) => {
+        if (mine !== seq || inspAborted(e)) return;
+        node.classList.remove("is-updating");
+        node.removeAttribute("aria-busy");
+        fillKids(node, errorBox(e, "the catalog entry"),
+          el("div", { class: "btn-row" }, el("button", { type: "button", class: "btn btn-small", onclick: () => { inspCache.delete(url); show(id); } }, "Retry")));
+      });
+    }
+    return api;
+  }
+  // Data notes and limitations of one entry, collapsed.
+  const inspNote = (text) => (text ? techSection("About this data", false, el("p", { class: "faint", text })) : null);
+  // Link to a catalog unit with the shared hover / focus preview card.
+  function inspUnitLink(m, ref) {
+    if (!ref) return el("span", { class: "muted", text: "none" });
+    if (ref.in_catalog === false) return el("span", null, `#${ref.id} `, badge("not in catalog", "warn"));
+    const a = el("a", { href: inspHref(m.project.slug, "units", ref.id) }, `${txt(ref.name || "unknown unit")} (#${ref.id})`);
+    return attachPreview(a, txt(ref.name || `unit ${ref.id}`), (isCurrent) => catalogUnitCard(m, ref.id, isCurrent));
+  }
+  const inspMercLinks = (m, list) => (list || []).length ? el("p", { class: "sheet-line" }, el("span", { class: "sheet-k", text: "Vanilla mercenary companies:" }), " ",
+    list.map((x, i) => [i ? ", " : "", el("a", { href: inspHref(m.project.slug, "mercs", x.id) }, txt(x.name)), el("span", { class: "faint", text: ` (${x.roles.join(", ")})` })])) : null;
+  // A catalog unit on the project sheet layout (stats, gear, abilities, magic, sprite), labelled read-only.
+  function inspUnit(m, cu) {
+    const r = cu.resolved || {}, stats = r.stats || {}, costs = r.costs || {}, eq = r.equipment || {}, nat = cu.nations || [];
+    const cols = SHEET_COLS.map((col) => col.map(([k, label]) => [label, k === "leader" ? r.leadership : stats[k]]));
+    cols.push([["Map move", stats.mapmove], ["Gold", costs.gold, { mark: "†", text: costText(costs.gold) }], ["Resources", costs.resources, { mark: "†", text: costText(costs.resources) }],
+      ["Rec points", costs.recruitment_points, { mark: "†", text: costText(costs.recruitment_points) }]]);
+    return el("div", { class: "stack" },
+      unitSheet({
+        name: cu.name || `Unit ${cu.id}`, type: "Vanilla unit",
+        sub: [el("span", { text: `#${cu.id}` })],
+        cols,
+        gear: el("div", { class: "sheet-gear-wrap" }, sheetGear(eq.weapons, "Weapon", eq.weapons_status), sheetGear(eq.armor, "Armour", eq.armor_status)),
+        abilities: sheetAbilities([...Object.entries(r.specials || {}), ...Object.entries(r.creature_traits || {})]),
+        magic: r.magic ? sheetMagic(r.magic.paths, r.magic.random) : null,
+        lines: [el("p", { class: "sheet-line" }, el("span", { class: "sheet-k", text: "Nations:" }), " ",
+          nat.length ? nat.map((x, i) => [i ? "; " : "", el("a", { href: inspHref(m.project.slug, "units", null, { ...inspDefaults(), nation: String(x.id) }) }, `${INSP_AGE_ABBR[x.era] || ""} ${txt(x.name)}`.trim()),
+            el("span", { class: "faint", text: ` ${x.how.join(", ")}` })]) : "none"), inspMercLinks(m, cu.mercs)],
+        figure: sheetFigure(txt(cu.name), { idle: cu.sprites && cu.sprites.idle, attack: cu.sprites && cu.sprites.attack }),
+        note: "Base values before equipment. † Cost component, not the final cost.",
+      }),
+      (cu.limitations || []).length ? techSection(`Limitations (${cu.limitations.length})`, false, el("ul", null, cu.limitations.map((x) => el("li", { text: x })))) : null);
+  }
+  // Compact hover card for a catalog unit; the asynchronous fill checks isCurrent() first.
+  function catalogUnitCard(m, id, isCurrent) {
+    const slug = m.project.slug, box = el("div", null, stateBox("loading", "Reading catalog unit..."));
+    catalogUnit(slug, id).then((cu) => {
+      if (!isCurrent()) return;
+      const r = cu.resolved || {}, st = r.stats || {};
+      const cols = [[["HP", st.hp], ["Protection", st.prot], ["Magic res", st.mr], ["Morale", st.mor]],
+        [["Strength", st.str], ["Attack", st.att], ["Defence", st.def], ["Precision", st.prec]],
+        [["Size", st.size], ["Comb. speed", st.ap], ["Map move", st.mapmove], ["Leadership", r.leadership]]];
+      const abil = [...Object.entries(r.specials || {}), ...Object.entries(r.creature_traits || {})];
+      fillKids(box,
+        el("header", { class: "sheet-head" }, el("div", { class: "sheet-title" }, el("h3", { id: `${PREVIEW_ID}-title`, text: txt(cu.name) }), el("span", { class: "sheet-type", text: "Vanilla unit" })),
+          el("div", { class: "sheet-sub", text: `#${cu.id}` })),
+        el("div", { class: "sheet-body" },
+          el("div", { class: "sheet-main" },
+            el("div", { class: "sheet-stats preview-stats" }, cols.map((col) => el("dl", null, col.map(([l, f]) => sheetStat(l, f))))),
+            r.magic ? sheetMagic(r.magic.paths, r.magic.random) : null,
+            abil.length ? sheetAbilities(abil.slice(0, 10)) : null),
+          previewSprite(cu.sprites && cu.sprites.idle ? cu.sprites.idle.url : null, `${txt(cu.name)} idle sprite`, "no sprite in this catalog")),
+        el("p", { class: "sheet-note", text: "Base values before equipment." }),
+        el("footer", { class: "sheet-foot" }, el("a", { class: "btn btn-small", href: inspHref(slug, "units", cu.id) }, "Open in catalog")));
+    }, (e) => { if (isCurrent()) fillKids(box, errorBox(e, "the catalog unit")); });
+    return box;
+  }
+  const meaningRow = (x) => [el("strong", { text: txt(x.label) }),
+    el("span", null, el("code", { text: txt(x.value) || "—" }), x.meaning ? el("span", { class: "faint", text: ` ${x.meaning}` }) : null),
+    el("span", { class: "faint" }, x.command ? el("code", { text: x.command }) : null, x.note ? ` ${x.note}` : "")];
+  function inspMerc(m, d) {
+    const slug = m.project.slug, boss = (d.labelled.find((x) => x.key === "bossname") || {}).value;
+    const fig = (ref, role) => el("figure", { class: "merc-fig" },
+      previewSprite(ref ? catalogSprite(slug, ref.id) : null, ref ? `${txt(ref.name)} sprite` : "", ref ? "no sprite in this catalog" : "none"),
+      el("figcaption", null, el("span", { class: "faint", text: `${role}: ` }), inspUnitLink(m, ref)));
+    return el("div", { class: "stack" },
+      el("section", { class: "panel merc-company" },
+        el("h3", { tabindex: "-1", text: `${txt(d.name)} (#${d.id})` }),
+        el("p", { class: "panel-note" }, "Led by ", el("strong", { text: txt(boss || "?") })),
+        el("div", { class: "merc-figs" }, fig(d.commander, "Commander"), fig(d.troop, "Troops")),
+        d.items.length ? el("p", { class: "sheet-line" }, el("span", { class: "sheet-k", text: "Commander items:" }), " ",
+          d.items.map((it, i) => [i ? ", " : "", it.id ? el("a", { class: "merc-item", href: inspHref(slug, "items", it.id) }, previewThumb(inspItemIcon(slug, it.id), "No icon"), txt(it.name))
+            : el("span", null, txt(it.name), " ", badge("name not in catalog items", "warn"))])) : null,
+        table(["Field", "Value", "Manual"], d.labelled.map(meaningRow)),
+        inspNote(d.note)));
+  }
+  function eventTokens(m, list, title) {
+    if (!list.length) return panel(title, el("p", { class: "muted", text: "None recorded." }));
+    return panel(title, table(["Raw token", "Arguments", "Event manual entry"], list.map((t) => [
+      el("code", { text: t.token }),
+      el("span", null, el("code", { text: t.args.join(" ") || "—" }), t.unit ? [" ", inspUnitLink(m, t.unit)] : null),
+      t.manual ? el("span", null, el("code", { text: `${t.manual.command} ${txt(t.manual.signature)}` }), el("span", { class: "faint", text: ` p.${txt(t.manual.page)}` }))
+        : el("span", { class: "faint", text: "no manual command with this name" })])));
+  }
+  function inspEvent(m, d) {
+    return el("div", { class: "stack" },
+      el("section", { class: "panel" },
+        el("h3", { tabindex: "-1", text: `Event #${d.id}` }),
+        el("p", { class: "panel-note" }, "Rarity ", el("code", { text: txt(d.rarity) })),
+        el("blockquote", { class: "event-descr", text: d.description || "(no description)" })),
+      eventTokens(m, d.requirements, `Requirements (${d.requirements.length})`),
+      eventTokens(m, d.effects, `Effects (${d.effects.length})`),
+      inspNote([d.name_note, d.note].filter(Boolean).join(" ")));
+  }
+  function inspItem(m, d) {
+    const slug = m.project.slug, val = (k) => (d.labelled.find((x) => x.key === k) || {}).value;
+    const facts = [];
+    if (val("type")) facts.push(txt((d.labelled.find((x) => x.key === "type") || {}).meaning || val("type")));
+    if (val("constlevel")) facts.push(`Construction ${val("constlevel")}`);
+    for (const [p, l] of [["mainpath", "mainlevel"], ["secondarypath", "secondarylevel"]]) if (val(p)) facts.push(PATH_NAMES[val(p)] ? pathNamed(val(p), ` ${txt(val(l) || "?")}`) : `${val(p)} ${txt(val(l) || "?")}`);
+    return el("div", { class: "stack" },
+      el("article", { class: "item-card" },
+        el("div", { class: "item-card-head" },
+          el("div", { class: "item-card-icon" }, d.icon ? spriteImg(inspItemIcon(slug, d.id), `${txt(d.name)} icon`, 2, el("span", { class: "muted", text: "No icon in this catalog" })) : null),
+          el("div", null, el("h2", { tabindex: "-1", text: `${txt(d.name)} (#${d.id})` }), el("p", { class: "faint" }, facts.length ? joinParts(facts) : "No forging data"))),
+        table(["Field", "Raw value"], d.labelled.map((x) => [el("strong", { text: x.label }), el("code", { text: txt(x.value) })])),
+        inspMercLinks(m, d.mercs),
+        inspNote(d.note)));
+  }
+  function inspGeneric(m, cat, d) {
+    const effects = Array.isArray(d.effects) ? d.effects : [];
+    const effCols = [...new Set(effects.flatMap((x) => Object.keys(x || {})))];
+    const row = d.catalog_row || {};
+    const pathLetter = cat === "sites" ? SITE_PATH_LETTER[row.path] : cat === "spells" ? PATH_OF_NUMBER(row.path1) : null;
+    return el("div", { class: "stack" },
+      el("section", { class: "panel" },
+        el("h3", { tabindex: "-1" }, pathLetter ? [pathIcon(pathLetter), " "] : null, `${txt(d.name)} (#${txt(d.id)})`),
+        (d.labelled || []).length ? table(["Field", "Value", "Note"], d.labelled.map((x) => [el("strong", { text: txt(x.label) }), el("code", { text: txt(x.value) }), el("span", { class: "faint", text: txt(x.note) })]))
+          : el("p", { class: "muted", text: "No labelled values." }),
+        d.summon ? el("p", null, "Summons: ", inspUnitLink(m, { id: d.summon.monster_id, name: d.summon.monster_name })) : null,
+        inspNote(d.note)),
+      effects.length ? techSection("Effect records (raw)", false, table(effCols, effects.map((x) => effCols.map((k) => el("code", { text: x[k] === undefined ? "" : typeof x[k] === "object" ? JSON.stringify(x[k]) : txt(x[k]) }))))) : null);
+  }
+
+  // ---------- mercenary companies (#newmerc, manual p.63) ----------
+  // GET .../mercs lists this project's companies with #com/#unit/#item names resolved against project and catalog
+  // definitions; POST .../mercs previews or appends one structured company through the guarded command writer.
+  // Existing companies are edited in the advanced command editor (Edit → Mercenaries).
+  const mercUrl = (slug) => `${apiBase(slug)}/mercs`;
+  const MERC_INTS = [["nrunits", "Number of troops", "#nrunits"], ["minmen", "Minimum men", "#minmen", "Recruitment of new troops starts below this many (manual p.63)."],
+    ["minpay", "Minimum pay (gold)", "#minpay"], ["xp", "Experience", "#xp", "Troops start with this; the commander has twice this amount."],
+    ["recrate", "Recruitment rate", "#recrate", "100 means one new troop per month."]];
+  // Sprite of a resolved monster: a project monster's own #spr, or the catalog sprite.
+  function mercSprite(m, cand) {
+    if (!cand) return null;
+    if (cand.origin === "catalog") return catalogSprite(m.project.slug, cand.id);
+    const u = m.monsters.find((x) => (Number.isInteger(cand.id) ? x.id === cand.id : x.source && `monster:line:${x.source.line}` === cand.key));
+    return u && u.sprites && u.sprites.idle ? u.sprites.idle.url : null;
+  }
+  function mercRef(m, res) {
+    if (!res) return el("span", { class: "muted", text: "not set" });
+    const c = res.candidates && res.candidates[0];
+    const written = el("code", { text: typeof res.written === "string" ? `"${res.written}"` : txt(res.written) });
+    if (res.status === "resolved" && c) {
+      const label = `${txt(c.name)}${Number.isInteger(c.id) ? ` (#${c.id})` : ""}`;
+      const link = c.origin === "project" ? (Number.isInteger(c.id) ? el("a", { href: route("p", m.project.slug, "units", c.id) }, label) : el("span", { text: label }))
+        : inspUnitLink(m, { id: c.id, name: c.name });
+      return el("span", null, link, " ", badge(c.origin === "project" ? "project" : "vanilla", c.origin === "project" ? "copper" : "info"));
+    }
+    if (res.status === "ambiguous") return el("span", null, written, " ", badge(`${res.candidate_count} share this name`, "warn"));
+    if (res.status === "number") return el("span", null, written, " ", badge("number; the manual documents a name", "warn"));
+    return el("span", null, written, " ", badge("unresolved", "err"));
+  }
+  function mercCard(m, st, c) {
+    const slug = m.project.slug, f = c.fields || {};
+    const lead = c.commander && c.commander.status === "resolved" ? c.commander.candidates[0] : null;
+    const troop = c.troop && c.troop.status === "resolved" ? c.troop.candidates[0] : null;
+    const facts = [f.level !== undefined ? `Level ${f.level}` : null, f.eramask !== undefined ? `Era mask ${f.eramask}` : null,
+      f.minpay !== undefined ? `min pay ${f.minpay} gold` : null].filter(Boolean);
+    return el("article", { class: "item-card merc-card", "aria-label": txt(c.name || "mercenary company") },
+      el("div", { class: "item-card-head" },
+        el("div", { class: "merc-thumbs" }, previewThumb(mercSprite(m, lead), lead ? "No sprite" : "Commander unresolved"), troop ? previewThumb(mercSprite(m, troop), "No sprite") : null),
+        el("div", null, el("h2", { text: c.name || "(unnamed company)" }),
+          el("p", { class: "faint", text: `${f.bossname ? `Led by ${f.bossname} · ` : ""}${facts.join(" · ")}` }),
+          c.closed ? null : el("p", null, badge("no #end", "err")))),
+      el("dl", { class: "kv merc-kv" },
+        el("dt", { text: "Commander" }), el("dd", null, mercRef(m, c.commander)),
+        el("dt", { text: "Troops" }), el("dd", null, c.troop ? [`${txt(f.nrunits ?? "?")} × `, mercRef(m, c.troop)] : el("span", { class: "muted", text: "none (commander only)" })),
+        f.minmen !== undefined || f.recrate !== undefined ? [el("dt", { text: "Replenishing" }), el("dd", { text: `below ${txt(f.minmen ?? "?")} men, rate ${txt(f.recrate ?? "?")}` })] : null,
+        f.xp !== undefined ? [el("dt", { text: "Experience" }), el("dd", { text: txt(f.xp) })] : null,
+        f.randequip !== undefined ? [el("dt", { text: "Random equipment" }), el("dd", { text: txt(f.randequip) })] : null,
+        c.items.length ? [el("dt", { text: "Items" }), el("dd", null, c.items.map((it, i) => {
+          const ic = it.status === "resolved" && it.candidates[0];
+          return [i ? ", " : "", ic && ic.origin === "catalog" ? el("a", { class: "merc-item", href: inspHref(slug, "items", ic.id) }, previewThumb(inspItemIcon(slug, ic.id), "No icon"), txt(ic.name))
+            : el("span", null, txt(it.written), " ", it.status === "resolved" ? badge("project", "copper") : badge(it.status, "warn"))];
+        }))] : null),
+      c.other_commands.length ? el("p", { class: "faint", text: `${c.other_commands.length} other line(s) kept as written: ${c.other_commands.map((x) => x.command).join(", ")}` }) : null,
+      el("div", { class: "btn-row" }, srcRef(slug, st.dm, c.line),
+        CSRF ? el("a", { class: "btn btn-small", href: cmdRoute(slug, "merc", c.key), "aria-label": `Advanced edit of ${txt(c.name || "this company")}: raw command lines` }, "Advanced edit") : null));
+  }
+  function viewMercs(m, arg) {
+    const slug = m.project.slug;
+    if (arg === "~new") return CSRF ? asyncView(mercUrl(slug), "mercenary options", (st) => mercForm(m, st)) : noToken();
+    return asyncView(mercUrl(slug), "mercenary companies", (st) => {
+      const list = st.companies || [];
+      // New company sits in the section's Browse/Edit bar.
+      const head = el("div", { class: "btn-row" },
+        el("a", { class: "btn btn-small btn-ghost", href: inspHref(slug, "mercs") }, "Vanilla companies"));
+      const clears = (st.clearmercs_lines || []).length ? stateBox("empty", "This mod removes all vanilla mercenary bands.",
+        el("span", null, el("code", { text: "#clearmercs" }), " at ", st.clearmercs_lines.map((l, i) => [i ? ", " : "", srcRef(slug, st.dm, l)]), " (manual p.63).")) : null;
+      return el("div", { class: "stack" }, head, clears,
+        list.length ? [el("p", { class: "faint", role: "status", text: `${list.length} compan${list.length === 1 ? "y" : "ies"}` }),
+          el("div", { class: "item-grid" }, list.map((c) => mercCard(m, st, c)))]
+          : stateBox("empty", "No mercenary companies in this project.", "Optional. Use New company to hire project or vanilla monsters."),
+        techSection(`Notes (${(st.notes || []).length})`, false, el("ul", null, (st.notes || []).map((x) => el("li", { text: x })))));
+    });
+  }
+  // One reference picker: project definitions in a select, catalog entries through the inspector search.
+  // get() returns the current pick or null; set(pick) stores one ({origin, id|key, name}). Picking never writes.
+  function mercPicker(m, o) {
+    const slug = m.project.slug, idp = o.idp, kind = o.kind;
+    const shown = el("div", { class: "merc-picked", "aria-live": "polite" });
+    const drawShown = () => {
+      const c = o.get();
+      if (!c) { fillKids(shown, el("span", { class: "faint", text: o.required ? `Required: choose a ${kind}.` : "None chosen." })); return; }
+      const src = kind === "monster" ? mercSprite(m, c) : c.origin === "catalog" ? inspItemIcon(slug, c.id) : null;
+      fillKids(shown, previewThumb(src, "No image"),
+        el("span", null, el("strong", { text: txt(c.name) }), ` ${c.origin === "catalog" ? `vanilla #${c.id}` : Number.isInteger(c.id) ? `project #${c.id}` : `project, line ${txt(c.key).split(":").pop()}`}`,
+          c.shared > 1 ? [" ", badge(`${c.shared} share this name`, "warn")] : null),
+        o.required ? null : el("button", { type: "button", class: "btn btn-small btn-ghost", "aria-label": `Clear ${o.label}`, onclick: () => { o.set(null); drawShown(); } }, "Clear"));
+    };
+    const opts = o.options || [];
+    const projSel = el("select", { class: "input", id: `${idp}-proj` }, el("option", { value: "", text: opts.length ? `Project ${kind}s (${opts.length})` : `No named project ${kind}s` }),
+      opts.map((x) => el("option", { value: x.key, text: `${txt(x.name)}${Number.isInteger(x.id) ? ` (#${x.id})` : ` (line ${x.line})`}` })));
+    projSel.disabled = !opts.length;
+    const cur = o.get();
+    if (cur && cur.origin === "project") projSel.value = cur.key;
+    projSel.addEventListener("change", () => {
+      const x = opts.find((y) => y.key === projSel.value);
+      if (x) { o.set({ origin: "project", key: x.key, id: x.id, name: x.name, shared: x.name_shared_by }); drawShown(); }
+    });
+    const q = el("input", { class: "input", type: "search", id: `${idp}-q`, maxlength: "60", autocomplete: "off", placeholder: `Vanilla ${kind} name or id` });
+    const results = el("div", { class: "merc-results", "aria-live": "polite" });
+    let seq = 0, timer = 0;
+    const search = () => {
+      const t = q.value.trim(), mine = ++seq;
+      if (!t) { fillKids(results); return; }
+      fillKids(results, stateBox("loading", "Searching the catalog..."));
+      inspGet(`${apiBase(slug)}/inspector/${kind === "monster" ? "units" : "items"}?per_page=12&q=${encodeURIComponent(t)}`).then((r) => {
+        if (mine !== seq) return;
+        fillKids(results, r.results.length ? el("ul", { class: "donor-list merc-hits", "aria-label": `Catalog ${kind}s` }, r.results.map((x) => el("li", null,
+          el("button", { type: "button", class: "btn btn-small", onclick: () => { o.set({ origin: "catalog", id: x.id, name: x.name }); projSel.value = ""; q.value = ""; fillKids(results); drawShown(); q.focus(); } },
+            previewThumb(kind === "monster" ? catalogSprite(slug, x.id) : inspItemIcon(slug, x.id), "No image"), `${x.name} (#${x.id})`))))
+          : el("p", { class: "muted", text: `No vanilla ${kind}s match.` }),
+          r.matches > r.results.length ? el("p", { class: "faint", text: `Showing ${r.results.length} of ${r.matches}; refine the search.` }) : null);
+      }, (e) => { if (mine === seq) fillKids(results, errorBox(e, `catalog ${kind}s`)); });
+    };
+    q.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(search, 250); });
+    q.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); clearTimeout(timer); search(); } });
+    drawShown();
+    return el("div", { class: "edit-field wide merc-pick", role: "group", "aria-labelledby": `${idp}-l` },
+      el("span", { class: "lbl", id: `${idp}-l`, text: `${o.label}${o.required ? "" : " (optional)"}` }), shown,
+      el("div", { class: "merc-pick-row" }, el("label", { for: projSel.id, class: "sr-only", text: `${o.label}: project ${kind}` }), projSel,
+        el("label", { for: q.id, class: "sr-only", text: `${o.label}: search vanilla ${kind}s` }), q),
+      results,
+      catalogOf(m) ? null : el("p", { class: "faint", text: "No catalog for this project: only project definitions can be chosen." }));
+  }
+  function mercForm(m, st) {
+    const slug = m.project.slug, dkey = `${slug}:merc:~new`, o = st.options || {}, maxItems = o.max_items || 4;
+    const dr = authDraft(dkey, { form: { name: "", bossname: "", commander: null, troop: null, items: [], nrunits: "", minmen: "", minpay: "", xp: "", recrate: "", randequip: "", level: "", eramask: "" } });
+    const f = dr.form;
+    const holder = el("section", { class: "panel editor creator", "aria-labelledby": "merc-h" });
+    const reload = () => { state.authData.delete(mercUrl(slug)); dr.msg = null; render(); };
+    const cancel = () => { state.authoring.delete(dkey); location.hash = route("p", slug, "mercs"); };
+    const intOf = (v) => (String(v ?? "").trim() === "" ? undefined : Number(v));
+    function problems() {
+      const out = [];
+      if (!f.name.trim()) out.push("Enter a company name.");
+      if (!f.bossname.trim()) out.push("Enter the boss name.");
+      if ([f.name, f.bossname].some((x) => x.includes('"'))) out.push("Names cannot contain double quotes.");
+      if (!f.commander) out.push("Choose a commander.");
+      for (const [k, l] of MERC_INTS) { const v = String(f[k] ?? "").trim(); if (v && !/^\d+$/.test(v)) out.push(`${l}: whole numbers only.`); }
+      if (!f.troop && intOf(f.nrunits)) out.push("Choose a troop type, or leave the number of troops empty.");
+      if (f.items.length > maxItems) out.push(`At most ${maxItems} items.`);
+      return out;
+    }
+    const refOf = (c) => (c.origin === "catalog" ? { origin: "catalog", id: c.id } : { origin: "project", key: c.key });
+    function company() {
+      const c = { name: f.name.trim(), bossname: f.bossname.trim(), commander: refOf(f.commander) };
+      if (f.troop) c.troop = refOf(f.troop);
+      for (const k of ["nrunits", "minmen", "minpay", "xp", "recrate", "randequip", "level", "eramask"]) if (intOf(f[k]) !== undefined) c[k] = intOf(f[k]);
+      if (f.items.length) c.items = f.items.map(refOf);
+      return c;
+    }
+    const countBox = statusLine("");
+    let reviewBtn = null;
+    const refresh = () => { const p = problems(); countBox.textContent = p.length ? `${p.length} to fix before review: ${p[0]}` : "Ready to review."; if (reviewBtn) reviewBtn.disabled = !!p.length; };
+    const edited = () => { dr.msg = null; dr.preview = null; refresh(); };
+    const pick = (key, label, kind, required) => mercPicker(m, { idp: `merc-${key}`, label, kind, required, options: kind === "monster" ? o.monsters : o.items,
+      get: () => f[key], set: (v) => { f[key] = v; edited(); } });
+    const textField = (k, label, hint) => labelled(`merc-${k}`, label, bindInput(el("input", { class: "input", id: `merc-${k}`, value: f[k], maxlength: "200", autocomplete: "off",
+      "aria-describedby": hint ? `merc-${k}-hint` : null }), dr, k, edited), hint);
+    const numField = (k, label, cmd, hint) => labelled(`merc-${k}`, `${label} (${cmd})`, bindInput(el("input", { class: "input num-input", id: `merc-${k}`, value: f[k], inputmode: "numeric",
+      autocomplete: "off", "aria-describedby": `merc-${k}-hint` }), dr, k, edited), hint || "Optional; empty leaves the game default.");
+    const choiceField = (k, label, cmd, list, hint) => {
+      const s = el("select", { class: "input", id: `merc-${k}`, "aria-describedby": `merc-${k}-hint` }, el("option", { value: "", text: "Not set (game default)" }),
+        (list || []).map((x) => el("option", { value: String(x.value), text: x.label })));
+      s.value = String(f[k] ?? "");
+      return labelled(`merc-${k}`, `${label} (${cmd})`, bindInput(s, dr, k, edited), hint);
+    };
+    function itemsGroup() {
+      const list = el("ul", { class: "plain-list merc-items" }, f.items.map((it, i) => el("li", null, previewThumb(it.origin === "catalog" ? inspItemIcon(slug, it.id) : null, "No icon"),
+        el("span", { text: ` ${txt(it.name)} ${it.origin === "catalog" ? `(vanilla #${it.id})` : "(project)"} ` }),
+        el("button", { type: "button", class: "btn btn-small btn-ghost", "aria-label": `Remove ${txt(it.name)}`, onclick: () => { f.items.splice(i, 1); edited(); redraw("#merc-item-q"); } }, "Remove"))));
+      const adder = f.items.length < maxItems ? mercPicker(m, { idp: "merc-item", label: "Add an item", kind: "item", required: false, options: o.items,
+        get: () => null, set: (v) => { if (v) { f.items.push(v); edited(); redraw("#merc-item-q"); } } })
+        : el("p", { class: "faint", text: `The manual allows at most ${maxItems} items per band.` });
+      return el("fieldset", { class: "edit-group" }, el("legend", { text: `Commander items (#item, ${f.items.length} of ${maxItems})` }),
+        f.items.length ? list : el("p", { class: "faint", text: "No items (optional)." }), adder);
+    }
+    function redraw(focusSel) {
+      const head = el("h3", { id: "merc-h", tabindex: "-1", text: "New mercenary company" });
+      const busy = dr.msg && dr.msg.kind === "busy" ? stateBox("loading", dr.msg.text) : null;
+      const err = dr.msg && dr.msg.kind === "err" ? writeError(dr.msg.err, reload) : null;
+      if (dr.phase === "review" && dr.preview) {
+        const r = dr.preview, rv = r.resolved || {};
+        const written = [`Commander written as "${txt(rv.commander && rv.commander.name)}"`, rv.troop ? `troops as "${txt(rv.troop.name)}"` : null,
+          ...(rv.items || []).map((x) => `item "${txt(x.name)}"`)].filter(Boolean).join("; ") + ".";
+        fillKids(holder, head, busy, err,
+          reviewBlock({ ...r, explanation: [...(r.explanation || []), written] }, "Create company",
+            () => runWrite(dr, mercUrl(slug), { expected_sha256: st.sha256, company: company() }, false, redraw, (res) => {
+              state.authoring.delete(dkey); invalidateAuth(slug);
+              afterWrite(slug, route("p", slug, "mercs"), "Mercenary company saved. Backup kept.", res || {}, `Created mercenary company ${txt(dr.form && dr.form.name) || ""}`.trim());
+            }), () => { dr.phase = "edit"; dr.preview = null; redraw(REVIEW_TRIGGER); }));
+        focusIn(holder, focusSel);
+        return;
+      }
+      reviewBtn = el("button", { type: "submit", class: "btn", ...RT }, "Review new company");
+      fillKids(holder, head, err, busy,
+        el("p", { class: "panel-note" }, "Adds one ", el("code", { text: "#newmerc" }), " block to the end of the .dm. Commander, troops and items are written by name. New monsters it uses need their own artwork."),
+        el("form", { class: "edit-form", novalidate: true, onsubmit: (e) => { e.preventDefault(); if (!problems().length) runWrite(dr, mercUrl(slug), { expected_sha256: st.sha256, company: company() }, true, redraw); } },
+          el("fieldset", { class: "edit-group" }, el("legend", { text: "Company" }),
+            el("div", { class: "grid-2" }, textField("name", "Company name (#name)"), textField("bossname", "Boss name (#bossname)", "Name of the band's leader."))),
+          el("fieldset", { class: "edit-group" }, el("legend", { text: "Leader and troops" }),
+            pick("commander", "Commander (#com)", "monster", true),
+            pick("troop", "Troop type (#unit)", "monster", false),
+            el("div", { class: "grid-2" }, MERC_INTS.map(([k, l, c, h]) => numField(k, l, c, h)))),
+          el("fieldset", { class: "edit-group" }, el("legend", { text: "Availability and equipment" }),
+            el("div", { class: "grid-2" }, choiceField("level", "Level", "#level", o.levels, "When the band appears (manual p.63)."),
+              choiceField("eramask", "Era mask", "#eramask", o.eramasks, "Default: all eras."),
+              choiceField("randequip", "Random equipment", "#randequip", o.randequip, "How powerful the commander's random magic equipment is."))),
+          itemsGroup(),
+          el("div", { class: "btn-row edit-actions" }, reviewBtn, el("button", { type: "button", class: "btn btn-ghost", onclick: cancel }, "Cancel"), countBox)),
+        el("p", { class: "faint" }, "Other lines, or changes to an existing company: ", el("a", { href: cmdRoute(slug, "merc") }, "advanced mercenary editor"), " (keeps unknown lines as written)."));
+      refresh();
+      focusIn(holder, focusSel);
+    }
+    escapeReview(holder, () => dr.phase === "review", () => { dr.phase = "edit"; redraw(REVIEW_TRIGGER); });
+    redraw(dr.msg && dr.msg.kind === "err" ? "[data-focus=err]" : null);
+    return el("div", { class: "stack" }, el("p", null, el("a", { href: route("p", slug, "mercs") }, "← Mercenary companies")), holder);
   }
 
   // ---------- preview cards (one shared, bounded hover / focus card) ----------
@@ -5088,8 +6797,7 @@
       el("p", { class: "sheet-note", text: `Base values before equipment; "?" is unresolved, not zero. † raw cost component; ≈ estimate.${project ? " Underlined = set in this .dm." : " Catalog data via the browser resolver; it may differ from the installed game."}` }),
       el("footer", { class: "sheet-foot" },
         project && mo ? el("a", { class: "btn btn-small", href: route("p", slug, "units", mo.id ?? mo.uid) }, "Open full unit sheet")
-          : Number.isInteger(bu.id) ? [el("a", { class: "btn btn-small btn-ghost", href: `${apiBase(slug)}/catalog-units/${bu.id}`, target: "_blank", rel: "noopener" }, "Catalog unit JSON"),
-            el("span", { class: "faint", text: "Catalog units have no sheet page; compare one from a project unit." })] : null)];
+          : Number.isInteger(bu.id) ? el("a", { class: "btn btn-small", href: inspHref(slug, "units", bu.id) }, "Open in catalog") : null)];
   }
 
   // Project magic items: forging requirements and description from authored commands; other commands are listed as written.
@@ -5117,7 +6825,7 @@
     if (itemArg(d, "spr") !== null) return null;
     const c = itemArg(d, "copyspr");
     const id = c !== null ? (/^\d{1,4}$/.test(c) ? Number(c) : null) : /^#selectitem$/i.test(txt(d.opener)) && Number.isInteger(d.id) ? d.id : null;
-    return id && id > 0 && id < 10000 ? { url: `/api/item-icons/${id}.png`, id } : null;
+    return id && id > 0 && id < 10000 ? { url: `${iconScope.base}/item-icons/${id}.png`, id } : null;
   }
   const itemIcon = (m, d) => { const assets = itemSpriteAssets(m, d); return { assets, a: assets.find((x) => x.status !== "missing" && x.browser_preview) || null, cat: assets.length ? null : catalogItemIcon(d) }; };
   const itemIconMissing = (assets) => assets.length ? "icon file missing" : "no custom icon (#spr)";
@@ -5144,9 +6852,10 @@
   }
   function balItems(m) {
     const items = otherOfKind(m, "item"), slug = m.project.slug;
-    const note = el("p", { class: "panel-note", text: "Project-wide, not filtered by nation. Forging and effects are the authored commands as written; the browser does not interpret them, and values inherited by #selectitem or #copyitem are not reconstructed." });
-    if (!items.length) return panel("Project magic items", stateBox("empty", "No magic items in this project.", "No #newitem / #selectitem blocks were parsed from the .dm."), note);
-    return panel(`Project magic items (${items.length})`,
+    const note = el("div", { class: "panel-note" }, el("p", { text: "All project items, shown as authored." }), el("details", null, el("summary", null, "Details"),
+      el("p", { text: "Not filtered by nation. Forging and effects are not interpreted, and values inherited by #selectitem or #copyitem are not reconstructed." })));
+    if (!items.length) return techSection("Project magic items (0)", false, stateBox("empty", "No magic items in this project.", "No #newitem / #selectitem blocks were parsed from the .dm."), note);
+    return techSection(`Project magic items (${items.length})`, false,
       table(["Item", "Slot", "Forging", "Authored effects", "Source"], items.map((d) => {
         const name = txt(d.name) || `${d.opener} ${txt(d.id ?? d.selector ?? "")}`, { assets, a, cat } = itemIcon(m, d), fx = itemEffects(d), inh = itemInherits(d);
         const build = () => itemPreview(m, d);
@@ -5329,6 +7038,21 @@
       project ? balSummons(m, n.summons || []) : null,
       n.note ? el("p", { class: "panel-note bal-panel-note", text: txt(n.note) }) : null];
   }
+  // The report's recruit counts beside the Units classification for the same nation. A difference is shown, never hidden:
+  // the report is then labelled incomplete (for example a server started before terrain and coastal recruitment were read).
+  function balRosterCheck(m, n) {
+    const nation = m.nations.find((x) => x.uid === n.uid);
+    if (!nation) return null;
+    const rc = rosterCounts(m, nation), units = n.units || [];
+    const rep = { troop: units.filter((u) => u.role === "troop").length, commander: units.filter((u) => u.role === "commander").length };
+    const same = rep.troop === rc.troop && rep.commander === rc.commander;
+    const outside = rosterSummary(rc, ["hero", "summon", "other", "pretender"]);
+    return el("p", { class: "bal-roster" },
+      same ? null : [badge("incomplete", "warn"), " "],
+      `Compared here: ${rosterWord("troop", rep.troop)} · ${rosterWord("commander", rep.commander)}.`,
+      same ? null : ` Units lists ${rosterWord("troop", rc.troop)} · ${rosterWord("commander", rc.commander)}; restart \`kosmokrator serve\` from this checkout and reload.`,
+      outside ? el("span", { class: "faint" }, ` Not compared: ${outside} (see `, el("a", { href: routeNation(nationKey(nation), "p", m.project.slug, "units") }, "Units"), ").") : null);
+  }
   function balPicker(m, rep, refs) {
     const slug = m.project.slug, sel = rep.selection || {}, avail = sel.available_nations || [];
     const chosen = new Set(refs || sel.requested || []);
@@ -5509,7 +7233,7 @@
       const yLabel = stat.options[stat.selectedIndex].text, xLabel = costAxis.options[costAxis.selectedIndex].text;
       if (points.length) drawSvg();
       else { artNote.hidden = true; fillKids(plot, stateBox("empty", "No resolved values for this chart.", "Choose another metric or reference nation. Unknown values are not plotted as zero.")); }
-      summary.textContent = `${points.length} units plotted; ${omitted} omitted because the selected cost or metric is unresolved. Each unit is its sprite at its exact value, framed in its nation colour; the corner mark is the nation's shape (squares: project, other shapes: catalog). A +N badge means N other units overlap there; their cards list one another and the data table has every value. Costs and equipment values are components or estimates, not guaranteed final in-game prices.`;
+      summary.textContent = `${points.length} unit${points.length === 1 ? "" : "s"} plotted; ${omitted} omitted (unresolved).`;
       fillKids(dataTable, table(["Nation / source", "Unit", statLabel(costAxis.value, xLabel), statLabel(stat.value === "protection" ? "prot" : stat.value, yLabel)], points.map((p) => [balSeriesLabel(p),
         p.project ? attachPreview(el("a", { href: route("p", m.project.slug, "units", p.u.id), text: p.u.name }), txt(p.u.name), (isCurrent) => unitPreview(m, p.u, true, isCurrent))
           : attachPreview(el("span", { text: p.u.name }), txt(p.u.name), (isCurrent) => unitPreview(m, p.u, false, isCurrent)), numCell(p.gold), numCell(p.y)])));
@@ -5524,15 +7248,18 @@
       el("div", { class: "balance-dashboard" },
         el("section", { class: "panel" }, balHead("Roster comparison"),
           el("div", { class: "bal-controls" }, balControl("balance-count-metric", "Compare", metricSelect)), bars,
-          el("p", { class: "panel-note bal-panel-note", text: "Counts reflect recruitment links the static model resolves. Terrain recruitment may be incomplete. Counts measure variety, not army strength." })),
+          el("p", { class: "panel-note bal-panel-note", text: "Counts show variety, not army strength. Project: fort, start-site, terrain and coastal recruits. Catalog: fort, non-fort, coastal and capital-site tables; other special recruitment is not reconstructed." })),
         el("section", { class: "panel" }, balHead("Fixed magic access"), magicTable,
-          el("p", { class: "panel-note bal-panel-note", text: "Highest fixed path per recruit; maxima can belong to different units. Randoms, boosters and recruitment time are excluded. H includes priests. Shading uses a five-level scale; numbers are authoritative." }))),
+          el("p", { class: "panel-note bal-panel-note", text: "Highest fixed magic per recruit (H includes priests); randoms and boosters are excluded." }))),
       el("section", { class: "panel" }, balHead("Cost and capability"),
         el("div", { class: "bal-controls" }, balControl("balance-chart-role", "Roster", role),
           balControl("balance-chart-cost", "Horizontal axis", costAxis), balControl("balance-chart-stat", "Vertical axis", stat)),
         el("ul", { class: "balance-legend", "aria-label": "Nations" }, nations.map((p) => el("li", null, balSeriesLabel(p)))),
         plot,
-        el("div", { class: "bal-chart-foot" }, summary, artNote),
+        el("div", { class: "bal-chart-foot" }, summary, artNote,
+          el("p", { class: "panel-note", text: "Unresolved values are left out, never plotted as zero. Costs and equipment values are components or estimates (≈), not final in-game prices." })),
+        el("details", { class: "raw tech" }, el("summary", { text: "How to read this chart" }), el("div", { class: "inner" },
+          el("p", { class: "panel-note", text: "Each unit is its sprite at its exact value, framed in its nation colour; the corner mark is the nation's shape (squares: project, other shapes: catalog). A +N badge means N other units overlap there; their cards list one another." }))),
         el("details", { class: "raw tech" }, el("summary", { text: "Chart data — exact values" }), el("div", { class: "inner" }, dataTable))));
   }
   function viewBalance(m) {
@@ -5544,7 +7271,7 @@
       return [
         el("div", { class: "bal-intro" },
           el("div", null, el("h2", { text: "Balance comparison" }),
-            el("p", { class: "muted", text: "Charts and source tables for design review, against same-era reference nations. There is no power score; test in Dominions 6." })),
+            el("p", { class: "muted", text: "Compared with same-era vanilla nations. No power score; test in game." })),
           el("dl", { class: "bal-key", "aria-label": "How to read costs and values" },
             el("dt", { text: "†" }), el("dd", { text: "Raw cost component as written (gold, resources, recruitment points); auto+N is an autocalc base." }),
             el("dt", { class: "est", text: "≈" }), el("dd", { text: "Labelled estimate, where supported." }),
@@ -5552,20 +7279,13 @@
         balPicker(m, rep, refs),
         (rep.warnings || []).length ? el("ul", { class: "diag bal-warnings" }, rep.warnings.map((w) => el("li", null, badge("check", "warn"), " ", el("span", { text: txt(w) })))) : null,
         state.nation.key === N_NONE ? stateBox("empty", "Balance is per nation.", "Showing every project nation; choose one above to focus.") : null,
-        all.length ? el("section", { class: "panel" }, balHead("At a glance"),
-          el("div", { class: "table-wrap" }, el("table", { class: "bal-glance" },
-            el("thead", null, el("tr", null, ["Nation", "Source"].map((h) => el("th", { scope: "col", text: h })),
-              ["Era", "Troops", "Commanders", "Mages"].map((h) => el("th", { scope: "col", class: "num", text: h })), el("th", { scope: "col", text: "Fixed magic maxima" }))),
-            el("tbody", null, all.map((p) => el("tr", null,
-              el("td", null, el("span", { class: "bal-series" }, balKey(p), el("strong", { text: p.name }))),
-              el("td", null, p.project ? badge("this project", "authored") : badge("catalog", "copper")),
-              numCell(txt(p.n.era)),
-              numCell(txt((p.n.units || []).filter((u) => u.role === "troop").length)), numCell(txt((p.n.units || []).filter((u) => u.role === "commander").length)),
-              numCell(txt(((p.n.magic_access || {}).recruitable_mages || []).length)), el("td", null, balMaxima(p.n.magic_access))))))),
-          el("p", { class: "panel-note bal-panel-note", text: "Counts are recruitable entries in this static reading. Maxima can belong to different recruits; random access and capital-only units are listed per unit below." })) : null,
         balanceDashboard(m, all),
+        // Detailed tables follow the charts, collapsed; each project nation keeps its roster cross-check visible.
+        el("h3", { class: "bal-tables-title", text: "Detailed tables" }),
         pn.length ? pn.map((n) => el("section", { class: "panel" },
-          balHead(`${txt(n.name)}`, `This project${n.era ? `, era ${n.era}` : ""} · recruitable roster`), balNationBlock(m, n, true)))
+          balHead(`${txt(n.name)}`, `This project${n.era ? `, era ${n.era}` : ""}`), balRosterCheck(m, n),
+          el("details", { class: "raw tech" }, el("summary", null, `Recruitable roster, magic and summons (${(n.units || []).length} recruits)`),
+            el("div", { class: "inner stack" }, balNationBlock(m, n, true)))))
           : stateBox("empty", "No project nation in this selection."),
         balItems(m),
         refsN.map((n) => el("details", { class: "raw tech" }, el("summary", null, `${txt(n.name)}${n.epithet ? `, ${txt(n.epithet)}` : ""} (catalog #${n.id}, era ${txt(n.era)}) - ${(n.units || []).length} unit(s)`),
@@ -5618,10 +7338,11 @@
   // Look images are fetched once per revision as blobs: the API sends no-store and selection redraws would refetch them.
   const mapLookImgs = new Map();
   const draftSize = (dr) => Object.values(dr.edits).reduce((s, b) => s + bucketSize(b), 0);
+  // Problems as badges; a clean map reads as plain text.
   function mapValBadge(v) {
     if (!v) return badge("not validated", "warn");
     const e = countOf(v.errors) || 0, w = countOf(v.warnings) || 0;
-    return e ? badge(`${e} error${e === 1 ? "" : "s"}`, "err") : w ? badge(`${w} warning${w === 1 ? "" : "s"}`, "warn") : badge("no errors", "ok");
+    return e ? badge(`${e} error${e === 1 ? "" : "s"}`, "err") : w ? badge(`${w} warning${w === 1 ? "" : "s"}`, "warn") : el("span", { class: "muted", text: "No errors" });
   }
   function mapIssues(v, empty) {
     const items = (v && v.issues) || [];
@@ -5772,13 +7493,12 @@
     return asyncView(mapsUrl(slug), "maps", (st) => {
       const maps = st.maps || [];
       return [
-        el("div", { class: "btn-row" }, CSRF ? el("a", { class: "btn", href: mapRoute(slug, "~import") }, "Import map files") : noToken(),
-          el("span", { class: "faint", text: `${maps.length} map(s) in this project` })),
-        maps.length ? table(["Map", "Planes", "Provinces", "Revision", "Validation"], maps.map((x) => {
+        el("div", { class: "btn-row" }, CSRF ? el("a", { class: "btn", href: mapRoute(slug, "~import") }, "Import") : noToken()),
+        maps.length ? table(["Map", "Planes", "Provinces", "Validation"], maps.map((x) => {
           const dr = state.maps.get(`${slug}:${x.id}`);
-          return [el("span", null, el("a", { href: mapRoute(slug, x.id) }, txt(x.title || x.id)), " ", el("code", { class: "faint", text: txt(x.id) }),
+          return [el("span", null, el("a", { href: mapRoute(slug, x.id), title: `${txt(x.id)} · revision ${shortRev(x.revision)}` }, txt(x.title || x.id)),
             dr && draftSize(dr) ? [" ", badge("unsaved", "warn")] : null),
-          txt(countOf(x.planes)), txt(countOf(x.provinces)), el("span", { class: "hash", title: txt(x.revision), text: shortRev(x.revision) }), mapValBadge(x.validation)];
+          txt(countOf(x.planes)), txt(countOf(x.provinces)), mapValBadge(x.validation)];
         })) : stateBox("empty", "No maps yet.", CSRF ? "Import a .map with its image files to view and edit it here, or create one with an agent below." : ""),
         mapBuildsSection(m)];
     });
@@ -5818,13 +7538,14 @@
   function mapBuildsSection(m) {
     const slug = m.project.slug, dr = mbDraft(slug), url = mbUrl(slug);
     const holder = el("div", { class: "inner stack", id: `mb-${slug}` });
+    escapeReview(holder, () => dr.phase === "review" && !(dr.msg && dr.msg.kind === "busy"), () => { dr.phase = "edit"; dr.preview = null; draw(REVIEW_TRIGGER); });
     const box = el("details", { class: "raw tech map-builds", open: dr.open || null },
       el("summary", { "data-mb-summary": "" }, "Create with an agent", dr.st ? el("span", { class: "faint", text: ` · ${(dr.st.jobs || []).length} job(s)` }) : null), holder);
     async function load(focus) {
       dr.loading = true; dr.err = null; draw();
       try {
         dr.st = (await getJSON(url)).result;
-        if (!dr.brief) dr.brief = Object.fromEntries(Object.entries(dr.st.defaults || {}).map(([k, v]) => [k, typeof v === "number" ? String(v) : v]));
+        if (!dr.brief) { dr.brief = Object.fromEntries(Object.entries(dr.st.defaults || {}).map(([k, v]) => [k, typeof v === "number" ? String(v) : v])); dr.briefBase = JSON.stringify(dr.brief); }
       } catch (e) { dr.err = e; }
       dr.loading = false; draw(focus);
     }
@@ -5864,7 +7585,7 @@
           labelled("mb-theme", "Theme and geography notes", theme, "Optional. Passed to the agent as written.", errs.theme),
           el("div", { class: "edit-grid" }, check("wraparound", "Wraparound", "Full wrapping when ticked."),
             check("all_layers", "All seasonal and terrain layers", "Base, winter and eight terrain looks in both seasons (18 images per plane)."))),
-        el("div", { class: "btn-row edit-actions" }, el("button", { type: "submit", class: "btn", disabled: busy || null }, "Preview brief"),
+        el("div", { class: "btn-row edit-actions" }, el("button", { type: "submit", class: "btn", disabled: busy || null, ...RT }, "Preview brief"),
           statusLine("Nothing is written until you create the job.")));
     }
     function briefReview() {
@@ -5879,14 +7600,15 @@
             dr.msg = { kind: "busy", text: "Creating job..." }; draw();
             try {
               const res = await post({ action: "create", preview: false, brief: mbBody(dr.brief) });
-              dr.st = res.state || dr.st; dr.phase = "edit"; dr.preview = null; dr.showErrors = false;
+              dr.st = res.state || dr.st; dr.phase = "edit"; dr.preview = null; dr.showErrors = false; dr.briefBase = JSON.stringify(dr.brief);
               dr.msg = { kind: "ok", text: `Job ${txt(res.job && res.job.id)} created. Hand the instructions below to Codex or Claude.` };
               if (res.job) dr.jobs[res.job.id] = { ...(dr.jobs[res.job.id] || {}), open: true };
               if (!res.state) await load(); else draw(res.job ? `[data-mb-job="${res.job.id}"]` : null);
+              recordReceipt(slug, `Created map job ${txt(res.job && res.job.id)}`, { written: true }, { backupNote: "Not needed: a job writes only its own new brief" });
               toast("Map job created");
             } catch (er) { dr.msg = { kind: "err", err: er }; draw("[data-focus=err]"); }
           } }, "Create job"),
-          el("button", { type: "button", class: "btn btn-ghost", disabled: busy || null, onclick: () => { dr.phase = "edit"; dr.preview = null; draw("#mb-map_id"); } }, "Back to the brief")));
+          el("button", { type: "button", class: "btn btn-ghost", disabled: busy || null, onclick: () => { dr.phase = "edit"; dr.preview = null; draw(REVIEW_TRIGGER); } }, "Back to the brief")));
     }
     function reviewReport(job, jd) {
       const r = jd.review, comp = r.compliance || [];
@@ -5912,12 +7634,14 @@
           jd.done = res; jd.accept = null; jd.review = null;
           // Refresh the accepted status and revision before another job operation.
           await load();
-          state.authData.delete(mapsUrl(slug)); toast("Map imported");
+          state.authData.delete(mapsUrl(slug));
+          recordReceipt(slug, `Imported map ${txt((res.import || {}).id || job.brief.map_id)} from job ${txt(job.id)}`, res.import || res);
+          toast("Map imported");
           render();
         } catch (er) { jd.msg = { kind: "err", err: er }; draw("[data-focus=err]"); }
       };
       if (!a) return el("div", { class: "btn-row" },
-        el("button", { type: "button", class: "btn", disabled: !r.ready || busy || !CSRF || null, onclick: () => run(true) }, "Preview import as new map"),
+        el("button", { type: "button", class: "btn", disabled: !r.ready || busy || !CSRF || null, "data-mb-accept": job.id, onclick: () => run(true) }, "Preview import as new map"),
         r.ready ? null : el("span", { class: "faint", text: "Fix the failed checks in the output folder, then review again." }));
       const imp = a.import || {};
       return el("div", { class: "stack" },
@@ -5929,7 +7653,7 @@
         el("p", { class: "panel-note", text: "Import adds a new map bundle under the project. An existing map with this id is never overwritten; the import is refused instead." }),
         el("div", { class: "btn-row" },
           el("button", { type: "button", class: "btn", disabled: busy || null, onclick: () => run(false) }, "Import as new map"),
-          el("button", { type: "button", class: "btn btn-ghost", disabled: busy || null, onclick: () => { jd.accept = null; draw(); } }, "Back")));
+          el("button", { type: "button", class: "btn btn-ghost", disabled: busy || null, onclick: () => { jd.accept = null; draw(`[data-mb-accept="${job.id}"]`); } }, "Back")));
     }
     function jobCard(job) {
       const jd = dr.jobs[job.id] || (dr.jobs[job.id] = { open: false, review: null, accept: null, msg: null, done: null });
@@ -5978,8 +7702,7 @@
       const msg = !dr.msg ? null : dr.msg.kind === "err" ? errOf(dr.msg.err, () => reload("#mb-map_id"))
         : dr.msg.kind === "ok" ? el("p", { class: "edit-ok", role: "status", text: dr.msg.text }) : stateBox("loading", dr.msg.text);
       fillKids(holder,
-        el("p", { class: "panel-note", text: txt(dr.st.note) || "Agents build the map in the job's output folder; review, then import it as a new map." }),
-        el("p", { class: "faint", text: "This page does not draw maps, generate images or run an AI model. Codex or Claude do the work through the Kosmokrator CLI/MCP and the output folder." }),
+        el("p", { class: "panel-note", text: txt(dr.st.note) || "An agent builds the map through the Kosmokrator CLI or MCP; review it here, then import it as a new map." }),
         loadingNote(),
         msg,
         el("h4", { tabindex: "-1", "data-mb-jobs": "", text: `Jobs (${jobs.length})` }),
@@ -6006,6 +7729,7 @@
       look: "default", winter: false, whole: false, conns: false }));
     if (!planes.some((p) => p.number === dr.plane) && planes.length) dr.plane = planes[0].number;
     const holder = el("div", { class: "stack map-editor" });
+    escapeReview(holder, () => dr.phase === "review" && !!dr.preview, () => { dr.phase = "edit"; dr.preview = null; redraw(`#${idp}-review`); });
     const byCmd = new Map((data.commands || []).map((c) => [mapCmd(c.command), c]));
     const kinds = (data.border_types || []).map((k) => [Number(k.value), txt(k.label)]);
     if (!kinds.some(([v]) => v === 0)) kinds.unshift([0, "Normal"]);
@@ -6060,6 +7784,7 @@
       runWrite(dr, `${url}/edit`, { expected_revision: data.revision, plane: dr.plane, changes: r.changes }, preview, redraw, (res) => {
         delete dr.edits[dr.plane]; dr.phase = "edit"; dr.preview = null; dr.base = res && res.revision;
         invalidateAuth(slug);
+        recordReceipt(slug, `Saved map ${txt(data.id || data.map_id || "")} plane ${dr.plane}`.replace(/ {2,}/g, " "), res);
         toast(res && res.backup ? `Map saved. Backup: ${res.backup}` : "Map saved.");
         render();
       });
@@ -6074,14 +7799,14 @@
       };
       return el("div", { class: "map-export stack" },
         el("div", { class: "btn-row" },
-          el("button", { type: "button", class: "btn btn-small", disabled: !CSRF || ex.busy || null, onclick: run }, ex.busy ? "Exporting…" : `Export map package (${shortRev(data.revision)})`),
+          el("button", { type: "button", class: "btn btn-small", disabled: !CSRF || ex.busy || null, onclick: run }, ex.busy ? "Exporting…" : "Export map"),
           draftSize(dr) ? el("span", { class: "faint", text: "Unsaved draft changes are not included." }) : null),
         ex.busy ? stateBox("loading", "Packaging the saved map...") : null,
         e ? el("div", { class: "state state-error", role: "alert", id: `${idp}-xout`, tabindex: "-1" }, el("strong", { text: "Not exported." }),
           el("div", null, el("span", { class: "code", text: `[${txt(e.code)}] ` }), txt(e.message)),
           ex.error.status === 409 ? el("div", { class: "btn-row" }, el("button", { type: "button", class: "btn btn-small", onclick: () => { ex.error = null; reload(); } }, "Reload saved map")) : null) : null,
         r ? el("div", { class: "stack", id: `${idp}-xout`, tabindex: "-1", role: "status" },
-          el("p", null, el("strong", { text: "Map package written." }), " ", r.revision === data.revision ? badge("this revision", "ok") : badge(`revision ${shortRev(r.revision)}`, "warn")),
+          el("p", null, el("strong", { text: "Map package written." }), r.revision === data.revision ? null : [" ", badge(`revision ${shortRev(r.revision)}`, "warn")]),
           (r.files || []).length ? el("ul", { class: "plain-list chips" }, r.files.map((f) => el("li", null, el("code", { text: txt(typeof f === "string" ? f : f.name || f.path) })))) : null,
           el("div", { class: "btn-row" }, apiUrl(r.url) ? el("a", { class: "btn", href: r.url, download: "" }, "Download ZIP") : el("span", { class: "faint", text: "The server returned no download link." })),
           el("p", { class: "panel-note", text: "A separate map package; nothing is installed. In Dominions 6, enable this mod and its dependencies in their listed order when you play the map." })) : null);
@@ -6094,15 +7819,13 @@
       return el("section", { class: "panel map-head", "aria-labelledby": `${idp}-h` },
         el("p", { class: "faint" }, el("a", { href: mapRoute(slug) }, "All maps")),
         el("h3", { id: `${idp}-h`, text: txt(data.title || data.id) }),
-        el("dl", { class: "kv" },
-          el("dt", { text: "Map id" }), el("dd", { class: "mono", text: txt(data.id) }),
-          el("dt", { text: "Revision" }), el("dd", null, el("span", { class: "hash", title: txt(data.revision), text: shortRev(data.revision) })),
-          el("dt", { text: "Validation" }), el("dd", null, mapValBadge(data.validation))),
+        el("p", null, mapValBadge(data.validation), " ",
+          el("span", { class: "faint", title: `Revision ${txt(data.revision)}` }, el("code", { text: txt(data.id) }), ` · revision ${shortRev(data.revision)}`)),
         el("div", { class: "btn-row" }, planeSel,
           apiUrl(data.source_url) ? el("a", { class: "btn btn-small btn-ghost", href: `${data.source_url}?plane=${dr.plane}`, target: "_blank", rel: "noopener" }, "Open .map source") : null),
         draftSize(dr) && dr.base !== data.revision ? el("p", { class: "panel-note", role: "note" }, badge("revision changed", "warn"),
           " The map changed after this draft started. Review again before saving.") : null,
-        techSection("Export map package", !!(dr.exp.result || dr.exp.error || dr.exp.busy), exportSection()));
+        techSection("Export", !!(dr.exp.result || dr.exp.error || dr.exp.busy), exportSection()));
     }
     // Terrain-look preview: local to this page, never part of the draft. #pb rows (x, y counted from the bottom,
     // length, province) are the same authoritative ownership the server uses for province positions.
@@ -6160,7 +7883,7 @@
           dr.sel != null ? [el("dt", { text: "Province area" }), el("dd", { text: rects.length
             ? `${rects.length} #pb row(s) for province ${provLabel(dr.sel)}; the look is clipped to them${dr.whole ? " unless Whole map is on" : ""}.`
             : `Province ${provLabel(dr.sel)} has no #pb rows.` })] : null),
-        el("p", { class: "faint", text: "Terrain looks and their winter images follow the Map Making Manual (Terrain Graphics). Previews are local to this page." }));
+        el("p", { class: "faint", text: "Terrain previews follow the Map Making Manual." }));
     }
     function lookLayer(lk, W, H) {
       const src = lk && lk.c && lk.c.src;
@@ -6516,8 +8239,9 @@
         r.diff ? diffView(txt(r.diff), "Exact change to the .map (diff)") : el("p", { class: "faint", text: "No text change." }),
         errs ? el("p", { class: "field-err", text: "Fix the validation errors before saving." }) : null,
         el("div", { class: "btn-row" },
-          el("button", { type: "button", class: "btn", disabled: errs || !r.diff || busy || null, onclick: () => send(false) }, "Save map"),
-          el("button", { type: "button", class: "btn btn-ghost", onclick: () => { dr.phase = "edit"; dr.preview = null; redraw(`#${idp}-review`); } }, "Back to editing")),
+          r.diff ? el("button", { type: "button", class: "btn", disabled: errs || busy || null, onclick: () => send(false) }, "Save map")
+            : el("span", { class: "muted", text: "Nothing to save on this plane." }),
+          el("button", { type: "button", class: r.diff ? "btn btn-ghost" : "btn", onclick: () => { dr.phase = "edit"; dr.preview = null; redraw(`#${idp}-review`); } }, "Back to editing")),
         el("p", { class: "panel-note", text: "Saved against the revision this page loaded, with a backup. Static checks only; test the map in Dominions 6." }));
     }
     function redraw(focusSel) {
@@ -6549,6 +8273,7 @@
     const slug = m.project.slug, url = `${mapsUrl(slug)}/import`;
     const dr = draftOf(state.mapImports, slug, () => ({ id: "", main: "", files: [], phase: "edit", preview: null, msg: null, showErrors: false, done: null, reading: 0, note: "" }));
     const holder = el("section", { class: "panel editor creator", "aria-labelledby": "mimp-h" });
+    escapeReview(holder, () => dr.phase === "review", () => { dr.phase = "edit"; dr.preview = null; redraw(REVIEW_TRIGGER); });
     const isMap = (f) => /\.map$/i.test(f.name);
     function problems() {
       const o = {}, id = dr.id.trim();
@@ -6606,9 +8331,10 @@
           bad ? el("p", { class: "panel-note", text: "Correct the map's validation errors before importing." }) : null,
           el("div", { class: "btn-row" },
             el("button", { type: "button", class: "btn", disabled: bad || null, onclick: () => runWrite(dr, url, body(), false, redraw, (res) => {
-              dr.done = res || {}; dr.phase = "edit"; state.authData.delete(mapsUrl(slug)); redraw("[data-focus=done]"); toast("Map imported");
+              dr.done = res || {}; dr.phase = "edit"; state.authData.delete(mapsUrl(slug)); redraw("[data-focus=done]");
+              recordReceipt(slug, `Imported map ${txt((res || {}).id || r.id)}`, res || {}); toast("Map imported");
             }) }, "Import"),
-            el("button", { type: "button", class: "btn btn-ghost", onclick: () => { dr.phase = "edit"; dr.preview = null; redraw("#mimp-files"); } }, "Back to the form"))));
+            el("button", { type: "button", class: "btn btn-ghost", onclick: () => { dr.phase = "edit"; dr.preview = null; redraw(REVIEW_TRIGGER); } }, "Back to the form"))));
         focusIn(holder, focusSel);
         return;
       }
@@ -6644,7 +8370,7 @@
               el("div", { class: "field-err", id: "mimp-main-err", "aria-live": "polite", text: errs.main || "" })),
             el("div", { class: "edit-field" }, el("label", { for: "mimp-id", text: "Map id" }), idIn,
               el("div", { class: "field-err", id: "mimp-id-err", "aria-live": "polite", text: errs.id || "" })))),
-          el("div", { class: "btn-row edit-actions" }, el("button", { type: "submit", class: "btn", disabled: !CSRF || dr.reading > 0 || null }, "Review import"),
+          el("div", { class: "btn-row edit-actions" }, el("button", { type: "submit", class: "btn", disabled: !CSRF || dr.reading > 0 || null, ...RT }, "Review import"),
             el("button", { type: "button", class: "btn btn-ghost", onclick: () => { state.mapImports.delete(slug); render(); } }, "Cancel"),
             CSRF ? statusLine("Nothing is written until you confirm the review.") : noToken())));
       focusIn(holder, focusSel);
@@ -6662,10 +8388,9 @@
   };
   function viewTools() {
     return asyncView("/api/tools", "external tools", (st) => [
-      panel("How tools are configured",
-        el("p", null, "Configured locally in ",
-          el("code", { text: txt(st.configuration || ".kosmokrator-tools.json") }), "; this page only reads that status. Integrations are not verified in game, and versions are administrator supplied."),
-        el("p", { class: "panel-note", text: "Runs use isolated copies of your projects and may take up to five minutes; review outputs before importing." }),
+      panel(null,
+        el("p", { class: "panel-note" }, "Configured in ", el("code", { text: txt(st.configuration || ".kosmokrator-tools.json") }),
+          ". Runs use copies of your projects and may take up to five minutes; review outputs before importing. Not verified in game."),
         st.note ? el("p", { class: "panel-note", text: st.note }) : null,
         el("div", { class: "btn-row" }, el("button", { type: "button", class: "btn btn-small", onclick: () => { state.authData.delete("/api/tools"); render(); } }, "Re-check"))),
       (st.tools || []).length ? el("div", { class: "grid-2" }, st.tools.map(toolCard)) : stateBox("empty", "No tools listed.", ""),
@@ -6782,15 +8507,24 @@
   const docLink = (name) => (state.meta && (state.meta.docs || []).some((d) => d.name === name))
     ? el("a", { href: hashPath("docs", name) }, `docs/${name}`) : el("code", { text: `docs/${name}` });
 
-  const HOW_STEPS = [
-    "Leave the launcher terminal running; it is the local Kosmokrator server. You can close this page and reopen its address later.",
-    "Open Codex or Claude Code separately, in a new terminal or its app, on the extracted Kosmokrator folder. Do not type into the busy server terminal.",
-    "Choose a nation or a map, fill in the short brief and copy the instructions.",
-    "Paste them into your agent conversation. The agent writes a design brief, then builds through Kosmokrator's guarded tools, checking previews before saving.",
-    "Come back here, press Reload in the project list, then review the project, its Validation and Export.",
+  // The same three steps label the Start pages' progress. Kosmokrator never runs the agent: step 2 happens in Codex or
+  // Claude Code, and step 3 only re-reads the workspace to see whether the project exists yet.
+  const CREATE_STEPS = [
+    ["brief", "Prepare the brief", "Choose a nation or a map and fill in the short brief. Nothing is created yet."],
+    ["handoff", "Hand off to your agent", "Copy the instructions into Codex or Claude Code, opened on the extracted Kosmokrator folder (not the terminal running this server). The agent builds the project through Kosmokrator's guarded tools."],
+    ["review", "Return and review", "When the agent reports it has finished, reload projects here, then review the project, its Validation and Export."],
   ];
   const howItWorks = (id) => el("section", { class: "panel how", "aria-labelledby": id },
-    el("h3", { id, text: "How it works" }), el("ol", { class: "how-steps" }, HOW_STEPS.map((t) => el("li", { text: t }))));
+    el("h3", { id, text: "How it works" }), el("ol", { class: "how-steps" }, CREATE_STEPS.map(([, t, d]) => el("li", null, el("strong", { text: `${t}. ` }), d))),
+    el("p", { class: "panel-note", text: "Leave the launcher terminal running: it is the local Kosmokrator server. You can close this page and reopen its address later." }));
+  // Progress for one brief: done steps, the current step (aria-current="step") and what comes next.
+  function createSteps(current) {
+    const at = CREATE_STEPS.findIndex(([k]) => k === current);
+    return el("ol", { class: "create-steps", "aria-label": "Progress" }, CREATE_STEPS.map(([k, t], i) =>
+      el("li", { class: i < at ? "is-done" : i === at ? "is-current" : "is-next", "aria-current": i === at ? "step" : null },
+        el("span", { class: "step-n", "aria-hidden": "true", text: i < at ? "✓" : String(i + 1) }),
+        el("span", null, el("span", { class: "step-t", text: t }), el("span", { class: "sr-only", text: i < at ? " (done)" : i === at ? " (current step)" : " (next)" })))));
+  }
   function startChoices(current) {
     const card = (kind, title, text, href) => el("a", { class: `start-card${current === kind ? " is-current" : ""}`, href, "aria-current": current === kind ? "page" : null },
       el("span", { class: "start-card-title", text: title }), el("span", { class: "start-card-text", text }));
@@ -6821,7 +8555,7 @@
       box.append(el("section", { "aria-labelledby": "home-projects" },
         el("h2", { id: "home-projects", class: "section-title", text: `Projects (${data.projects.length})` }),
         table(["Project", "Era", "Version", "Validation"], data.projects.map((p) => p.ok
-          ? [el("span", null, el("a", { href: route("p", p.slug) }, txt(p.mod_name || p.name || p.slug)), " ", el("code", { class: "faint", text: p.slug })),
+          ? [el("span", null, el("a", { href: route("p", p.slug), title: p.slug }, txt(p.mod_name || p.name || p.slug))),
             p.era_name || el("span", { class: "faint", text: "—" }), p.version ? `v${p.version}` : el("span", { class: "faint", text: "—" }), validationBadge(p.validation)]
           : [el("code", { text: p.slug }), "—", "—", badge("unreadable", "err")]))));
     }
@@ -6973,33 +8707,89 @@
     const dr = startDraft(), data = state.projects, ws = data && data.workspace;
     const wrap = el("div", { class: "stack start" },
       el("h1", { tabindex: "-1", id: "page-title", text: kind === "nation" ? "Start a nation" : kind === "map" ? "Start a map" : "Get started" }),
-      el("p", { class: "lead", text: "Describe what you want, then hand the instructions to Codex or Claude Code. The agent creates and edits the project through Kosmokrator's guarded tools; this page does not create anything." }));
+      el("p", { class: "lead", text: "Describe what you want, then hand the instructions to Codex or Claude Code. The agent builds the project; this page creates nothing." }));
     if (kind !== "nation" && kind !== "map") {
       wrap.append(startChoices(null), howItWorks("start-how"), setupDetails());
       return wrap;
     }
     if (kind === "map" && preselect && okProjects().some((p) => p.slug === preselect)) { dr.map.mode = "existing"; dr.map.project = preselect; }
-    const result = el("div", { class: "start-result" }), formBox = el("div");
-    wrap.append(startChoices(kind), formBox, result, setupDetails());
+    const result = el("div", { class: "start-result" }), formBox = el("div"), steps = el("div", { class: "create-progress" });
+    wrap.append(startChoices(kind), steps, formBox, result, setupDetails());
     if (!data) { formBox.append(stateBox("loading", "Reading workspace...")); return wrap; }
     if (!ws) { formBox.append(stateBox("error", "The workspace folder is unknown.", "Press Reload in the project list, then try again.")); return wrap; }
 
     const d = dr[kind];
+    // Step 2 starts when instructions exist; step 3 once they were copied or downloaded (the agent's own progress is unknown here).
+    const stage = () => !dr.result[kind] ? "brief" : dr.result[kind].handedOff ? "review" : "handoff";
+    const drawSteps = () => fillKids(steps, createSteps(stage()));
     // Any edit hides an earlier result, so copied instructions always match the visible form.
-    const touched = () => { saveStart(); if (dr.result[kind]) { dr.result[kind] = null; result.replaceChildren(); } };
+    const touched = () => { saveStart(); if (dr.result[kind]) { dr.result[kind] = null; result.replaceChildren(); drawSteps(); } };
     function drawResult(focus) {
       const r = dr.result[kind];
+      drawSteps();
       if (!r) { result.replaceChildren(); return; }
-      const head = el("h2", { tabindex: "-1", id: "start-result-title", class: "section-title", text: "Instructions for your agent" });
-      result.replaceChildren(el("section", { class: "panel", "aria-labelledby": "start-result-title" }, head,
-        el("p", { class: "panel-note" }, el("strong", { text: "No project has been created. " }),
-          "Paste these instructions into a Codex or Claude Code conversation opened on the extracted Kosmokrator folder, not into the terminal running this server. The agent builds the project and checks previews before saving."),
-        el("pre", { class: "code start-prompt", tabindex: "0", "aria-label": "Agent instructions", text: r.text }),
-        el("div", { class: "btn-row" },
-          el("button", { type: "button", class: "btn", onclick: () => copy(r.text, "Agent instructions") }, "Copy instructions"),
-          el("button", { type: "button", class: "btn btn-small", onclick: () => downloadJSON(r.file, r.json) }, "Download brief JSON"),
-          el("button", { type: "button", class: "btn btn-small btn-ghost", onclick: () => { const f = formBox.querySelector("input:not([type=radio]), select, textarea"); if (f) f.focus(); } }, "Edit the brief")),
-        el("p", { class: "faint", text: "Afterwards, press Reload in the project list and open the project to review it, check Validation and export." })));
+      const slug = kind === "nation" || d.mode !== "existing" ? d.slug : d.project;
+      // Step 3 opens only after the instructions verifiably left this page: a confirmed copy, the download, or the
+      // user's own confirmation after copying manually.
+      const handedOff = () => {
+        if (r.handedOff && !r.copyFailed) return;
+        r.handedOff = true; r.copyFailed = false; drawResult(false);
+        const s = result.querySelector("#start-check"); if (s) s.focus();
+      };
+      const copyNow = async () => {
+        if (await copy(r.text, "Agent instructions")) { handedOff(); return; }
+        r.copyFailed = true; drawResult(false);
+        const f = result.querySelector("#start-copy-failed"); if (f) f.focus();
+      };
+      const selectPrompt = () => {
+        const pre = result.querySelector(".start-prompt");
+        if (!pre) return;
+        pre.focus();
+        const range = document.createRange(); range.selectNodeContents(pre);
+        const s = window.getSelection(); s.removeAllRanges(); s.addRange(range);
+      };
+      const head = el("h2", { tabindex: "-1", id: "start-result-title", class: "section-title", text: "Step 2: hand off to your agent" });
+      // A map for an existing project lands in that project's Maps (as a job, then an imported map), not as a new project.
+      const existingMap = kind === "map" && d.mode === "existing";
+      const exists = !existingMap && okProjects().some((p) => p.slug === slug);
+      const check = el("p", { class: "faint", id: "start-check-status", role: "status", "aria-live": "polite" });
+      const checkNow = async () => {
+        check.textContent = "Re-reading the workspace...";
+        await loadProjects(true);
+        const found = okProjects().find((p) => p.slug === slug);
+        r.found = !existingMap && !!found;
+        drawResult(false);
+        const s = result.querySelector("#start-check-status");
+        if (s) s.textContent = existingMap ? `Reloaded. Open ${slug}'s Maps to see the map job and any imported map.`
+          : found ? `Found ${slug}. Open it to review.` : `No project ${slug} yet. The agent may still be working; Kosmokrator does not run or track it.`;
+      };
+      result.replaceChildren(
+        el("section", { class: "panel", "aria-labelledby": "start-result-title" }, head,
+          el("p", { class: "panel-note" }, el("strong", { text: "No project has been created by this page. " }),
+            "Paste these instructions into a Codex or Claude Code conversation opened on the extracted Kosmokrator folder, not into the terminal running this server. The agent builds the project and checks previews before saving."),
+          el("pre", { class: "code start-prompt", tabindex: "0", "aria-label": "Agent instructions", text: r.text }),
+          el("div", { class: "btn-row" },
+            el("button", { type: "button", class: "btn", id: "start-copy", onclick: copyNow }, "Copy instructions"),
+            el("button", { type: "button", class: "btn btn-small", onclick: () => { downloadJSON(r.file, r.json); handedOff(); } }, "Download brief JSON"),
+            el("button", { type: "button", class: "btn btn-small btn-ghost", onclick: () => { const f = formBox.querySelector("input:not([type=radio]), select, textarea"); if (f) f.focus(); } }, "Edit the brief")),
+          r.copyFailed ? el("div", { class: "state state-error copy-failed", role: "alert", id: "start-copy-failed", tabindex: "-1" },
+            el("span", null, el("strong", { text: "The instructions were not copied." }),
+              el("div", null, `This browser did not allow clipboard access. Select the instructions above and copy them yourself (Ctrl+C, or Cmd+C on a Mac), or download the brief JSON instead. ${r.handedOff ? "Step 3 below stays open." : "Step 3 opens once you have them."}`),
+              el("div", { class: "btn-row" },
+                el("button", { type: "button", class: "btn btn-small", onclick: selectPrompt }, "Select the instructions"),
+                el("button", { type: "button", class: "btn btn-small btn-ghost", onclick: handedOff }, "I copied them manually")))) : null),
+        el("section", { class: "panel" + (r.handedOff ? "" : " is-later"), "aria-labelledby": "start-check" },
+          el("h2", { tabindex: "-1", id: "start-check", class: "section-title", text: "Step 3: return and review" }),
+          el("p", { class: "panel-note", text: r.handedOff
+            ? "When your agent reports it has finished, check for the project here. The agent may take a while; this page does not run it or see its progress."
+            : "After you copy or download the instructions and your agent has finished, come back here to find the project." }),
+          el("div", { class: "btn-row" },
+            exists || r.found ? el("a", { class: "btn", href: hashPath("p", slug) }, `Open ${slug}`) : null,
+            existingMap ? el("a", { class: "btn", href: hashPath("p", slug, "maps") }, `Open ${slug} Maps`) : null,
+            el("button", { type: "button", class: exists || r.found || existingMap ? "btn btn-small btn-ghost" : "btn btn-small", onclick: checkNow }, "Reload projects and check"),
+            kind === "map" && (exists || r.found) ? el("a", { class: "btn btn-small btn-ghost", href: hashPath("p", slug, "maps") }, "Open its Maps") : null),
+          check,
+          el("p", { class: "faint", text: "Then review it: Overview and Validation first, then Export when validation has no errors. Static checks do not prove the mod loads or plays well." })));
       if (focus) head.focus();
     }
     function submit(e) {
@@ -7017,7 +8807,8 @@
       draw(); drawResult(true);
     }
     function draw() {
-      const errs = dr.showErrors[kind] ? (kind === "nation" ? nationProblems(d) : mapProblems(d)) : {};
+      // With instructions prepared the brief was valid; once the agent creates the project its slug is taken, which is not an error here.
+      const errs = dr.showErrors[kind] && !dr.result[kind] ? (kind === "nation" ? nationProblems(d) : mapProblems(d)) : {};
       const id = (k) => `st-${kind}-${k}`;
       const field = (k, label, control, hint, wide) => {
         const f = labelled(id(k), label, control, hint, errs[k]), er = f.querySelector(".field-err");
@@ -7046,7 +8837,7 @@
       if (kind === "nation") {
         const era = el("select", { class: "input", id: id("era"), "aria-describedby": `${id("era")}-hint` }, ERAS.map(([v, l]) => el("option", { value: v, text: l })));
         era.value = d.era; era.addEventListener("change", () => { d.era = era.value; touched(); });
-        body = el("fieldset", { class: "edit-group" }, el("legend", { text: "Nation brief" }),
+        body = el("fieldset", { class: "edit-group" }, el("legend", { text: "Step 1: nation brief" }),
           el("div", { class: "edit-grid start-grid" },
             input("name", null, { label: "Nation name", maxlength: "80" }, (v) => { if (!d.slugTouched) setOther("slug", slugify(v)); }),
             input("slug", "Folder name for the new project, e.g. ashen_court.", { label: "Project slug", maxlength: "48", spellcheck: "false" }, () => { d.slugTouched = true; }),
@@ -7075,7 +8866,7 @@
               : el("div", { class: "edit-grid start-grid" },
                 input("slug", "Folder name for the new project.", { label: "Project slug", maxlength: "48", spellcheck: "false" }, () => { d.slugTouched = true; }),
                 input("project_name", "Defaults to the map title.", { label: "Project name (optional)", maxlength: "80" }))),
-          el("fieldset", { class: "edit-group" }, el("legend", { text: "Map brief" }),
+          el("fieldset", { class: "edit-group" }, el("legend", { text: "Step 1: map brief" }),
             el("div", { class: "edit-grid start-grid" },
               input("title", null, { label: "Map title", maxlength: "120" }, (v) => {
                 if (!d.idTouched) setOther("map_id", mapIdOf(v));
@@ -7091,9 +8882,9 @@
       }
       formBox.replaceChildren(el("form", { class: "edit-form start-form", novalidate: true, onsubmit: submit }, body,
         el("div", { class: "btn-row edit-actions" },
-          el("button", { type: "submit", class: "btn" }, "Prepare agent instructions"),
+          el("button", { type: "submit", class: "btn" }, dr.result[kind] ? "Prepare instructions again" : "Prepare agent instructions"),
           errCount ? el("span", { class: "field-err", role: "alert", text: `Fix ${errCount} field${errCount === 1 ? "" : "s"} above.` })
-            : el("span", { class: "faint", text: "Nothing is created or saved by this form." }))));
+            : el("span", { class: "faint", text: "Step 1 of 3. Nothing is created or saved by this form." }))));
     }
     draw(); drawResult(false);
     return wrap;
@@ -7125,7 +8916,9 @@
     const keepFocus = document.activeElement && main.contains(document.activeElement) && document.activeElement.closest(".btn-row[role=group]");
     // Selectors that change the route keep focus, so keyboard users can keep browsing with them.
     const keepSelectId = document.activeElement && ["nation-select", "auth-section", "cmd-context"].includes(document.activeElement.id) ? document.activeElement.id : null;
+    const keepMode = document.activeElement && main.contains(document.activeElement) && document.activeElement.closest(".mode-switch");
     renderSidebar(parts[0] === "p" ? parts[1] : null);
+    if (parts[0] !== "p" || !parts[1]) renderCatalogStatus();
     for (const a of document.querySelectorAll(".topbar-links a")) a.setAttribute("aria-current", a.getAttribute("href") === `#/${parts[0] || ""}` ? "page" : "false");
     if (parts[0] === "docs") {
       document.title = "Docs - Kosmokrator";
@@ -7154,6 +8947,13 @@
       focusTitle();
       return;
     }
+    if (parts[2] === "author" && SECTION_EDITORS[parts[3]]) {
+      // Old "author/<section>/<key>" links open the same editor inside its section; the rest of the hash is kept.
+      parts.splice(2, 1);
+      parts.splice(3, 0, "edit");
+      const q = location.hash.split("?").slice(1).join("?");
+      history.replaceState(null, "", hashPath(...parts) + (q ? `?${q}` : ""));
+    }
     const slug = parts[1], tab = parts[2] || "overview", arg = parts[3];
     if (!state.models.has(slug)) main.replaceChildren(stateBox("loading", `Loading ${slug}...`));
     let m;
@@ -7164,6 +8964,9 @@
       return;
     }
     if (seq !== renderSeq) return;
+    await useIconScope(m);
+    if (seq !== renderSeq) return;
+    renderCatalogStatus(m);
     // /nation/<id> names the nation itself; elsewhere ?n= (or the remembered choice) selects it.
     const wanted = tab === "nation" && arg ? arg : hashQuery().get("n");
     state.nation = { slug, key: resolveNation(m, wanted) };
@@ -7176,19 +8979,35 @@
       if (extra.length) url += (url.includes("?") ? "&" : "?") + new URLSearchParams(extra).toString();
       history.replaceState(null, "", url);
     }
-    document.title = `${m.project.mod_name || slug} - ${TABS.find((t) => t[0] === tab)?.[1] || ""} - Kosmokrator`;
+    document.title = tab === "inspector" ? `Vanilla catalog (${m.project.mod_name || slug}) - Kosmokrator`
+      : `${m.project.mod_name || slug} - ${TABS.find((t) => t[0] === tab)?.[1] || ""} - Kosmokrator`;
+    if (tab !== "inspector") lastProjectHash.set(slug, location.hash);
+    if (tab === "inspector" && inspMounted) {
+      // Same project, category and nation: update the list and detail in place (no flash, list scroll and focus kept).
+      const res = inspMounted.update(slug, arg, parts[4], state.nation.key);
+      if (res) {
+        if (res.changed && parts[4]) { const t = $("#insp-detail"); if (t) { t.setAttribute("tabindex", "-1"); t.focus({ preventScroll: false }); } }
+        lastRoute = parts.join("/");
+        return;
+      }
+    }
     const body = el("div");
     main.replaceChildren(...projectShell(m, tab, arg), body);
+    revealActiveTab();
+    const section = (editing, view) => el("div", { class: editing ? "stack authoring" : "stack" }, sectionModes(m, tab, editing, arg), view);
     try {
-      if (tab === "overview") body.append(viewOverview(m));
+      if (SECTION_EDITORS[tab] && arg === "edit") body.append(section(true, sectionEditor(m, tab, parts[4])));
+      else if (tab === "overview") body.append(viewOverview(m));
       else if (tab === "nation") body.append(viewNation(m, arg));
       else if (tab === "units") body.append(viewUnits(m, arg, parts[4]));
       else if (tab === "pretenders") body.append(viewPretenders(m, arg));
-      else if (tab === "sites") body.append(viewSites(m, arg));
+      else if (tab === "sites") body.append(section(false, viewSites(m, arg)));
       else if (tab === "balance") body.append(viewBalance(m));
       else if (tab === "maps") body.append(viewMaps(m, arg));
-      else if (tab === "spells") body.append(viewKindBrowse(m, "spell"));
-      else if (tab === "items") body.append(viewKindBrowse(m, "item"));
+      else if (tab === "spells") body.append(section(false, viewKindBrowse(m, "spell")));
+      else if (tab === "items") body.append(section(false, viewKindBrowse(m, "item")));
+      else if (tab === "mercs") body.append(section(false, viewMercs(m, arg)));
+      else if (tab === "inspector") body.append(viewInspector(m, arg, parts[4]));
       else if (tab === "other") body.append(viewOther(m));
       else if (tab === "author") body.append(viewAuthoring(m, arg, parts.slice(4)));
       else if (tab === "assets") body.append(viewAssets(m));
@@ -7202,11 +9021,18 @@
     }
     if (keepSelectId) { const s = document.getElementById(keepSelectId); if (s) { s.focus(); lastRoute = parts.join("/"); return; } }
     if (keepFocus) { const b = main.querySelector('.btn-row[role=group] [aria-pressed="true"]'); if (b) b.focus(); return; }
+    // Switching Browse/Edit keeps focus on the switch, like the other in-page selectors.
+    if (keepMode) { const b = main.querySelector('.mode-switch [aria-current="page"]'); if (b) { b.focus(); lastRoute = parts.join("/"); return; } }
     if (tab === "units" && parts[4] === "compare") {
       // Switching references re-renders in place: keep the scroll position and put focus on the comparison heading.
       const t = $("#compare-title"), same = lastRoute.startsWith(`p/${slug}/units/${arg}/compare`);
       lastRoute = parts.join("/");
       if (t) { t.focus({ preventScroll: same }); return; }
+    }
+    if (tab === "inspector" && parts[4]) {
+      // Picking an entry from the inspector list moves focus to its detail, not back to the page title.
+      const t = $("#insp-detail");
+      if (t && lastRoute.startsWith(`p/${slug}/inspector`)) { t.setAttribute("tabindex", "-1"); t.focus({ preventScroll: false }); lastRoute = parts.join("/"); return; }
     }
     if (tab === "units" && arg) { const t = $("#unit-title"); if (t && lastRoute.startsWith(`p/${slug}/units`)) { t.focus({ preventScroll: false }); lastRoute = parts.join("/"); return; } }
     lastRoute = parts.join("/");
@@ -7238,7 +9064,7 @@
     sidebarToggle.textContent = open ? "Hide projects" : "Show projects";
   }
   // Choosing a project or tool goes back to the automatic state, so the chosen page is visible first.
-  for (const id of ["#project-list", "#sidebar-tools"]) $(id).addEventListener("click", (e) => { if (e.target.closest("a")) state.sidebarOpen = undefined; });
+  for (const id of ["#project-list", "#sidebar-tools", "#catalog-nav"]) $(id).addEventListener("click", (e) => { if (e.target.closest("a")) state.sidebarOpen = undefined; });
   window.addEventListener("hashchange", syncSidebar);
   syncSidebar();
   $("#reload-btn").addEventListener("click", async () => {

@@ -96,6 +96,16 @@ RECRUIT_WHERE = {
     "homemon": "Recruitable only where this site is (start sites are at the capital)",
     "homecom": "Recruitable only where this site is (start sites are at the capital)",
     "mon": "Recruitable where this site is", "com": "Recruitable where this site is",
+    # Terrain, foreign and underwater recruitment (manual 6.36 p.44), for the commands listed in NATION_*_CMDS above.
+    "addforeignunit": "Recruitable only in provinces without a fort",
+    "addforeigncom": "Recruitable only in provinces without a fort",
+    **{f"{t}rec": f"Recruitable in {t} provinces without a fort" for t in ("forest", "mountain", "swamp", "waste", "cave", "coast")},
+    **{f"{t}com": f"Recruitable in {t} provinces, with or without a fort" for t in ("forest", "mountain", "swamp", "waste", "cave")},
+    "uwrec": "Recruitable in underwater forts", "uwcom": "Recruitable in underwater forts",
+    "landrec": "Recruitable in overwater forts (underwater nation)", "landcom": "Recruitable in overwater forts (underwater nation)",
+    # Deprecated in manual 6.36 without a documented effect; listed so the roster is not silently short. Confirm in game.
+    **{f"coastunit{i}": "Coastal recruitment (deprecated command; confirm in game)" for i in (1, 2, 3)},
+    **{f"coastcom{i}": "Coastal recruitment (deprecated command; confirm in game)" for i in (1, 2)},
 }
 
 _INDEX_LOCK = threading.Lock()
@@ -951,6 +961,15 @@ def build_project_model(workspace: Path, slug: str, catalog: Catalog | None) -> 
             others.append(_definition_model(c, b))
         prior.append(('project', text[b.opener.start:b.end.end] if b.end else text[b.opener.start:]))
 
+    # Form identity references can point forward; keep stat inheritance in activation order.
+    final_monsters = {unit['id']: unit for unit in monsters if isinstance(unit.get('id'), int)}
+    for unit in monsters:
+        equipped = unit['resolved']['equipped']
+        for entry in [*equipped.get('shapes', []), *equipped.get('mounts', [])]:
+            target = final_monsters.get(entry['id'])
+            if target:
+                entry.update(name=target['name'], origin='project', status='resolved')
+
     graph_objects = {o['key']: o for o in graph['objects']}
     for obj in [*monsters, *sites, *nations, *others]:
         key = f"{obj.get('context', obj['kind'])}:line:{obj['source']['line']}"
@@ -1262,8 +1281,11 @@ class ModelCache:
         return model
 
 
-def list_projects(workspace: Path, cache: ModelCache, catalog: Catalog | None) -> dict[str, Any]:
-    """Every directory holding kosmokrator.json; a broken project yields an error entry, not a failure."""
+def list_projects(workspace: Path, cache: ModelCache, catalog: Catalog | None,
+                  catalog_for: Any = None) -> dict[str, Any]:
+    """Every directory holding kosmokrator.json; a broken project yields an error entry, not a failure.
+
+    catalog_for(slug), when given, returns the catalog that project reads (its reference snapshot, if any)."""
     projects = []
     for entry in sorted(workspace.iterdir(), key=lambda p: p.name):
         if is_link(entry) or not entry.is_dir() or not (entry / META_FILE).exists():
@@ -1273,7 +1295,8 @@ def list_projects(workspace: Path, cache: ModelCache, catalog: Catalog | None) -
         try:
             if not SLUG_RE.match(slug):
                 raise KosmoError("bad_slug", "Directory name is not a valid project slug")
-            m = cache.get(workspace, slug, catalog)
+            project_cat = catalog_for(slug) if catalog_for else catalog
+            m = cache.get(workspace, slug, project_cat)
             v = m["validation"]
             lead = m["nations"][0] if m["nations"] else None
             item.update(ok=True, name=m["project"]["name"], mod_name=m["project"]["mod_name"],
@@ -1286,7 +1309,9 @@ def list_projects(workspace: Path, cache: ModelCache, catalog: Catalog | None) -
                         banner_preview=(m["project"].get("banner") or {}).get("preview"),
                         counts=m["counts"],
                         validation={"ok": v["ok"], "counts": v["counts"]} if v else None,
-                        sha256=m["provenance"]["sha256"])
+                        sha256=m["provenance"]["sha256"],
+                        reference_snapshot=((project_cat.meta.get("reference_snapshot") or {}).get("snapshot")
+                                            if project_cat else None))
         except KosmoError as exc:
             item["error"] = exc.to_dict()
         except (OSError, ValueError, UnicodeError) as exc:

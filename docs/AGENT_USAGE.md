@@ -8,6 +8,10 @@ Read-only `author_state` kinds now include `inheritance`, `compatibility`, `bala
 and `balance:<nation IDs separated by commas>`. These return source-backed reports;
 they do not change the mod or simulate combat. See [inheritance](INHERITANCE.md),
 [compatibility](COMPATIBILITY.md) and [comparisons](BALANCE-COMPARISONS.md).
+Kind `mercs` lists and appends optional `#newmerc` companies with structured, manual-documented fields; see
+[mercenary companies](WEB-BROWSER.md#mercenary-companies) and the optional-merc rule in
+[NATION-DESIGN.md](NATION-DESIGN.md#generation-requirements). `search_game_data` and the browser's read-only
+**Vanilla inspector** also cover the `mercs` and `events` catalog tables.
 Use `map-builds` with `author_state`/`author_save` for the
 [agent map workflow](AGENT-MAPS.md): brief, staged output review and guarded import.
 
@@ -107,6 +111,10 @@ saved source. Repeat the gates before delivery and report exact testing gaps.
   in Dominions 6 (enable the mod, start a game in the right era) and reporting back.
 - The catalog is the third-party dom6inspector data (GPL-3.0) that the user supplied. It may differ from
   their game version. Never claim it's official or complete.
+- A project may carry a local reference snapshot (`author_state` kind `reference-snapshot`). Project tools then
+  read it instead of the live catalog; pass `project` to `search_game_data`/`reference_game_data` to search it.
+  Report its state (offline, current, stale or invalid) and sprite coverage (referenced-only is partial). It holds
+  game imagery from the user's own copy of the game: never export, commit or share it.
 - Kosmokrator does not install into the game folder. The user copies `<slug>/` into their `mods` directory.
 
 ## Setup snippets (copy manually; Kosmokrator never edits global config)

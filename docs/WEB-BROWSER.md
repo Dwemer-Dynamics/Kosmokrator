@@ -10,23 +10,53 @@ under **Preview details**.
 
 `kosmokrator serve` starts a small stdlib HTTP server on a loopback address. It lets you browse the
 projects in a workspace: nations, units, sites, other parsed definitions, assets, validation, the raw
-`.dm` source, and Markdown review/design docs. Reviewed writes include **Edit values**, **Edit nation**, **New unit / New god /
-Duplicate**, **New nation**, and **Artwork: upload or replace frames**. **Export** packages the saved revision
+`.dm` source, and Markdown review/design docs. Reviewed writes include **Edit**, **Edit nation**, **New unit / New god /
+Duplicate**, **New nation**, and **Upload art**. **Export** packages the saved revision
 into a new file under `<project>/exports/` (see [Build and export](#build-and-export)). Catalog definitions
 are read-only; choosing a catalog donor creates a separate project definition.
 
-**Spells** and **Items** have dedicated read-only Browse tabs with project-wide
-counts and search by name, ID, selector or command. Expand a definition to see its
-authored commands, saved source and JSON. These views list parsed blocks; they do
-not interpret effects or prove engine behavior. Item artwork appears when its
-saved sprite reference is associated with an asset. **Other definitions** still
-includes these blocks alongside the other definition types.
+**Spells** and **Items** have project-wide counts and search by name, ID, selector or
+command. Expand a definition to see its authored commands, saved source and JSON. These
+views list parsed blocks; they do not interpret effects or prove engine behavior. Item
+artwork appears when its saved sprite reference is associated with an asset. **Other**
+still includes these blocks alongside the other definition types.
+
+**Spells**, **Sites**, **Items** and **Mercenaries** each browse and edit in one place. A
+**Browse** / **Edit** switch sits at the top of the section. **Browse** shows the cards and a
+**New** action (**New spell**, **New site**, **New item**, **New company**). Spell and site cards have
+one **Edit** button that opens the structured field form directly (no second Edit click); **Close editor** and
+**Cancel** keep it closed until you press Edit again, and opening or closing redraws only the editor, so the
+scroll position and focus stay put. Items and existing mercenary companies have no structured form: their cards
+say **Advanced edit**, the section's mode says **Advanced edit**, and the line editor is labelled **Advanced**
+(raw manual commands, every change previewed as an exact diff). The editor lists every block of
+that kind in the project, whatever nation is selected. Edit routes are
+`#/p/<slug>/<section>/edit/<key>` (`~new` for a new block). Older `#/p/<slug>/author/<section>/...`
+links still work and open the same editor in its section.
+
+**Related content** on unit, site, spell, weapon, armour and advanced-editor pages is collapsed by default. Its
+summary line counts what uses the entry and what it uses, how many entries come from dependencies, and flags
+unresolved references with a warning badge. Inside, each relation is a sentence ("*Ember Guard* (unit) is armed
+with this.", "This recruits *Ash Priest* (unit)."); entries from a dependency are marked "from *<file>*, read-only"
+and vanilla entries "from the vanilla catalog, read-only"; neither gets an edit link. A vanilla entry shows its name
+when the project model knows it, otherwise its type and ID (for example "Spell #1109"). An unresolved reference keeps
+the written name or ID and the expected type. A spell's `#damage` reads as a summon only when it targets a unit. The
+raw command, relation, status and source line are in the nested **Details: commands and source lines** table; the
+source line belongs to the referring definition, so it links into Source only when that definition is in this project.
+
+**Reviews and saves.** Every editor reviews before writing. **Back to the form** / **Back to editing** (and Escape
+where the review is shown inside the editor) return to the form with focus on the button that opened the review
+(**Remove entire block…** after a removal preview). A review that would change nothing says **Nothing to save**
+and offers Back as its main action instead of a disabled save button. After a successful save, create or artwork
+upload, a **save receipt** appears under the project heading: what was saved, the time, the file, the new
+SHA-256 (or map revision), the new art files and the backup path. It stays across sections of that project until
+**Dismiss**; up to four earlier receipts of the session are under **Earlier saves**. Receipts are per project, are
+never shown in another project, and the toast is only a short echo of them.
 
 **Items** uses a responsive icon-card grid with authored construction, path and slot metadata,
-descriptions, search and expandable source details. **Balance** opens with a reading key (†, ≈, ?)
-and an at-a-glance summary, then roster comparison bars, a fixed-magic heatmap and an interactive
-cost-versus-capability scatter plot. Each nation keeps one colour and shape across the summary and
-every chart. Project nations are all squares and reference nations cycle through five shapes, so with
+descriptions, search and expandable source details. **Balance** opens with a reading key (†, ≈, ?),
+then roster comparison bars, a fixed-magic heatmap and an interactive cost-versus-capability scatter
+plot; the detailed tables follow, collapsed. Each nation keeps one colour and shape across every
+chart. Project nations are all squares and reference nations cycle through five shapes, so with
 several project nations or more than five references some nations share a shape and differ by colour
 only; the legend, row labels and chart data table always name each nation. With forced colours the
 plot marks lose their colour, so use the data table to tell nations apart. Choose troops or
@@ -42,8 +72,10 @@ closes it. The plot is one Tab stop; arrow keys, Home and End move between units
 Each unit's accessible name gives its nation, source and both values. Markers that mostly cover one another
 are still all reachable. The uppermost marker in a stack shows a +N badge. Each unit's card lists the units
 overlapping it as buttons that open their cards. The chart data table lists every value. Unresolved values
-are omitted, estimates are labelled, and original comparison tables remain below. These are
-static design comparisons, not simulated win rates or campaign charts.
+are omitted, estimates are labelled, and the detailed comparison tables remain below. The only live
+announcement is the short count ("18 units plotted; 2 omitted (unresolved)."); how to read the markers is in a
+closed **How to read this chart** disclosure. These are static design comparisons, not simulated win rates or
+campaign charts.
 
 Optional [native trait icons](TRAIT-ICONS.md) are extracted locally from your installed game. Unit and
 pretender sheets and the trait editor keep their text labels when no verified icon is available.
@@ -67,16 +99,58 @@ fails to load, the cost labels are plain text too.
 Icons are hidden from assistive technology; the text label is what is read. Weapon and armour rows,
 raw commands, source and JSON stay text-only.
 
-**Create & edit** also includes Items, Mercenaries, Events and Advanced commands. Unit and definition details
-show references; sheets show supported equipped estimates with ≈; the compatibility section includes
+## Page chrome and wording
+
+The header shows only the Kosmokrator name, the **Get started** and **Docs** links, and a status badge when the
+vanilla data needs attention (an available update, a snapshot that needs repair, or no data); ready data shows
+nothing. There is no persistent footer. The sidebar offers **Create**, **Import** and **Tools**, the project list
+and **Catalog**. Success states are plain text or absent: badges mark warnings, errors,
+unsaved drafts, read-only entries and the current selection. Cards show name, art and the useful stats; raw ids,
+commands, source lines, hashes and provenance sit under **Details** disclosures. Errors, write safeguards,
+review-before-save and meaningful warnings are unchanged.
+
+**Project header.** A compact heading: a small mod banner, the mod name with epithet, era and version, and on the
+right the **Nation** selector (only on the sections it filters, see below) and an **N unsaved drafts** badge when
+any editor holds unsaved input (it links to Export, which lists them). Below it, one row of section tabs:
+Browse (Overview … Balance) and Build (**Advanced tools**, **Validation**, **Export**),
+labelled as groups for assistive technology (a wider gap separates them visually). The secondary sections **Source**, **Assets**, **Other definitions**
+and **Docs** are under **More** at the end of the row: a button that opens a short list of links (Down arrow opens
+it and focuses the current or first link, Up/Down move, Escape closes it and returns focus to the button; a click elsewhere or tabbing away also closes it).
+On a secondary section the button reads **More: Source** and carries the current-section underline. Left/Right
+move along the tabs and the More button. Below 640px the tab row scrolls sideways instead of wrapping, and the
+banner shrinks, so the section content starts right under the header. After every route change the current tab is
+centred inside the row (only the row scrolls, never the page; a section under More leaves it as it is). A side that
+has more tabs shows a fade with a **‹** or **›** button ("Scroll section tabs left/right"), hidden when that side
+has nothing more; keyboard focus moving onto a tab also scrolls it into view. Export is an ordinary Build tab; when
+something blocks an export it shows a small flag (the error count, **re-validate** or **validation unavailable**).
+Routes, query parameters and deep links are unchanged.
+
+**Advanced tools** (`#/p/<slug>/author`, the former **Edit** tab) opens on an overview that says what each tool is
+for, instead of opening Weapons: structured forms (Weapons, Armour, Heroes), advanced line editors (Events, All
+manual commands; both labelled **Advanced**), and reference and records (Reference lookup, Playtests, with a link
+to the Vanilla catalog). It also lists where the other structured editors live (unit and nation pages, site and
+spell cards) and which sections use Advanced edit (items, existing mercenary companies). The **Tool** selector
+switches between them; every existing `#/p/<slug>/author/<tool>` route still opens directly. Unit and definition
+details show references; sheets show supported equipped estimates with ≈; the compatibility section includes
 reviewed dependency settings and activation order. See [universal authoring](UNIVERSAL-AUTHORING.md) for
 command coverage, safe editing and calculation limits.
 
+**Unsaved drafts.** Every editor keeps its draft in this browser tab's memory (unit, nation, new unit/god/nation,
+artwork upload, equipment, spell/site/weapon/armour forms, heroes, playtest, advanced line editors for items,
+mercenaries, events and other contexts, new mercenary company, dependency settings, map edits, map import, map
+job brief and .dm import). One registry decides what counts as unsaved: a draft that differs from the file. Typing a
+value back, **Discard draft**, **Cancel** and a successful save all clear it; closing an editor without cancelling
+keeps it (and its badge). Export lists every unsaved draft of the project with a link to it. Closing or reloading
+the tab while any draft is unsaved triggers the browser's own leave-page warning; drafts are never written to disk
+or browser storage, and preview and SHA-256 guards are unchanged.
+
 ## Nation selection
 
-Projects with several nations get a **Nation** selector above the section tabs. Overview, Nation, Units, Sites
-and Pretenders all follow it (including the tab counts); Spells, Items, Other definitions, Assets, Source, Validation and Docs
-are always project-wide and say so. Choices:
+Projects with nations get a **Nation** selector in the project header, shown only on the sections that follow it:
+Overview, Nation, Units, Pretenders, Sites and Balance, plus **Advanced tools → Heroes** (heroes are set per nation).
+Those sections follow it, including their tab counts; Spells, Items, Mercenaries, Maps, Other definitions, Assets,
+Source, Validation, Export and Docs are always project-wide (each tab's tooltip says whether it follows the
+selector). Choices:
 
 - one nation; **Not tied to a nation** (units and sites no nation references, and custom gods no nation lists);
   **All nations**.
@@ -97,9 +171,10 @@ are always project-wide and say so. Choices:
 
 ## Project readiness
 
-The Overview opens with a **Project readiness** panel, so the default project page shows what still blocks an
+The Overview opens with a **Readiness** panel, so the default project page shows what still blocks an
 export. It is read from the saved `.dm` and the files now in the mod folder (the server's `readiness` block); no
-counts are fixed in the page. Each row links to the existing view that fixes it:
+counts are fixed in the page. Rows that pass are left out; the **Latest export** row is always shown. Each problem
+row links to the existing view that fixes it:
 
 - **Validation:** error, warning and unverified counts for the saved revision; errors are listed with their lines
   (up to 12, the rest in the Validation report).
@@ -110,26 +185,155 @@ counts are fixed in the page. Each row links to the existing view that fixes it:
   *copied* (from another project monster) or *missing* (a named file is absent, or a new monster has no sprite
   source). Vanilla sprites are valid and listed apart from errors; no vanilla image is packaged. When a later
   `#copystats` overwrites an earlier `#spr1`/`#spr2`, the unit is listed as vanilla with a note naming both lines.
-- **Shared sprites** (informational): one image file used by several units, or byte-identical files under
-  different names. Sharing is allowed and never counts as a problem.
+- **Shared sprites** (informational, in a collapsed list): one image file used by several units, or
+  byte-identical files under different names. Sharing is allowed and never counts as a problem.
 - **Latest export:** the newest entry in `<project>/exports`, read fresh with the project (the model cache does not
   cover exports), its age, and whether it was built from the saved `.dm` shown on the page. **Open export** goes
-  to the Export & Workshop section; a new export updates this row.
+  to the Export section; a new export updates this row.
 
 The panel says **needs attention** only for validation errors, missing referenced files and units without a sprite.
 
+## Reference snapshot (self-contained project)
+
+Below readiness, the Overview's **Reference snapshot** disclosure (collapsed unless the snapshot is stale or
+invalid, which also shows a badge on it) can **Make project self-contained**: it copies the
+catalog data and local reference art the project needs into `<project>/.kosmokrator/reference/`, so the project can
+be browsed and edited without the external catalog, for example after copying the project folder to another
+machine. The panel states that the snapshot contains game imagery extracted from your own copy of Dominions 6, is a
+local authoring reference only, and is separate from the distributable mod.
+
+- **What is copied.** Every top-level `gamedata/*.csv` table of the live catalog, byte for byte (complete, so
+  lookups, inheritance, search and comparisons read the same rows); the catalog `LICENSE`; every item icon; the
+  gem and path icons and the sacred badge; and unit sprites either for the catalog units the project references
+  (donors, `#copyspr`, selected monsters, recruit and other monster references, catalog pretenders and the default
+  balance reference rosters) or, by choice, every catalog unit sprite (about 20 MB in
+  about 9,000 files with the 6.37 catalog; more on disk). The verified native UI icon
+  cache is copied when the workspace has one. Description text folders, site images, `.git`, scripts, manuals,
+  game archives and other files are never copied. A referenced-only snapshot is labelled **partial** for sprites:
+  catalog units picked later (for example in Compare) show no sprite until it is refreshed.
+- **Preview size and coverage** reports files, size per group and the missing-dependency list (referenced units,
+  sprites or item icons the source catalog does not have, or no native icon cache) without writing anything.
+- **Writing** sends `POST /api/projects/<slug>/reference-snapshot` with
+  `{expected_sha256, expected_snapshot, sprites: "referenced"|"all", preview}`. Under the project lock the server
+  checks the saved `.dm` hash (409 `sha_mismatch`) and the current snapshot id (409 `reference_changed`), writes a
+  new snapshot to a staging folder with bounded file count and size, verifies it, renames it into place and only then
+  switches `current.json`; the previous snapshot is removed afterwards. Links, junctions and traversal are refused.
+  A successful write leaves a save receipt with the snapshot folder, file count and size; it states that the `.dm`
+  was not changed (no backup) and names any replaced snapshot, which is deleted rather than backed up.
+  Creating or refreshing needs a live catalog (`--catalog`); without one the existing snapshot stays in use.
+- **Manifest.** `manifest.json` records the source (dom6inspector, credential-free origin URL, git revision,
+  dataset version, GPL-3.0 licence and attribution), the tool version, the `.dm` hash at snapshot time, the scope,
+  totals, the missing-dependency report and the SHA-256 of every file. It holds project-relative paths only.
+- **Use.** A project with a snapshot reads only its snapshot in every project route (sheets, comparisons, balance,
+  donor and reference search, editors, validation and export), including project-scoped icon routes. The live
+  catalog is never mixed in. Status is **Self-contained** (no live catalog configured, or matching it),
+  **differs from live catalog** (stale: still using the snapshot until refreshed) or **failed verification**
+  (a changed, missing, extra or linked file: the snapshot is not used and no live data is substituted). Tables are
+  re-verified when they change on disk, and snapshot images are checked against the manifest on every read.
+  Projects without a snapshot behave exactly as before.
+- **Never packaged.** Exports and Workshop folders are built only from the mod folder, so the snapshot is never
+  included; an export manifest names only the project-relative snapshot it was validated against. The project
+  `.gitignore` already excludes `.kosmokrator/`.
+
+## Vanilla inspector (read-only)
+
+The left sidebar has a **Catalog** section directly under the project list. It opens the selected
+project's inspector (`#/p/<slug>/inspector`); with no project selected it names the last selected, or else the
+first readable, project it will open, and shows a prompt when none is readable.
+
+The **Vanilla catalog** is its own reference context, not a project section: it has no project tabs, no Nation
+selector and no project diagnostics. Its heading has an info-coloured frame, a **read-only reference** badge, the
+title **Vanilla catalog**, where the data comes from ("Reading *<project>*'s reference snapshot (*id*)" or "Reading
+the live catalog the server was started with, opened from *<project>*") and **← Back to *<project>***, which returns
+to the exact project page you came from (else its Overview). The address and APIs are unchanged: the project in
+`#/p/<slug>/inspector/...` only selects which snapshot or live catalog is read, and the list state stays in the
+query. Only spell, site, weapon and armour entries offer **Use as template for a new …**, the same action as Advanced
+tools → Reference; it starts a new draft in the project's form and writes nothing until you review and save. Units,
+events, mercenaries, items and nations are for browsing only, and their detail says so. If an unsaved new draft of
+that kind already has filled fields or another template, the button asks first: **Keep draft** (open it unchanged),
+**Replace template** (keeps the filled fields, which override the new template's values) or **Start clean from …**
+(discards the draft); **Cancel** or Escape closes the question. A deliberate replacement clears the old draft's
+review and errors. The
+Reference lookup links to the catalog (**Open in Vanilla catalog**) for filters and the other categories. The inspector is a local, offline
+browser of every vanilla unit, site,
+event, mercenary company, item, spell, weapon, armour and nation in the catalog that project reads (its reference
+snapshot, or the live catalog when it has none). It is built into Kosmokrator, uses no network and does not embed
+any website. Category buttons show the row counts; the list opens without a query and pages 40 entries at a time
+(20, 40, 60 or 100 per page).
+
+- **Search** matches an exact id or text in the name (for events, also the description). Event id 0 is a real
+  event and is listed and searchable.
+- **Everyday filters** are a few dropdowns per category. Units: **Age** (Early, Middle, Late), **Nation**,
+  **Role** (troops, commanders, capital-only, heroes) and **Magic** path. Choosing an age narrows the nation list
+  and clears a nation from another age; *Any nation* and *No nation* cover national and unaffiliated units.
+  Mercenaries: age (#eramask) and availability (level). Nations: age. Spells: school, path, research. Items:
+  slot, path, construction. Sites: path, rarity. Events: rarity. Armour: type. Weapons have search only.
+- **Nation membership** uses only explicit catalog relations: the fort, non-fort and coastal recruitment tables,
+  terrain and underwater recruits, national heroes and the capital site's recruits. A unit can belong to several
+  nations. Pretender gods, summons, mercenaries and event units count as *No nation*. A unit's age is the age of
+  the nations that list it, never its physical age.
+- **Advanced** (closed by default) holds sort, page size, the column search and condition chips below.
+- **Column search** finds any raw column by name or label (the full table has hundreds), shows its kind (number,
+  text or blank in every row), how many rows fill it and its range, then offers the conditions that fit.
+- **Conditions** are combined with AND (at most 8): *at least*, *at most*, *between*, *greater/less than*,
+  *equals*, *does not equal*, *has a value* (not blank and not 0), *is blank or 0* and *contains*. Numeric
+  conditions compare numbers, never text (`hp at least 100` does not match 20), and accept negative and decimal
+  values; a blank cell counts as 0 because the catalog leaves zero values blank. Invalid input (not a number, a
+  reversed range, an unknown column) is explained next to the editor and by the server.
+- **Column filters** show as chips under Advanced: activate a chip to edit it, × to remove it, or **Reset all**.
+  The status line reads "312 of 4,091 units · 41–80", plus the sort.
+- **Sorting** by id, name or a useful numeric column (numbers descend first; the button reverses). Ties keep id
+  order, so pages never overlap.
+- **The address keeps the list state** (`q`, `age`, `nation`, `role`, repeated `c=column:op:value`, `sort`, `order`,
+  `per`, `page` after
+  `?n=`), so opening an entry, switching category and coming back, bookmarking and Back/Forward all return to the
+  same filtered page. Each category remembers its own filters. Within a category the list and detail update in
+  place: earlier results stay visible (dimmed) while the next page loads, obsolete requests are cancelled, and
+  errors offer Retry and Reset. Values are the catalog's encoding, not interpreted game values.
+- **Units** open on the same sheet layout as project units (base stats, gear, abilities, magic, idle/attack
+  sprites, nations with how each recruits them) and list the vanilla companies that use them. List rows show
+  readable stats (no raw cost encodings). Unit links show the shared hover card.
+- **Mercenary companies** show the commander and troop sprites and names (resolved from the catalog's monster
+  ids), the commander's items with icons, and every company field with the manual's meaning (p.63).
+- **Events** show the full description, then requirements and effects as the catalog's raw tokens. A token whose
+  name equals an Event Modding Manual command shows that entry; others (including hex codes) are shown as
+  recorded and are not interpreted.
+- **Items, spells, sites, weapons, armour and nations** show labelled values, native item and path icons where
+  the snapshot has them, and the raw row in a closed disclosure.
+
+Provenance (snapshot id or live catalog, dataset version, revision) and the dom6inspector (GPL-3.0) and Illwinter
+attribution are in the collapsible data note below the list; per-entry notes are under *About this data*. Nothing is written; images use only the existing id-based sprite and icon
+routes, and nothing from the inspector is exported with the mod.
+
+## Mercenary companies
+
+**Browse → Mercenaries** lists this project's `#newmerc` companies as cards: commander and troop (with sprites and
+whether each name resolves to a project or vanilla monster, or is shared by several), troop count, replenishment,
+experience, level, era mask and items. **New company** opens a structured form for the fields
+documented on manual p.63: name, boss name, commander (`#com`), troop type (`#unit`), number of troops, minimum
+men, minimum pay, experience, recruitment rate, random equipment, level, era mask and up to four items (`#item`).
+Commander, troop and items are picked from named project definitions or searched in the vanilla catalog.
+
+The manual's `#com`, `#unit` and `#item` take names, so the form writes the exact current name of the pick; the
+review warns when several monsters share that name, because which one the game uses is not documented. A
+`#newmerc` block has no numeric id and is addressed by its opener line. Saving uses the same preview, SHA-256
+revision guard, parser/command preflight, project lock and backup as the advanced editor, and appends the block
+without touching other lines. Existing companies are edited, and other lines added, with **Advanced edit** on a card or
+the section's **Advanced edit** mode (the line editor), which now refuses numbers for those three commands. A company has no sprite
+command of its own; new monsters it hires need their own original artwork.
+
 ## Build and export
 
-**Export mod**, at the right of the project heading on every section (full width on narrow screens), opens the
-**Export & Workshop** section (`#/p/<slug>/export`, also in the Edit tab group). Its badge shows **ready**, the
-validation error count, or **re-validate**. The **Build and export** panel there (project-wide) works on the saved
-`.dm` only:
+The **Export** tab in the Build group opens the **Export** section (`#/p/<slug>/export`). A small flag on the tab
+appears only when something blocks an export: the validation error count, **re-validate** or **validation
+unavailable**. The **Export** panel there (project-wide) works on the saved `.dm` only:
 
-- It shows the saved revision (`.dm` path and SHA-256) and the validation result for that exact revision.
-  **Re-validate saved .dm** re-reads the file from disk. Export is disabled, with the reason shown, when
+- It shows the validation result for that exact revision; the `.dm` path and SHA-256 are under **Saved revision**.
+  **Re-validate** re-reads the file from disk. Export is disabled, with the reason shown, when
   validation has errors or describes another revision.
-- Unsaved unit drafts are listed as **not included**. Exporting never touches them, and a refused export keeps them.
-- **Export revision `<sha>`** sends `POST /api/projects/<slug>/export` with `{expected_sha256, format}` (`zip`,
+- Every unsaved draft of the project (see [Unsaved drafts](#page-chrome-and-wording)) is listed as **not
+  included**, each linking to its editor. Exporting never touches them, and a refused export keeps them.
+- **Export** sends `POST /api/projects/<slug>/export` with `{expected_sha256, format}` (`zip`,
   the default, or `folder`). Under the project lock the server checks the `.dm` still has that hash (else 409
   `sha_mismatch`: "Reload saved revision" shows the new one), snapshots the SHA-256 of every mod file, runs the
   unchanged core `export_mod` (which validates and refuses errors with 422 `validation_failed` plus the errors),
@@ -150,7 +354,7 @@ validation error count, or **re-validate**. The **Build and export** panel there
 
 ## Steam Workshop folder
 
-The **Steam Workshop folder** panel below Build and export prepares an export for the game's own uploader. See
+The **Steam Workshop** panel below Export prepares an export for the game's own uploader. See
 [WORKSHOP.md](WORKSHOP.md) for the folder rules, the install safety rules and the manual upload steps.
 
 1. **Choose what goes in.** The source is the export of the revision on the page; when there is none, a ZIP export is
@@ -171,7 +375,7 @@ heading, and every step works with the keyboard.
 
 ## Editing
 
-**Edit values** on a unit sheet or a project pretender sheet opens a form for one `#newmonster`/`#selectmonster`
+**Edit** on a unit sheet or a project pretender sheet opens a form for one `#newmonster`/`#selectmonster`
 block with an integer id:
 
 - Base stats (`#hp` ... `#ap`), leadership (`#poorleader` ... `#superiorleader`), fixed magic paths
@@ -197,6 +401,8 @@ block with an integer id:
   re-parses the candidate in memory, then writes through the core patcher (project lock, expected SHA-256,
   backup in `.kosmokrator/backups/`). If the file changed meanwhile, the save is refused (409) and the form keeps
   your values; **Reload latest file** re-reads it without losing them. **Cancel** discards the draft.
+- **Edit** / **Close editor** (and **Edit nation** on the Nation tab) open and close the form in place; the page is
+  not re-rendered, so the scroll position and focus on the button are kept. A closed editor keeps its draft.
 
 This is not full game-ability support: only the listed commands are editable, and Dominions remains the
 authority on what they do.
@@ -269,9 +475,11 @@ nation block. State: `GET /api/projects/<slug>/nations/<id>/edit`; preview and s
   through the core patcher (project lock, expected SHA-256, backup). A stale page gets 409 and the draft is kept;
   **Reload latest file (keep my form)** compares it with the new file. **Cancel** discards the draft.
 
-## Authoring tab: sites, spells, weapons, armour, heroes, reference, playtests
+## Advanced tools: sites, spells, weapons, armour, heroes, reference, playtests
 
-The **Authoring** tab (`#/p/<slug>/author/<sub>`) uses the shared functions in `kosmokrator/content.py`,
+The **Advanced tools** tab (`#/p/<slug>/author/<sub>`; bare `#/p/<slug>/author` is its overview) and the Edit mode of
+Spells and Sites (`#/p/<slug>/<section>/edit/<key>`; the field form opens directly)
+use the shared functions in `kosmokrator/content.py`,
 `playtest.py` and `importdm.py`; the CLI (`kosmokrator author|reference|import-dm`) and MCP (`author_state`,
 `author_save`, `reference_game_data`, `import_mod`) call the same code. Every form previews first (`preview: true`
 shows each change, warnings and the diff) and writes only on an explicit save, under the project lock, against the
@@ -306,24 +514,28 @@ expected SHA-256, with a backup. A stale page gets 409 and keeps the draft.
 - **Reference:** `GET /api/projects/<slug>/reference?cat=spells|sites|weapons|armors&q=` and
   `.../reference/<cat>/<id>` show raw catalog rows, labelled columns, and for spells the effect record and a
   documented summon monster. These are the catalog's vanilla values, not effective values after any mod.
+  **Use as template for a new …** (also on spell, site, weapon and armour entries of the Vanilla catalog) starts a
+  new form draft, asking first when an unsaved new draft would be affected (see the Vanilla catalog above). The
+  list's **unsaved draft** badge and the Export draft list use the same rule: a new draft counts once a field is
+  filled or a template is chosen. **Open in Vanilla catalog** shows the same entry there.
 - **Playtests:** `GET/POST /api/projects/<slug>/playtests` appends a record (game version, tester, nation,
   opponents, map, turns, result summary, observations, evidence references with optional SHA-256) to
   `<project>/playtests/records.json`, outside the mod folder so exports never include it. The record stores the .dm
   SHA-256 it was made against (it must be the current one) and `"claims": "none: observation only"`. Evidence files
   are not opened or verified; no balance conclusion is drawn.
-- **Import .dm** (`#/import`, `POST /api/import`, body up to 6 MB): one `.dm` plus asset files (relative paths
+- **Import** (sidebar; `#/import`, `POST /api/import`, body up to 6 MB): one `.dm` plus asset files (relative paths
   inside the mod folder, no `..`, known asset extensions) become a NEW project. An existing slug is refused (409);
   the `.dm` bytes are copied unchanged; referenced but missing assets are listed. The CLI form reads the source and
   the assets it references from the source's own folder and never changes the source. If writing fails, only the
   folder this import created is removed.
-- **External tools** (`#/tools`, `GET /api/tools`): status and guarded runs of administrator-configured Domerger,
+- **Tools** (sidebar; `#/tools`, `GET /api/tools`): status and guarded runs of administrator-configured Domerger,
   NationGen/SpriteGen installations from `integrations.py` (see TOOL-INTEGRATIONS.md). The browser cannot
   configure a tool or supply a path. Domerger support preview/run; SpriteGen
   provide manual handoffs. Receipts describe execution, not gameplay verification.
 
 ## Compare a unit with vanilla units
 
-**Compare with vanilla units** on a unit sheet, and **Compare** next to project units in a nation's roster, open
+**Compare** on a unit sheet, and next to project units in a nation's roster, opens
 `#/p/<slug>/units/<id>/compare?c=<id>[,<id>]`: the project unit beside one or two catalog units, found with the
 donor search (prefilled with the unit's catalog donor). Read-only; it never changes the unit. Rows: native-size idle
 and attack sprites, bottom-centred on equal stages (at least 64x64, else the largest canvas in the row; the stage
@@ -339,12 +551,11 @@ catalog. Link: [NATION-DESIGN.md](NATION-DESIGN.md) for the criteria to apply.
 These are static checks. Nothing here proves that the mod loads, that a god is selectable or that a unit is
 balanced; test in Dominions 6.
 
-## Copy and reset history (unit sheet)
+## Inheritance (unit sheet)
 
-Below the unit sheet, **Copy and reset history** summarises the `kosmokrator.inheritance/1` report for that monster
-(`m.inheritance`, also `GET /api/projects/<slug>/inheritance`). The summary line counts copies, resets and modelled
-fields that are retained from the donor, set in this `.dm`, cleared by a reset or unresolved; it is marked
-**uncertain** when anything is unresolved. Opening it shows:
+Below the unit sheet, **Inheritance** summarises the `kosmokrator.inheritance/1` report for that monster
+(`m.inheritance`, also `GET /api/projects/<slug>/inheritance`). The summary line counts copies, and resets and
+unresolved fields when there are any; it is marked **uncertain** when anything is unresolved. Opening it shows:
 
 - **Donors:** each `#copystats`/`#selectmonster` target with line, catalog or project origin, catalog version and,
   for project donors, the reason the chain is not resolved and any ordering uncertainty.
@@ -384,8 +595,14 @@ is kept in the address as `?r=8,13`.
   An invalid id shows the server error with a link back to the default.
 - **Reading key:** † raw cost component as written (`auto+N` = autocalc base), ≈ labelled estimate, ? unresolved (never
   zero). It sits beside the page heading, ahead of the data it explains.
-- **At a glance:** troops, commanders, recruitable mages and fixed magic maxima per project and reference nation, with
-  the nation's chart mark. The charts (roster bars, fixed-magic heatmap, cost and capability scatter) follow it.
+- **Charts first:** roster comparison bars (recruitable troops, commanders, or recruits with magic/holy paths), the
+  fixed-magic heatmap and the cost and capability scatter. The former "At a glance" table repeated the bars and
+  heatmap and was removed.
+- **Detailed tables** follow, collapsed. Each project nation keeps a visible roster line: "Compared here: 11
+  recruitable troops · 7 recruitable commanders. Not compared: 1 hero · 2 summons · 1 pretender form (see Units)",
+  using the same classification as Units and Overview. If the report's recruit counts differ from that
+  classification, the line is badged **incomplete** and shows both counts instead of hiding the gap (for example a
+  server started from an older checkout). Project items and each reference nation are closed disclosures too.
 - Per nation, a unit table grouped into commanders and troops: base HP/protection/MR/morale/attack/defence in separate
   right-aligned columns ("?" when unresolved); gold, resources and recruitment points as the
   raw component (†, `auto+N` = autocalc base) above the labelled estimate (≈) or "est. —" when unresolved; weapons,
@@ -416,11 +633,24 @@ browser does not draw maps, generate images or run a model; Codex or Claude buil
 
 ## Get started (agent handoff)
 
-**Get started** in the top bar (also **New nation or map** in the sidebar) opens `#/start`. `#/start/nation` and
+**Get started** in the top bar (also **Create** in the sidebar) opens `#/start`. `#/start/nation` and
 `#/start/map` are the two briefs; both routes survive reload and back/forward. The page contains no AI model, runs
-no command and calls no write API. It states that no project is created; Codex or Claude does the work. Its steps
-say to leave the launcher terminal running (the browser page can close and reopen), open the agent separately on
-the extracted Kosmokrator folder, and paste the instructions into the agent conversation, not the server terminal.
+no command and calls no write API. It states that no project is created; Codex or Claude does the work. It also
+says to leave the launcher terminal running (the browser page can close and reopen).
+
+The work is shown as three steps, with a progress list at the top of each brief (done ✓, current step marked
+`aria-current="step"`, next):
+
+1. **Prepare the brief.** Fill in the form and press **Prepare agent instructions**. Nothing is created.
+2. **Hand off to your agent.** The instructions appear under "Step 2"; **Copy instructions** marks this step done
+   only when the browser confirms the copy, and **Download brief JSON** always does. If the clipboard is blocked, a
+   persistent error says the instructions were not copied and offers **Select the instructions** (select them and
+   copy by hand) and **I copied them manually**; step 3 stays closed until one of these. Paste them into Codex or
+   Claude Code opened on the extracted Kosmokrator folder, not into the server terminal.
+3. **Return and review.** "Step 3" offers **Reload projects and check**, which only re-reads the workspace: it shows
+   **Open <slug>** once the project exists, or says it is not there yet (the agent may still be working; Kosmokrator
+   does not run or track it). For a map in an existing project it links to that project's Maps. Then review
+   Overview and Validation, and Export when validation has no errors.
 
 - **Nation brief:** nation name, project slug (derived from the name until edited; must match the `create` slug rule
   and not exist in the workspace), era and theme (required), playstyle (optional).
@@ -443,7 +673,8 @@ the extracted Kosmokrator folder, and paste the instructions into the agent conv
   guesses an interpreter path and never runs a command.
 - **Copy instructions** and **Download brief JSON** use the same patterns as
   map jobs. The JSON (`kosmokrator.design-brief/1`) is a design brief, not an `author_save` request. Editing a field
-  hides an earlier result so copied text always matches the form. Drafts are kept in this tab's session storage.
+  hides an earlier result (and returns the progress to step 1) so copied text always matches the form. Drafts are
+  kept in this tab's session storage.
 - Optional agent setup, MCP and costs, and the JSON format, are in collapsed sections that link to
   [COMMUNITY-QUICKSTART.md](COMMUNITY-QUICKSTART.md), [AGENT_USAGE.md](AGENT_USAGE.md),
   [NATION-DESIGN.md](NATION-DESIGN.md) and [AGENT-MAPS.md](AGENT-MAPS.md).
@@ -477,14 +708,16 @@ Then open <http://127.0.0.1:8765/>. Press Ctrl+C to stop. If installed, `kosmokr
 - **Home:** **Start a nation**, **Start a map** and **Import a .dm**, then a table of the workspace's projects with
   era, version and validation, and the workspace folder. An empty workspace shows the same start actions and the
   [Get started](#get-started-agent-handoff) steps instead of a command.
-- **Project heading:** the mod's `#icon` banner (same rules as the sidebar) beside the mod name, on every
-  tab. Nation flags appear only on the Nation tab.
-- **Overview:** the [project readiness](#project-readiness) panel, counts for the selected nation and
-  project-wide counts (labelled apart), **Dependencies and compatibility** (overlap
+- **Project heading:** the mod's `#icon` banner (same rules as the sidebar, smaller on narrow screens) beside the
+  mod name, on every project tab (not in the Vanilla catalog). Nation flags appear only on the Nation tab.
+- **Overview:** the [readiness](#project-readiness) panel, the collapsed reference snapshot, roster tiles for the
+  selected nation (recruitable troops, recruitable commanders, heroes, summons, start army/defence-only units,
+  pretenders, sites; each roster tile opens Units with that role filter) and project-wide counts (labelled apart), **Dependencies** (overlap
   count and the dependency editor; validation counts are in the readiness panel), then mod info, `.dm` SHA-256,
-  catalog provenance and JSON links under Advanced.
-- **Nation:** flag (native and 2x), description, summary, colours, clears, recruitable troops/commanders,
-  start army, start sites and their gems, defence/wall/guard commands, other commands, source.
+  catalog provenance and JSON links under Details.
+- **Nation:** flag (native and 2x), description, summary, colours, clears, fort troops/commanders
+  (`#addrecunit`/`#addreccom`), **Other recruitment** (capital-site, terrain and coastal recruits, from the units'
+  recruitment entries), start army, start sites and their gems, defence/wall/guard commands, other commands, source.
 - **Units:** searchable list (name, id, role, donor; press `/` to focus search, arrows to move, Esc to
   clear). The detail view opens with a **unit sheet** laid out like the in-game unit information screen (and the
   dom6inspector unit overlay used as a visual reference): compact named base stats in three columns, weapons and
@@ -501,8 +734,13 @@ Then open <http://127.0.0.1:8765/>. Press Ctrl+C to stop. If installed, `kosmokr
      special abilities. Each field is marked donor or authored with its line. Overrides show the donor value they replaced.
   It also lists recruitment (via nation/site commands), costs, unsupported commands, unresolved
   dependencies, validation items for the block, and the source block.
-  Monsters named only by nation god commands (`#addgod`) are **pretender forms**: they are grouped separately,
-  never counted as troops or commanders, and the Units tab count is the roster without them.
+  One shared classification groups the list, the role filter, the Overview tiles and Balance's roster line:
+  **Recruitable troops** and **Recruitable commanders** (a recruitment entry for the selected nation: fort,
+  capital or other start site, terrain, foreign or coastal command), **Heroes** (live `#heroN`/`#multiheroN`),
+  **Summons (not recruited)**, **Start army or defence only (not recruitable)**, **Not tied to a nation** and
+  **Pretender forms (not recruitable)** (named only by nation god commands such as `#addgod`). Each group label shows
+  its count, the status line summarises them ("22 units: 11 recruitable troops · 7 recruitable commanders · 1 hero ·
+  2 summons · 1 pretender form") and the Units tab count is the same total as the list.
   A "God fields" panel shows `#startdom`, `#pathcost`, `#homerealm` and donor columns that change shape, economy
   or god behaviour (e.g. `prophetshape`, `gemprod`, `alchemy`). Those columns are not modelled; their status
   after `#clearspec` is an assumption.
@@ -513,8 +751,8 @@ Then open <http://127.0.0.1:8765/>. Press Ctrl+C to stop. If installed, `kosmokr
   unit sheet (base physical stats, abilities, equipment for project gods, starting magic, path cost, dominion and
   the design-point encoding marked †), then availability with reasons; artwork, per-field sources, provenance and
   JSON are collapsible sections.
-- **Sites, Other definitions, Assets, Source, Validation, Docs.** Assets show path, format,
-  dimensions, bytes, SHA-256 and which definitions use each file. Missing referenced files are flagged.
+- **Sites, Other, Assets, Source, Validation, Docs.** Assets show path, format, dimensions, bytes and
+  which definitions use each file (**Copy hash** copies the SHA-256). Missing referenced files are flagged.
 - **Look:** quiet neutral dark surfaces with hairline borders, parchment serif headings, one warm accent for the
   current tab, selection and focus, and right-aligned tabular numbers, in the spirit of the Dominions 6 interface.
   Layout, chart marks and colours are plain CSS and SVG; native game icons (paths, gems, costs, traits, items) appear
@@ -552,7 +790,27 @@ catalog dataset version and revision, the `.dm` path and SHA-256. Add `?download
 /api/projects/<slug>/inheritance              copy/reset history for every project monster
 /api/projects/<slug>/balance[?references=ID,ID]  nation comparison tables (same-era references, at most 12)
 /api/projects/<slug>/map-builds               agent map jobs, defaults and limits (POST on the same path)
+/api/projects/<slug>/reference-snapshot       reference snapshot status, coverage and missing data (POST previews/writes)
+/api/projects/<slug>/{gem-icons,path-icons,ability-icons,item-icons,trait-icons}/<key>.png
+                                              native icons from the catalog this project reads (its snapshot if any)
+/api/projects/<slug>/trait-icons              native UI icon map for this project
+/api/projects/<slug>/inspector                vanilla inspector counts and catalog provenance
+/api/projects/<slug>/inspector/<category>?q=&c=<column>:<op>[:<value>]&sort=&order=asc|desc&page=&per_page=
+                                              &age=1|2|3 (units, mercs, nations)&nation=<id>|national|none&role=
+                                              troop|commander|capital|hero (units)
+                                              one bounded page (at most 100) of units, sites, events, mercs, items,
+                                              spells, weapons, armors or nations; c repeats (AND, at most 8), ops
+                                              has|none|eq|ne|contains|gt|gte|lt|lte|between (between takes
+                                              low..high, e.g. rarity:between:-2..0); the original single
+                                              field=&op=has|eq|contains&value= raw-text filter still works
+/api/projects/<slug>/inspector/<category>/filters  everyday filters (`simple`), common filters, every column with its
+                                              kind, and the sort choices, read from the catalog
+/api/projects/<slug>/inspector/<category>/<id>  one readable catalog entry with its raw row
+/api/projects/<slug>/mercs                    #newmerc companies with resolved names (POST previews/appends one)
 ```
+
+`/api/meta` adds `project_references` (projects that read a snapshot, with state and dataset version), and the
+project list adds `reference_snapshot` per project. The whole-project model adds `reference` (snapshot status).
 
 Stable identifiers are `uid` values such as `monster:5003`, `site:1700` and `nation:150`. Blocks without a number use
 `<kind>:line<N>`. Gods are namespaced by origin: `god:project:5011` (a project monster, with `monster_uid`) and
@@ -635,7 +893,13 @@ and unsupported conditions remain unresolved. See [Universal authoring](UNIVERSA
 
 Troop/commander roles come from nation and site commands (`#addrecunit`, `#homemon`, `#startunittype1`, ...
 as troop; `#addreccom`, `#homecom`, `#startcom`, `#startscout`, `#defcom1`, ... as commander). A monster
-that no command references is "not recruited".
+that no command references is "not recruited". Recruitment entries (`recruitment` on each monster) come from
+`#addrecunit`/`#addreccom`, site `#homemon`/`#homecom`/`#mon`/`#com`, and the terrain, foreign, underwater and
+coastal commands the browser already reads as roster ties (`#addforeignunit`/`#addforeigncom`, `#forestrec`,
+`#mountainrec`, `#swamprec`, `#wasterec`, `#caverec`, `#coastrec`, the matching `…com` commands, `#uwrec`/`#uwcom`,
+`#landrec`/`#landcom`, and the deprecated `#coastunit1-3`/`#coastcom1-2`, labelled "deprecated command; confirm in
+game"). Start army, defence, wall and guard commands are ties but not recruitment. Other terrain variants
+(`#plainrec`, `#…fortrec`, …) are not read yet.
 
 ## Safety
 
@@ -680,8 +944,8 @@ directory under workspace `tool-runs`. Downloads verify recorded output hashes. 
 
 - Nothing here proves that the mod loads, plays or is balanced. Test in Dominions 6.
 - Only the fields listed above are resolved. Nation and site blocks are summarised from their commands, and
-  other nation commands are listed but not interpreted. Dedicated forms cover common fields; Advanced
-  commands exposes the wider manual index, including items, mercenaries and events. Unknown lines remain visible.
+  other nation commands are listed but not interpreted. Dedicated forms cover common fields; **Advanced tools → All
+  manual commands** (labelled Advanced) exposes the wider manual index, including items, mercenaries and events. Unknown lines remain visible.
 - Equipped combat values and supported costs are static estimates. Conditional abilities, blesses, spells,
   mounts and automatic costs can change the values in game.
 - Donor data comes from the third-party dom6inspector catalog you supply and may differ from your game.

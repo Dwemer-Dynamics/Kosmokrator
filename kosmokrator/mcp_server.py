@@ -73,10 +73,12 @@ def build_server(k: Kosmokrator):
         return envelope(k.allocate_ids, project, kind, count, labels, dependencies)
 
     @mcp.tool(annotations=ro)
-    def search_game_data(query: str, category: str = "all", limit: int = 20) -> dict[str, Any]:
+    def search_game_data(query: str, category: str = "all", limit: int = 20,
+                         project: str | None = None) -> dict[str, Any]:
         """Search the local dom6inspector catalog by id or name. Categories: all, units, nations, weapons, armors,
-        sites, spells, items. Results are capped (max 50) and include catalog source/revision metadata."""
-        return envelope(k.search_game_data, query, category, limit)
+        sites, spells, items. Results are capped (max 50) and include catalog source/revision metadata.
+        With project, search that project's reference snapshot when it has one."""
+        return envelope(k.search_game_data, query, category, limit, project)
 
     @mcp.tool(annotations=ro)
     def validate_mod(project: str, dependencies: list[str] | None = None) -> dict[str, Any]:
@@ -94,6 +96,8 @@ def build_server(k: Kosmokrator):
     def author_state(project: str, kind: str) -> dict[str, Any]:
         """State for commands:<context>, dependencies, maps, maps:<id>, map-builds, content or playtests.
         Read-only reports: inheritance, compatibility and balance[:comma-separated nation IDs].
+        reference-snapshot reports the project's local reference snapshot (state, coverage, missing data).
+        mercs lists #newmerc companies with #com/#unit/#item names resolved and the structured form options.
         Includes source revision, reviewed schemas, authored values and preserved unknown lines."""
         return envelope(k.author_state, project, kind)
 
@@ -101,15 +105,21 @@ def build_server(k: Kosmokrator):
     def author_save(project: str, kind: str, body: dict[str, Any]) -> dict[str, Any]:
         """Preview then save a bounded authoring request. Includes commands:<context>, dependencies and maps:<id>
         or maps:import. map-builds supports create/review/accept for agent-produced bundles.
+        reference-snapshot (expected_sha256, expected_snapshot, sprites, preview) copies the catalog data and local
+        reference art the project needs into its .kosmokrator folder; it is never exported.
+        mercs (expected_sha256, preview, company) appends one #newmerc company; commander/troop/items are
+        {origin: catalog, id} or {origin: project, key} and are written as their exact names (manual p.63).
         Mod edits need expected_sha256; map edits and jobs need expected_revision; acceptance also binds output.
         Uses project locking, backups and reviewed command forms."""
         return envelope(k.author_save, project, kind, body)
 
     @mcp.tool(annotations=ro)
-    def reference_game_data(category: str, query: str | None = None, id: int | None = None) -> dict[str, Any]:
+    def reference_game_data(category: str, query: str | None = None, id: int | None = None,
+                            project: str | None = None) -> dict[str, Any]:
         """Catalog spells/sites/weapons/armors: search by query, or one row by id with labelled raw columns
-        (spells also give their effect record and a documented summon monster). Raw vanilla values only."""
-        return envelope(k.reference, category, query, id)
+        (spells also give their effect record and a documented summon monster). Raw vanilla values only.
+        With project, read that project's reference snapshot when it has one."""
+        return envelope(k.reference, category, query, id, project)
 
     @mcp.tool(annotations=rw)
     def import_mod(source: str, slug: str, name: str | None = None, preview: bool = True) -> dict[str, Any]:

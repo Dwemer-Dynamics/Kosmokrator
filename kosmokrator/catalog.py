@@ -11,6 +11,7 @@ import csv
 import io
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,13 @@ CATEGORIES: dict[str, tuple[str, tuple[str, ...]]] = {
     "spells": ("spells.csv", ("school", "researchlevel", "path1", "pathlevel1")),
     "items": ("BaseI.csv", ("type", "constlevel", "mainpath", "mainlevel")),
 }
+# Tables read on request only: they are not part of "all" searches or overlays, and a catalog without them stays
+# usable. Mercenary companies and events (event id 0 is a real event).
+OPTIONAL_CATEGORIES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "mercs": ("Mercenary.csv", ("level", "nrunits", "minpay", "eramask")),
+    "events": ("events.csv", ("rarity",)),
+}
+ALL_CATEGORIES: dict[str, tuple[str, tuple[str, ...]]] = {**CATEGORIES, **OPTIONAL_CATEGORIES}
 SETUP_HINT = (
     "Supply a local dom6inspector checkout once (e.g. `git clone https://github.com/larzm42/dom6inspector`) "
     "and pass its path with --catalog or KOSMOKRATOR_CATALOG. Kosmokrator never downloads it for you."
@@ -99,15 +107,39 @@ class Catalog:
     gamedata: Path
     meta: dict[str, Any]
     tables: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    # Derived read-only data (column kinds, filter metadata), computed once per catalog object. A snapshot catalog
+    # object is replaced whenever its files change, so memoized values never outlive the data they came from.
+    memo: dict[Any, Any] = field(default_factory=dict, repr=False, compare=False)
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
 
     def table(self, category: str) -> list[dict[str, str]]:
-        if category not in self.tables:
-            fname = CATEGORIES[category][0]
-            path = self.gamedata / fname
-            if not path.is_file():
-                raise KosmoError("catalog_incomplete", f"Catalog file missing: {path}", hint=SETUP_HINT)
-            self.tables[category] = _read_table(path)
-        return self.tables[category]
+        found = self.tables.get(category)
+        if found is not None:
+            return found
+        # One parse per table even when several browser requests ask for it at once.
+        with self._lock:
+            if category not in self.tables:
+                fname = ALL_CATEGORIES[category][0]
+                path = self.gamedata / fname
+                if not path.is_file():
+                    raise KosmoError("catalog_incomplete", f"Catalog file missing: {path}", hint=SETUP_HINT)
+                self.tables[category] = _read_table(path)
+            return self.tables[category]
+
+    def memoized(self, key: Any, build: Any) -> Any:
+        """build() once per key for this catalog; the result must be treated as read-only by callers."""
+        found = self.memo.get(key)
+        if found is not None:
+            return found
+        with self._lock:
+            if key not in self.memo:
+                self.memo[key] = build()
+            return self.memo[key]
+
+    def has_table(self, category: str) -> bool:
+        """True when the category's table is loaded or present on disk (optional tables may be absent)."""
+        return category in self.tables or (category in ALL_CATEGORIES
+                                           and (self.gamedata / ALL_CATEGORIES[category][0]).is_file())
 
     def ids(self, category: str) -> set[int]:
         out = set()
@@ -168,8 +200,8 @@ def load_catalog(path: str | os.PathLike[str] | None, *, required: bool = True) 
 
 
 def search(catalog: Catalog, query: str, category: str = "all", limit: int = 20) -> dict[str, Any]:
-    if category != "all" and category not in CATEGORIES:
-        raise KosmoError("bad_category", f"Unknown category {category!r}", allowed=["all", *CATEGORIES])
+    if category != "all" and category not in ALL_CATEGORIES:
+        raise KosmoError("bad_category", f"Unknown category {category!r}", allowed=["all", *ALL_CATEGORIES])
     limit = max(1, min(int(limit), MAX_RESULTS))
     q = query.strip().lstrip("#")
     if not q:
@@ -178,7 +210,7 @@ def search(catalog: Catalog, query: str, category: str = "all", limit: int = 20)
     ql = q.lower()
     hits: list[dict[str, Any]] = []
     for cat in (CATEGORIES if category == "all" else [category]):
-        extra = CATEGORIES[cat][1]
+        extra = ALL_CATEGORIES[cat][1]
         for r in catalog.table(cat):
             rid = (r.get("id") or "").strip()
             name = (r.get("name") or "").strip()
