@@ -3361,7 +3361,7 @@
         : I.state === "conflict" ? "A mod folder with this name already exists and was not installed from this project. It is left untouched." : null;
       const R = ui.install;
       return el("div", { class: "ws-step stack" },
-        el("h4", { id: "ws-install-h", text: "3. Install locally (optional)" }),
+        el("h4", { id: "ws-install-h", text: "Install locally (optional)" }),
         el("dl", { class: "kv" },
           el("dt", { text: "Mods folder" }), el("dd", null, I.mods_dir ? el("span", { class: "mono", text: I.mods_dir }) : el("span", { class: "muted", text: "none" }),
             " ", el("span", { class: "faint", text: I.source === "environment" ? `(server setting ${I.env})` : I.source === "appdata" ? "(%APPDATA%\\Dominions6\\mods)" : "" })),
@@ -3403,9 +3403,10 @@
           el("span", { class: "faint", text: "Upload happens inside Dominions 6." })),
         ui.loadError ? errorBox(ui.loadError, "Workshop status") : !D ? stateBox("loading", "Reading Workshop status...") : null,
         el("div", { class: "ws-step stack" },
-          el("h4", { text: "1. Choose what goes in" }),
+          el("h4", { text: "Choose what goes in" }),
           el("dl", { class: "kv" },
-            el("dt", { text: "Source" }), el("dd", null, src ? el("span", { class: "mono", text: src.export_id })
+            el("dt", { text: "Package" }), el("dd", null, src ? [el("span", { class: "mono", text: src.export_id }),
+              el("p", { class: "panel-note", text: "Uses the artwork saved in this export. If you changed artwork, export again first." })]
               : el("span", { class: "muted", text: `No export of revision ${p.sha256.slice(0, 8)} yet; a ZIP export is made first.` })),
             el("dt", { text: "Banner" }), el("dd", null, banner && banner.status === "ok"
               ? [el("code", { text: banner.path }), el("span", { class: "faint", text: " → banner.png 256×256, centred on transparency, pixels unchanged" })]
@@ -3418,10 +3419,10 @@
           blocked ? el("p", { class: "panel-note", id: "ws-blocked", text: blocked }) : null,
           el("div", { role: "status", "aria-live": "polite" }, ui.busy === "prepare" ? stateBox("loading", "Checking the export and writing the Workshop folder...") : null)),
         ui.error ? failure(ui.error, "ws-outcome", "Not prepared") : null,
-        latest ? el("div", { class: "ws-step stack" }, el("h4", { text: "2. Prepared folder" }), preparedView(latest, !!ui.result)) : null,
+        latest ? el("div", { class: "ws-step stack" }, el("h4", { text: "Prepared folder" }), preparedView(latest, !!ui.result)) : null,
         D ? installView(latest) : null,
         el("div", { class: "ws-step stack" },
-          el("h4", { text: `${D ? 4 : 3}. Upload from the game` }),
+          el("h4", { text: "Upload from the game" }),
           el("ol", { class: "ws-steps" }, (steps.length ? steps : ["Start Dominions 6, open Mods, right-click the local entry and choose \"Upload to Steam Workshop\"."]).map((t) => el("li", { text: t }))),
           el("div", { class: "btn-row" },
             el("a", { class: "btn", href: (D && D.steam_run_url) || "steam://run/2511500" }, "Launch Dominions 6 in Steam"),

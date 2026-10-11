@@ -961,6 +961,15 @@ def build_project_model(workspace: Path, slug: str, catalog: Catalog | None) -> 
             others.append(_definition_model(c, b))
         prior.append(('project', text[b.opener.start:b.end.end] if b.end else text[b.opener.start:]))
 
+    # Form identity references can point forward; keep stat inheritance in activation order.
+    final_monsters = {unit['id']: unit for unit in monsters if isinstance(unit.get('id'), int)}
+    for unit in monsters:
+        equipped = unit['resolved']['equipped']
+        for entry in [*equipped.get('shapes', []), *equipped.get('mounts', [])]:
+            target = final_monsters.get(entry['id'])
+            if target:
+                entry.update(name=target['name'], origin='project', status='resolved')
+
     graph_objects = {o['key']: o for o in graph['objects']}
     for obj in [*monsters, *sites, *nations, *others]:
         key = f"{obj.get('context', obj['kind'])}:line:{obj['source']['line']}"
