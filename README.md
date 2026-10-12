@@ -33,7 +33,7 @@ See the [first-project guide](docs/COMMUNITY-QUICKSTART.md) for other ports and 
 Python troubleshooting, optional reference data and MCP setup. Non-Windows setup
 instructions are included, but have not been verified on a real non-Windows system.
 
-![Kosmokrator Get started page with nation and map workflows](docs/images/get-started.png)
+![Kosmokrator unit browser showing the Cairnmark roster and Yew Bowman](docs/images/get-started.png)
 
 *Example workspace with optional reference data connected. Your project list will differ.*
 
@@ -86,7 +86,7 @@ Unknown commands and unresolved mechanics remain marked as unverified.
 
 ## Guides
 
-| I want to… | Read |
+| I want toâ€¦ | Read |
 | --- | --- |
 | Make my first nation or map | [First-project guide](docs/COMMUNITY-QUICKSTART.md) |
 | Give an agent the authoring rules | [Agent usage](docs/AGENT_USAGE.md) |
