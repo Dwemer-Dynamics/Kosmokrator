@@ -1,5 +1,7 @@
 # Hebdomad design review
 
+Historical project-specific evidence. This is not a current generation rule or release verification.
+
 For the current expanded local project, read [the expanded roster review](HEBDOMAD-ROSTER-REVIEW.md).
 The older review below preserves its original source scope and historical test evidence.
 

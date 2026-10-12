@@ -77,7 +77,8 @@ and SevenRealms map are excluded from the source preview and wheel.
 ## Checks and limits
 
 Edits use revisions, previews and backups. Exports go to new destinations;
-Kosmokrator does not install them into the game or publish them.
+Regular exports do not install themselves. Optional guarded local installation is
+available through the [Workshop workflow](docs/WORKSHOP.md); publication is manual.
 
 Validation checks files and supported rules. It does **not** prove that a mod
 loads, plays correctly or is balanced. Test exports in Dominions 6 separately.

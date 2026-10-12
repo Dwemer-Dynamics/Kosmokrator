@@ -1,6 +1,6 @@
 # Nation design and balance criteria
 
-Scope: new nations and nation revisions built with Kosmokrator. These are human-approved design criteria from the October 7, 2026 research review. They guide authoring and review; they are not automatic balance checks or a universal tier formula.
+Scope: new nations and nation revisions built with Kosmokrator. These criteria guide authoring and review; they are not automatic balance checks or a universal tier formula.
 
 ## Required design brief
 
@@ -89,7 +89,7 @@ item; do not describe an accelerated or static result as normal gameplay proof.
 ## National Features: vanilla presentation format
 
 For every generated nation, write the in-game National Features text in nation
-`#summary` using the vanilla labelled-line format shown by EA Arcoscephale. Keep
+`#summary` using the vanilla labelled-line format. Keep
 the labels, spelling and order below; write original, nation-specific content.
 Do not replace this section with a short promotional sentence or lore paragraph.
 
@@ -108,6 +108,9 @@ and useful detail. Cover all six categories even for a nation with ordinary prie
 or no special dominion. Do not invent mechanics to fill a line. Distinguish reliable
 magic access from random, rare, capital-only or summon-dependent access. Mention
 important recruitment restrictions and weaknesses where they change the summary.
+Describe concrete capabilities and restrictions. For priests, state Holy levels,
+availability and distinctive abilities rather than relying on adjectives such as
+weak or strong. Keep lore readable and separate from mechanical feature lines.
 
 The engine may append a Buildings line automatically. Inspect the actual in-game
 screen and let the engine supply that line when it already reports the correct
@@ -213,7 +216,7 @@ These are reference lessons, not endorsements that any mod is balanced. Communit
 
 | Reference | Mechanic or author finding | Design lesson |
 | --- | --- | --- |
-| [EA Mekone](https://illwiki.com/dom5/dom6/mekone-ea) | Fire/Earth forging, powerful recruitment-limited giants, slave troops and fort unrest. | Elite power can be bounded by production and strategic costs. Closest Hebdomad theme reference. |
+| [EA Mekone](https://illwiki.com/dom5/dom6/mekone-ea) | Fire/Earth forging, powerful recruitment-limited giants, slave troops and fort unrest. | Elite power can be bounded by production and strategic costs.  |
 | [EA Abysia](https://illwiki.com/dom5/dom6/abysia-ea) | Heat-resistant infantry and Fire magic, with capital Blood/Astral mages. | Plan for fire-resistant enemies and later development. |
 | [EA Agartha](https://illwiki.com/dom5/dom6/agartha-ea) | Durable troops with weak combat skills, cave/amphibious advantages and Earth magic. | Terrain and support can make imperfect troops useful. |
 | [EA Ulm](https://illwiki.com/dom5/dom6/ulm-ea) | Strong humans with low magic resistance, smiths and increased fort resources. | Production and forging can carry identity while leaving vulnerabilities. Do not conflate it with MA Ulm. |
@@ -242,4 +245,4 @@ Use same-era vanilla results as a comparison range. Do not adopt a fixed provinc
 
 For every nation, deliver the design brief, reference comparisons, source-backed findings, proposed changes ranked by importance, and a test log with untested limits. Static validation, successful export and successful loading are distinct from gameplay balance evidence.
 
-Current example: [Hebdomad review](HEBDOMAD-REVIEW.md).
+Use the same review structure for every nation; record project-specific evidence in its delivery report.
