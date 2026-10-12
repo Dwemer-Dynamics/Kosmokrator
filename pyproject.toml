@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kosmokrator"
-version = "0.5.1"
+version = "0.5.2"
 description = "Local, static authoring/validation/export tooling for Dominions 6 mod (.dm) projects, with an optional MCP server."
 readme = "README.md"
 license = {file = "LICENSE"}
