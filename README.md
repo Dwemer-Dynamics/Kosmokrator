@@ -70,33 +70,15 @@ Use these as starting briefs, then adjust the fields in the browser.
 > province shapes, readable coastlines and fair starting areas. Include winter and
 > supported terrain image layers, and review connections and ownership masks.
 
-Prefer a supplied example? The [first-project guide](docs/COMMUNITY-QUICKSTART.md#optional-explore-a-supplied-starter)
-explains how to build the lightweight Hebdomad starter. The expanded local showcase
-and SevenRealms map are excluded from the source preview and wheel.
-
 ## Checks and limits
 
-Edits use revisions, previews and backups. Exports go to new destinations;
+Edits use revisions, previews and backups. Exports go to new destinations.
 Regular exports do not install themselves. Optional guarded local installation is
 available through the [Workshop workflow](docs/WORKSHOP.md); publication is manual.
 
 Validation checks files and supported rules. It does **not** prove that a mod
 loads, plays correctly or is balanced. Test exports in Dominions 6 separately.
 Unknown commands and unresolved mechanics remain marked as unverified.
-
-## Guides
-
-| I want toâ€¦ | Read |
-| --- | --- |
-| Make my first nation or map | [First-project guide](docs/COMMUNITY-QUICKSTART.md) |
-| Give an agent the authoring rules | [Agent usage](docs/AGENT_USAGE.md) |
-| Plan a themed, balanced nation | [Nation design](docs/NATION-DESIGN.md) |
-| Create sprites, flags and banners | [Asset rules](docs/ASSET-RULESET.md) |
-| Generate and review a map | [Agent maps](docs/AGENT-MAPS.md), [map design](docs/MAP-DESIGN.md), [image layers](docs/MAP-LAYERS.md) |
-| Understand the editors and API | [Browser guide](docs/WEB-BROWSER.md) |
-| Use commands or inspect project storage | [Command-line reference](docs/CLI-REFERENCE.md) |
-| Coordinate optional specialist agents | [Agent team workflow](docs/AGENT-TEAM.md) |
-| Check community-preview evidence and gaps | [Readiness](docs/COMMUNITY-READINESS.md) |
 
 ## Development
 
