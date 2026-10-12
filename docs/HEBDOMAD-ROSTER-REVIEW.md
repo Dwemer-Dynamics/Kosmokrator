@@ -1,5 +1,7 @@
 # Expanded Hebdomad roster review
 
+Historical project-specific evidence. This is not a current generation rule or release verification.
+
 Reviewed October 8, 2026 against the local authoritative project and dom6inspector 6.37 catalog.
 This replaces the old eleven-unit scope for the current demo. It is a source review, not a power rating.
 The mod has eight recruitable troops, seven recruitable commanders, two heroes, two summoned

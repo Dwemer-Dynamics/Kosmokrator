@@ -63,31 +63,24 @@ about historical theology, and they have not been balance-tested.
   - *The Furnace of the Seventh Gate*: fire path, 2 fire gems, `#homecom` Archon.
   - *The Quarry of Sealed Matter*: earth path, 2 earth gems, `#homemon` Sealbearer.
 - **Start army:** Strategos with 15 Brazen Wardens and 15 Smoke Slingers, plus a Watcher scout.
-- **Province defence:** Strategos commanders, Hylic Spearmen (×20 multiplier), Slingers, Wardens at PD 20+;
+- **Province defence:** Strategos commanders, Hylic Spearmen (Ã—20 multiplier), Slingers, Wardens at PD 20+;
   wall and gate defenders.
 - **Pretenders:** `#homerealm 3` (Mediterranean realm; the catalog lists e.g. Titan of the Forge,
   Demiurge and Great Archon for that realm), plus `#addgod` for the two national gods above. No realm 10.
-- **Flag:** original 128×128 32-bit TGA generated with the stdlib (an ember banner, a dark "matter" disc, a
+- **Flag:** original 128Ã—128 32-bit TGA generated with the stdlib (an ember banner, a dark "matter" disc, a
   bright spark and seven gold spheres), at `art/hebdomad_flag.tga`.
 - AI hints: `#aifirenation`, `#aiearthnation`. The nation uses no complex or untested mechanics (no
   shapechange, events or custom spells).
 
-## Custom unit art (optional)
-`kosmokrator demo` keeps `#copyspr` for the 11 roster units. Original replacement sprites, 22 frames (idle and attack for
-each unit), live in [assets/hebdomad-v6](../assets/hebdomad-v6) (current, vanilla-inspired with softer per-unit material shading and a corrected, connected Smoke Slinger attack sling;
-earlier sets stay unchanged in [assets/hebdomad-v5](../assets/hebdomad-v5), [assets/hebdomad-v4](../assets/hebdomad-v4), [assets/hebdomad-v3](../assets/hebdomad-v3), [assets/hebdomad-v2](../assets/hebdomad-v2) and [assets/hebdomad](../assets/hebdomad)). See [ASSET-RULESET.md](ASSET-RULESET.md) for the
-contract, `asset-manifest.json` for hashes and measurements, and `preview.png` or `overview.png` for a contact sheet. To
-rebuild them, run [scripts/prepare-hebdomad-assets.cjs](../scripts/prepare-hebdomad-assets.cjs) (Node with
-`sharp` on `NODE_PATH`). Then copy the frames to `mod/hebdomad/art/units/`. In each unit, replace
-`#copyspr` with `#spr1`/`#spr2` after `#copystats` using `patch`. The manual warns that copied sprite
-references can alter the donor.
+## Artwork scope
 
-Pretender art follows the same contract in [assets/hebdomad-pretenders](../assets/hebdomad-pretenders): two
-equal cells (idle left, attack right, both facing left), converted by the same script with `target_body_px` 52
-for the giant Demiurge (giant target 54 +/- 2; 52 keeps margins for its long attack reach) and 34 for Sophia
-(human target). The script needed no changes. The four processed 64x64 frames are packaged with Kosmokrator (`kosmokrator/demo_assets/pretenders/`, same SHA-256
-as `asset-manifest.json`); the source sheets are not packaged. `kosmokrator demo` copies them to `art/pretenders/`
-and the two gods use `#spr1`/`#spr2`, as in the local project. Exports include them.
+The demo uses vanilla sprite references for its 11 roster units and includes four
+original pretender frames from `kosmokrator/demo_assets/pretenders/`. Source sheets
+and historical replacement-art sets are not included in this distribution.
+
+This lightweight starter is an explicit demo exception to the complete original-art
+requirements in [ASSET-RULESET.md](ASSET-RULESET.md). New nation requests follow those
+requirements unless the user requests a prototype or reused artwork.
 
 ## Not verified
 See [HEBDOMAD-REVIEW.md](HEBDOMAD-REVIEW.md) for the current source review, including inherited prophet
@@ -98,4 +91,4 @@ realm gods for this era have not been tested in game. Neither has whether the tw
 pretender screen, their final design points, or what `#clearspec` removed from them. Load the mod and check
 before relying on it.
 
-- **Mod banner:** packaged original 256�64 TGA, referenced by `#icon "mod_banner.tga"`.
+- **Mod banner:** packaged original 256x64 TGA, referenced by `#icon "mod_banner.tga"`.

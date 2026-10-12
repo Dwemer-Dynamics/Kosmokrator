@@ -8,10 +8,6 @@ Use the **Maps** tab to import a bundle, select a plane and province, edit its s
 save. Map export creates a separate ZIP with installation instructions and a file-hash manifest.
 Nothing is installed or uploaded to Steam automatically.
 
-The local Hebdomad project includes **SevenRealms**, an illustrated coastal example at 1600x1000 with
-21 land and 9 ocean provinces, one lower-plane forge, a linked gateway and named Hebdomad defenders. Its existing `.dm` and
-unit artwork are unchanged. The example is for exercising the editor; it has not been tested in game.
-
 ## Research and format
 
 Primary references: Illwinter's [Map Making Manual 6.26](https://www.illwinter.com/dom6/dom6mapman.pdf)

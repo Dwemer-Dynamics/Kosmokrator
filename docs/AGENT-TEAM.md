@@ -61,7 +61,7 @@ asset/map rules before editing those domains.
 ## Community preview criteria
 
 - A clean environment can install the package and run the documented first-project flow.
-- A second nation can be created, edited, validated and exported without Hebdomad paths.
+- A second nation can be created, edited, validated and exported without demo-specific paths.
 - Saved source, backups, validation and export receipts agree.
 - Package contents include the web resources and declared demo assets.
 - No local paths, credentials, extracted game resources or catalog checkout leak into the distributable.

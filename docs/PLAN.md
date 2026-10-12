@@ -1,4 +1,7 @@
-# Implementation plan (first local version)
+# Historical implementation plan
+
+This records the initial architecture, not current feature coverage or release readiness.
+Use [AGENT_USAGE.md](AGENT_USAGE.md) and [CLI-REFERENCE.md](CLI-REFERENCE.md) for current workflows.
 
 ## Goals
 A small, complete, stdlib Python package. The CLI and an optional MCP stdio server share one set of

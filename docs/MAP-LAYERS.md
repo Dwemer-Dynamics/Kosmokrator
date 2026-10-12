@@ -2,12 +2,6 @@
 
 Read with [MAP-DESIGN.md](MAP-DESIGN.md) before generating seasonal or replacement terrain art.
 
-The current SevenRealms bundle includes 36 images across two planes. The winter farmland
-image was revised to replace dense lowland forest with snowy fields and sparse hedges.
-Its packaging restores the original ocean mask, province borders and white province centres.
-All other 38 bundle files and the map geometry were preserved. Sources and the installation
-receipt are under `.local/map-artwork/polish-v1/`; in-game switching remains untested.
-
 ## Supported filename inventory
 
 Illwinter's [Map Making Manual 6.26](https://www.illwinter.com/dom6/dom6mapman.pdf), page 10
@@ -15,21 +9,21 @@ Illwinter's [Map Making Manual 6.26](https://www.illwinter.com/dom6/dom6mapman.p
 a `w` winter suffix for each look and the plane part placed first. The installed Dominions6.exe contains
 the same filename strings. Neither source states switching thresholds.
 
-| Appearance | Main plane | Lower Forge |
+| Appearance | Main plane | Additional plane |
 | --- | --- | --- |
-| Default | SevenRealms.tga | SevenRealms_plane2.tga |
-| Default winter | SevenRealms_winter.tga | SevenRealms_plane2_winter.tga |
-| Plain | SevenRealms_plain.tga | SevenRealms_plane2_plain.tga |
-| Forest | SevenRealms_forest.tga | SevenRealms_plane2_forest.tga |
-| Waste | SevenRealms_waste.tga | SevenRealms_plane2_waste.tga |
-| Farm | SevenRealms_farm.tga | SevenRealms_plane2_farm.tga |
-| Swamp | SevenRealms_swamp.tga | SevenRealms_plane2_swamp.tga |
-| Highland | SevenRealms_highland.tga | SevenRealms_plane2_highland.tga |
-| Kelp | SevenRealms_kelp.tga | SevenRealms_plane2_kelp.tga |
-| Water | SevenRealms_water.tga | SevenRealms_plane2_water.tga |
+| Default | <map>.tga | <map>_plane2.tga |
+| Default winter | <map>_winter.tga | <map>_plane2_winter.tga |
+| Plain | <map>_plain.tga | <map>_plane2_plain.tga |
+| Forest | <map>_forest.tga | <map>_plane2_forest.tga |
+| Waste | <map>_waste.tga | <map>_plane2_waste.tga |
+| Farm | <map>_farm.tga | <map>_plane2_farm.tga |
+| Swamp | <map>_swamp.tga | <map>_plane2_swamp.tga |
+| Highland | <map>_highland.tga | <map>_plane2_highland.tga |
+| Kelp | <map>_kelp.tga | <map>_plane2_kelp.tga |
+| Water | <map>_water.tga | <map>_plane2_water.tga |
 
 Every terrain row also has a winter partner with `w` immediately after the terrain name:
-`SevenRealms_forestw.tga`, `SevenRealms_plane2_waterw.tga`, and so on. Each plane has 18 images:
+`<map>_forestw.tga`, `<map>_plane2_waterw.tga`, and so on. Each plane has 18 images:
 base, default winter and eight normal/winter terrain pairs. Do not invent `_hot`, `_cold`, `_sea`
 or `_deepsea` suffixes merely because the gameplay has those concepts.
 
@@ -58,7 +52,7 @@ or `_deepsea` suffixes merely because the gameplay has those concepts.
 9. Check the complete filename matrix, dimensions, marker coordinates, unique file hashes, unchanged
    map source and main images, whole-bundle validation, archive contents and bundle-size limits.
 10. Share contact sheets for both planes. Record visual shortcomings and separate packaging success
-    from actual in-game layer switching. In-game checks remain skipped unless authorized.
+    from actual in-game layer switching. Record which in-game checks were performed and which remain unverified.
 
 Water and kelp must be visibly distinct: water has open flooded ground and sparse rock detail; kelp
 has submerged vegetation. Reject plants in a barren waste layer. At small scale, heavy snow can obscure

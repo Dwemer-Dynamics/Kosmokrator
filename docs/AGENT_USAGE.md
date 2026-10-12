@@ -74,7 +74,7 @@ For a first-project handoff from the browser, treat its downloaded JSON as a des
 brief, not an `author_save` payload. Use the workspace and project choice in the
 brief. Inspect an existing project before editing it; create a new project only
 when requested and never replace an existing slug. A fresh project is a mod
-container, not a completed nation. Do not seed the Hebdomad demo unless requested.
+container, not a completed nation. Do not seed a demo unless requested.
 
 For a nation, turn the brief into a roster and balance plan before authoring. For
 a map, turn it into a `map-builds` request and follow [AGENT-MAPS.md](AGENT-MAPS.md).
@@ -84,7 +84,7 @@ browser. Distinguish completed assets and exports from unresolved or game-untest
 
 For new nations or balance revisions, first read [NATION-DESIGN.md](NATION-DESIGN.md). Prepare its design
 brief and reference comparisons, audit copied-unit inheritance, and report gameplay evidence separately
-from static validation. Use [HEBDOMAD-REVIEW.md](HEBDOMAD-REVIEW.md) as the current worked review.
+from static validation. Use the review-output checklist in that document.
 
 Before bulk artwork, apply the generation quality gates in `NATION-DESIGN.md`:
 overlapping recruitment choices, routine support access, full booster progression,
@@ -115,7 +115,7 @@ saved source. Repeat the gates before delivery and report exact testing gaps.
   read it instead of the live catalog; pass `project` to `search_game_data`/`reference_game_data` to search it.
   Report its state (offline, current, stale or invalid) and sprite coverage (referenced-only is partial). It holds
   game imagery from the user's own copy of the game: never export, commit or share it.
-- Kosmokrator does not install into the game folder. The user copies `<slug>/` into their `mods` directory.
+- Regular exports do not install themselves. Copy `<slug>/` into the game’s `mods` directory, or use the optional guarded local installation described in [WORKSHOP.md](WORKSHOP.md).
 
 ## Setup snippets (copy manually; Kosmokrator never edits global config)
 
@@ -168,3 +168,15 @@ handoffs. See [TOOL-INTEGRATIONS.md](TOOL-INTEGRATIONS.md).
 uses the same locks, source hashes and backups as the shared backend. Re-read state after browser saves.
 Comparisons and static validation are review aids. Playtest records capture observations against a source
 revision; they do not verify evidence files or prove balance.
+
+## Progress and delivery record
+
+Maintain a project-local checklist of planned content and assets, completed work,
+unfinished work, deliberate exceptions and the next resumable step. Record source
+revision, asset hashes, validation results and export identity for each review.
+Invalidate affected review results when source or artwork changes.
+
+Before delivery, reconcile the brief with saved definitions, recruitment and references,
+the complete asset checklist and exported files. Name missing or unverified checks.
+Report static, artwork, packaging, browser, engine and gameplay evidence separately.
+A successful export alone does not establish completeness or balance.

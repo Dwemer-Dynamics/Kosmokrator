@@ -161,15 +161,6 @@ Apply these completion gates in order:
 10. Export a new bundle. Call it in-game verified only after an actual load/play check; if testing was
     skipped, say so explicitly.
 
-## Current SevenRealms example
-
-The local coastal demo is 1600x1000, with 21 land and 9 sea provinces (3 coastal, 6 deep), plus one
-Lower Forge province. It retains two land-nation scenario starts and the linked forge gateway.
-It is a small demonstration, not an underwater or multiplayer balance benchmark. The nine sea
-provinces are connected and provide coastal access; no underwater start has been balance-tested.
-Terrain art was generated, with explicit geometry reconciliation and static packaging checks.
-In-game testing remains skipped.
-
 ## Reference comparisons
 
 - [Illwinter Map Making Manual](https://www.illwinter.com/dom6/dom6mapman.pdf): image format, centre pixels,
