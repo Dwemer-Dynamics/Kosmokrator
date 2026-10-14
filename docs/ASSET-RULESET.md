@@ -23,6 +23,13 @@ nations, with art direction derived from each nation’s brief.
 - If any required asset is missing or generation is blocked, name the unfinished
   assets. Do not label a placeholder-art build as a complete nation.
 
+## Sound defaults
+
+The original-art requirement applies to visual assets. Use appropriate built-in
+sounds by default; custom audio is not required for each new unit or spell. Follow
+[SOUND-DESIGN.md](SOUND-DESIGN.md) for weapon/casting/impact choices, inherited
+values, custom-sample handling and the final sound review.
+
 ## Magic item and spell artwork
 
 For every newly created magic item, generate an original icon derived from its

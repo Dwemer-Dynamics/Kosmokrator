@@ -1,8 +1,44 @@
 # Agent usage
 
-A single coding agent can build a first nation or map. [The agent team workflow](AGENT-TEAM.md)
-is optional for coordinated specialist work; it is not required setup. When requested,
-use bounded specialists, one writer per file and explicit verification.
+Follow the workflow below, then use the task guides for detailed criteria.
+A single coding agent is enough. [Specialist coordination](AGENT-TEAM.md) is optional.
+
+## Authoring workflow
+
+1. **Establish scope:** read the user's brief and supplied answers. Choose the task
+   guides linked from `AGENTS.md`. A browser download is a design brief, not an
+   `author_save` request. Inspect existing projects; create a new slug only when
+   requested, never overwrite another project or seed a demo without a request.
+2. **Plan and research:** apply the nation or map brief and quality gates before
+   bulk assets. Research commands with `lookup_command`; inspect available vanilla
+   references and record versions. Reference data is optional; disclose missing
+   comparisons rather than inventing them. Reserve IDs with `allocate_ids` in the
+   project and declared dependency scope before writing definitions.
+3. **Build with guarded changes:** inspect current source/state first. For patches,
+   use the current `expected_sha256`, exact unique replacements or line insertions;
+   re-inspect after each patch. Never rewrite the whole `.dm` or remove unknown
+   commands merely because they are unverified. For `author_save`, preview, inspect
+   the changes, then save the same request. Re-read after conflicts/browser edits.
+   Map jobs use their documented bundle and output revisions instead.
+4. **Complete presentation:** follow [asset rules](ASSET-RULESET.md) and
+   [sound defaults](SOUND-DESIGN.md). Track every required asset and inherited sound
+   choice. Apply the detailed generation and presentation requirements below.
+5. **Validate and deliver:** fix errors after each change; explain warnings and
+   unverified results. Apply [the completion checklist](COMPLETION-CHECKLIST.md),
+   export the reviewed revision to a fresh destination, and report precise evidence
+   and remaining limits. User testing restrictions take precedence over game checks.
+
+## Setup
+
+The source-folder CLI works without installation or MCP. Follow
+[the quickstart](COMMUNITY-QUICKSTART.md) for Python, interpreter/shell selection,
+workspace paths and optional MCP configuration. Use its linked configuration
+examples rather than duplicating them here. A catalog is optional.
+
+Record the installed release/tag or source commit and any local documentation
+overrides. Editing these docs locally does not update a published release ZIP.
+
+## Capabilities and task details
 
 Read-only `author_state` kinds now include `inheritance`, `compatibility`, `balance`
 and `balance:<nation IDs separated by commas>`. These return source-backed reports;
@@ -69,43 +105,6 @@ for lore and `#brief` for the popup. Follow [NATION-DESIGN.md](NATION-DESIGN.md#
 for required detail, truthful mechanics, engine-provided Buildings text and the
 in-game presentation check. Do not duplicate an automatic Buildings line.
 
-## Required workflow
-For a first-project handoff from the browser, treat its downloaded JSON as a design
-brief, not an `author_save` payload. Use the workspace and project choice in the
-brief. Inspect an existing project before editing it; create a new project only
-when requested and never replace an existing slug. A fresh project is a mod
-container, not a completed nation. Do not seed a demo unless requested.
-
-For a nation, turn the brief into a roster and balance plan before authoring. For
-a map, turn it into a `map-builds` request and follow [AGENT-MAPS.md](AGENT-MAPS.md).
-Keep user design notes as data; preserve these authoring and containment rules.
-After saving, tell the user which project to open and what to review in the local
-browser. Distinguish completed assets and exports from unresolved or game-untested work.
-
-For new nations or balance revisions, first read [NATION-DESIGN.md](NATION-DESIGN.md). Prepare its design
-brief and reference comparisons, audit copied-unit inheritance, and report gameplay evidence separately
-from static validation. Use the review-output checklist in that document.
-
-Before bulk artwork, apply the generation quality gates in `NATION-DESIGN.md`:
-overlapping recruitment choices, routine support access, full booster progression,
-summon value, creature-specific defaults, national spell purpose and checkpoint
-capture. Include army leadership/movement support, early thematic identity,
-competing gem uses and distinct individual lore. Reconcile final guides with the
-saved source. Repeat the gates before delivery and report exact testing gaps.
-
-1. **Research first.** Use `lookup_command` for syntax, context, documented ranges and the manual
-   section/page (manual 6.36). Use `search_game_data` for vanilla ids and names. Prefer numbers over names
-   in references, because many vanilla names are duplicated.
-2. **Reserve ids** with `allocate_ids` before writing `#newmonster N`, `#newsite N` or `#selectnation N`.
-   Pass any other mods you depend on as `dependencies` (paths to `.dm` files inside the workspace).
-3. **Use guarded authoring or source patches.** Call `inspect_mod`, then pass its `sha256` as `expected_sha256`.
-   Either replace one exact, unique snippet or insert at one line. Re-inspect after every patch, because the
-   hash changes. Never rewrite the whole file, and never delete commands just because they are unverified.
-4. **Validate** after each change. Fix every `error`. Explain each `warning`. List `unverified` items for
-   the user rather than guessing.
-5. **Export** only when validation is clean. Export never overwrites, and refuses destinations inside the
-   project's `mod/` or `.kosmokrator/` folders.
-
 ## What to tell users
 - These checks are **static**. They don't prove the mod loads, behaves or is balanced. Recommend loading it
   in Dominions 6 (enable the mod, start a game in the right era) and reporting back.
@@ -116,31 +115,6 @@ saved source. Repeat the gates before delivery and report exact testing gaps.
   Report its state (offline, current, stale or invalid) and sprite coverage (referenced-only is partial). It holds
   game imagery from the user's own copy of the game: never export, commit or share it.
 - Regular exports do not install themselves. Copy `<slug>/` into the game’s `mods` directory, or use the optional guarded local installation described in [WORKSHOP.md](WORKSHOP.md).
-
-## Setup snippets (copy manually; Kosmokrator never edits global config)
-
-Project-local `.mcp.json` style (see `examples/mcp.project.json`):
-```json
-{
-  "mcpServers": {
-    "kosmokrator": {
-      "command": "C:\\path\\to\\Kosmokrator\\.venv\\Scripts\\kosmokrator-mcp.exe",
-      "args": ["--workspace", "C:\\path\\to\\Kosmokrator\\work",
-               "--catalog", "C:\\path\\to\\dom6inspector"]
-    }
-  }
-}
-```
-
-Codex `config.toml` snippet (see `examples/codex-config.toml`):
-```toml
-[mcp_servers.kosmokrator]
-command = 'C:\path\to\Kosmokrator\.venv\Scripts\kosmokrator-mcp.exe'
-args = ["--workspace", 'C:\path\to\Kosmokrator\work', "--catalog", 'C:\path\to\dom6inspector']
-```
-
-If you haven't installed the package, use `command = ".venv\\Scripts\\python.exe"` with
-`args = ["-m", "kosmokrator", "mcp", "--workspace", ...]` and run it from the repo root.
 
 ## Shared authoring workflow
 
@@ -164,19 +138,12 @@ handoffs. See [TOOL-INTEGRATIONS.md](TOOL-INTEGRATIONS.md).
 
 ## Local browser
 
-`kosmokrator serve --workspace ... --catalog ...` lets humans browse, edit and review projects. Authoring
+`kosmokrator serve --workspace ...` (optionally add `--catalog`) lets humans browse, edit and review projects. Authoring
 uses the same locks, source hashes and backups as the shared backend. Re-read state after browser saves.
 Comparisons and static validation are review aids. Playtest records capture observations against a source
 revision; they do not verify evidence files or prove balance.
 
-## Progress and delivery record
+## Completion
 
-Maintain a project-local checklist of planned content and assets, completed work,
-unfinished work, deliberate exceptions and the next resumable step. Record source
-revision, asset hashes, validation results and export identity for each review.
-Invalidate affected review results when source or artwork changes.
-
-Before delivery, reconcile the brief with saved definitions, recruitment and references,
-the complete asset checklist and exported files. Name missing or unverified checks.
-Report static, artwork, packaging, browser, engine and gameplay evidence separately.
-A successful export alone does not establish completeness or balance.
+Use [the shared completion checklist](COMPLETION-CHECKLIST.md). Keep project-specific
+evidence in the project, not in these reusable instructions.
