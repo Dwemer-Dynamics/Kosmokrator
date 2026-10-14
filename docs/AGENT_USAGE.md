@@ -13,7 +13,13 @@ A single coding agent is enough. [Specialist coordination](AGENT-TEAM.md) is opt
    bulk assets. Research commands with `lookup_command`; inspect available vanilla
    references and record versions. Reference data is optional; disclose missing
    comparisons rather than inventing them. Reserve IDs with `allocate_ids` in the
-   project and declared dependency scope before writing definitions.
+   project and declared dependency scope before writing definitions. Never hardcode
+   a customary starting ID such as the first nation slot; use the reserved numbers.
+   Allocation also skips IDs defined or reserved by other workspace projects and
+   defined by installed mods (read-only scan of the configured mods folder). Read its
+   `checked` scope and caveats, and review dependency and installed-mod conflicts for
+   every ID kind. Nation IDs are drawn at random from the free range; that lowers,
+   but never eliminates, collisions with unscanned mods.
 3. **Build with guarded changes:** inspect current source/state first. For patches,
    use the current `expected_sha256`, exact unique replacements or line insertions;
    re-inspect after each patch. Never rewrite the whole `.dm` or remove unknown

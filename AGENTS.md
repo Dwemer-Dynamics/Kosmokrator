@@ -18,6 +18,9 @@ Start with [agent usage](docs/AGENT_USAGE.md). One agent is enough; use the
 Preserve authoritative `.dm` bytes with guarded targeted edits. Reserve IDs within
 project/dependency scope. Use complete map-bundle revisions for map changes.
 Keep extracted game resources and reference snapshots local.
+Keep user-authored nations, content, assets, projects, references and anecdotes
+local: never copy them into source, docs, tests, commits or PRs. Use synthetic
+generic fixtures for tests and examples.
 
 Follow the user's scope and testing limits. Separate static, artwork, packaging,
 browser, engine and gameplay evidence. A validated export does not prove game

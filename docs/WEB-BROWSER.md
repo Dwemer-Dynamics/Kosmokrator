@@ -426,7 +426,8 @@ stay reserved. Generated lines must pass the curated argument checks and add no 
 - **Duplicate** (`mode: "duplicate"`): copies a project `#newmonster` block as written (unknown commands, comments,
   sprite paths, donor lines) and changes only the id, the live `#name` and optionally `#descr`. The copy shares the
   sprite files until you upload art for it; the originals are never changed. Recruitment is optional.
-- **New nation** (`POST .../create/nation`): `#selectnation N` (150+), `#name`, `#epithet`, `#era`, optional
+- **New nation** (`POST .../create/nation`): `#selectnation N` (a random free id in 150-499; preview and create
+  agree while the `.dm` is unchanged), `#name`, `#epithet`, `#era`, optional
   `#descr`, then `#clearnation` and only what was ticked: up to four project start sites (by name), home realms
   (realm 10 only when ticked), custom gods, recruitable troops/commanders (units may be shared with other nations),
   `#startcom`, `#startscout`, up to two start squads. Missing start commander, roster, gods or sites are reported as

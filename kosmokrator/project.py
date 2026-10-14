@@ -8,6 +8,7 @@ import difflib
 import hashlib
 import json
 import os
+import random
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,15 @@ ID_KINDS: dict[str, dict[str, Any]] = {
     "armor": {"range": (400, 1999), "catalog": "armors", "openers": ("newarmor", "selectarmor"),
               "source": "Modding Number Limits (p.64): armor 0-1999, 400+ for modding."},
 }
+
+
+# Nation ids are sampled at random from the free range so independent authors rarely pick the same number;
+# other kinds stay lowest-first. Neither rules out conflicts with mods that were not scanned.
+_NATION_RNG: random.Random = random.SystemRandom()
+# Bounds for the read-only conflict scan of sibling projects and installed mods (one level, never links).
+MAX_SCAN_ENTRIES = 1000
+MAX_SCAN_FILES = 300
+MAX_SCAN_BYTES = 16 * 1024 * 1024
 
 
 def _now() -> str:
@@ -385,11 +395,138 @@ def allocate_ids(workspace: Path, slug: str, kind: str, count: int = 1, labels: 
             "checked": info["checked"], "caveats": caveats}
 
 
-def free_ids_locked(project: Project, kind: str, count: int, dependencies: list[str] | None,
-                    catalog: Catalog | None) -> tuple[list[int], dict[str, Any]]:
-    """The first `count` free ids of `kind` (catalog, .dm, dependencies and reservations considered).
+def _scan_names(base: Path) -> tuple[list[str], bool]:
+    """Entry names directly inside base (no recursion), capped at MAX_SCAN_ENTRIES; True when truncated."""
+    names: list[str] = []
+    with os.scandir(base) as it:
+        for entry in it:
+            if len(names) >= MAX_SCAN_ENTRIES:
+                return sorted(names), True
+            names.append(entry.name)
+    return sorted(names), False
 
-    Call while holding project_lock after reload_meta; nothing is written here.
+
+def _scan_dm_text(path: Path) -> str:
+    if is_link(path):
+        raise KosmoError("symlink_rejected", "symlink or junction not followed")
+    if not path.is_file():
+        raise KosmoError("dm_missing", "not a regular file")
+    if path.stat().st_size > MAX_SCAN_BYTES:
+        raise KosmoError("too_large", f"larger than {MAX_SCAN_BYTES} bytes")
+    return decode_dm(path.read_bytes())[0]
+
+
+def _scan_other_sources(project: Project, kind: str, used: dict[int, str]) -> dict[str, Any]:
+    """Read-only scan of other valid projects in this workspace and of installed mods' .dm files.
+
+    Only the workspace's immediate project folders and the mods folder's top level plus one folder level are
+    read; links and junctions are never followed and nothing is written. Unreadable or skipped sources are
+    reported, never silently treated as checked.
+    """
+    from .workshop import mods_dir_config  # workshop imports this module
+
+    unreadable: list[dict[str, str]] = []
+    truncated: list[str] = []
+    files = 0
+
+    def take(label: str, path: Path) -> str | None:
+        nonlocal files
+        if files >= MAX_SCAN_FILES:
+            truncated.append(label)
+            return None
+        files += 1
+        try:
+            return _scan_dm_text(path)
+        except (OSError, KosmoError) as exc:
+            unreadable.append({"source": label, "reason": getattr(exc, "message", None) or str(exc)})
+            return None
+
+    def note(label: str, text: str | None) -> None:
+        for d in definitions(parse(text)) if text is not None else []:
+            if d["kind"] == kind and d["id"] is not None:
+                used.setdefault(d["id"], label)
+
+    projects: list[str] = []
+    try:
+        names, more = _scan_names(project.workspace)
+    except OSError as exc:
+        names, more = [], False
+        unreadable.append({"source": "workspace", "reason": str(exc)})
+    if more:
+        truncated.append("workspace")
+    for name in names:
+        root = project.workspace / name
+        if name == project.slug or not SLUG_RE.match(name):
+            continue
+        if is_link(root):
+            unreadable.append({"source": f"project:{name}", "reason": "symlink or junction not followed"})
+            continue
+        if not root.is_dir() or not (root / META_FILE).exists():
+            continue
+        label = f"project:{name}"
+        try:
+            other = open_project(project.workspace, name)
+            dm = resolve_dm_target(other, None)
+            reserved = [int(r["id"]) for r in (other.meta.get("reservations") or {}).get(kind, [])]
+        except (OSError, KosmoError, TypeError, ValueError, KeyError, AttributeError) as exc:
+            unreadable.append({"source": label, "reason": getattr(exc, "message", None) or str(exc)})
+            continue
+        text = take(label, dm)
+        if text is None:
+            continue
+        note(label, text)
+        for i in reserved:
+            used.setdefault(i, f"{label} (reserved)")
+        projects.append(name)
+
+    config = mods_dir_config()
+    installed: dict[str, Any] = {"mods_dir": config.get("path"), "source": config.get("source"),
+                                 "available": bool(config.get("available")), "reason": config.get("reason"),
+                                 "dm_files": 0}
+    if config.get("available"):
+        mods = Path(config["path"])
+        try:
+            if is_link(mods) or not mods.is_dir():
+                raise KosmoError("install_unavailable", "mods folder is a link or not a folder")
+            top, more = _scan_names(mods)
+        except (OSError, KosmoError) as exc:
+            top, more = [], False
+            unreadable.append({"source": "installed mods", "reason": getattr(exc, "message", None) or str(exc)})
+        if more:
+            truncated.append("installed mods")
+        candidates: list[tuple[str, Path]] = []
+        for name in top:
+            p = mods / name
+            if is_link(p):
+                unreadable.append({"source": f"installed:{name}", "reason": "symlink or junction not followed"})
+            elif p.is_file() and name.lower().endswith(".dm"):
+                candidates.append((name, p))
+            elif p.is_dir():
+                try:
+                    sub, more = _scan_names(p)
+                except OSError as exc:
+                    unreadable.append({"source": f"installed:{name}", "reason": str(exc)})
+                    continue
+                if more:
+                    truncated.append(f"installed:{name}")
+                candidates += [(f"{name}/{n}", p / n) for n in sub if n.lower().endswith(".dm")]
+        for rel, p in candidates:
+            text = take(f"installed:{rel}", p)
+            if text is not None:
+                installed["dm_files"] += 1
+                note(f"installed:{rel}", text)
+    complete = not unreadable and not truncated
+    return {"workspace_projects": projects, "installed_mods": installed, "unreadable": unreadable[:20],
+            "unreadable_count": len(unreadable), "scan_limit_reached": truncated[:20], "complete": complete}
+
+
+def free_ids_locked(project: Project, kind: str, count: int, dependencies: list[str] | None,
+                    catalog: Catalog | None, rng: random.Random | None = None) -> tuple[list[int], dict[str, Any]]:
+    """`count` free ids of `kind`: random for nations (from `rng`), otherwise the lowest, ascending.
+
+    Considered: catalog, the project .dm, dependencies, reservations, other valid projects in the workspace
+    (definitions and reservations) and installed mods' .dm files. Call while holding project_lock after
+    reload_meta; nothing is written here.
     """
     spec = ID_KINDS[kind]
     lo, hi = spec["range"]
@@ -397,7 +534,8 @@ def free_ids_locked(project: Project, kind: str, count: int, dependencies: list[
     caveats = [
         f"Ranges follow manual {MANUAL_VERSION}; target game version is "
         f"{project.meta.get('target_game_version')}. Check after game updates.",
-        "Conflicts with mods that were not provided as dependencies cannot be ruled out.",
+        "Conflicts with mods that were not scanned (Steam Workshop subscriptions, other folders, other players' "
+        "mods) cannot be ruled out; review dependency and installed-mod conflicts before publishing.",
     ]
     used: dict[int, str] = {}
     if catalog is not None:
@@ -415,16 +553,27 @@ def free_ids_locked(project: Project, kind: str, count: int, dependencies: list[
                 used.setdefault(d["id"], label)
     for r in project.meta.get("reservations", {}).get(kind, []):
         used.setdefault(int(r["id"]), "reserved")
-    ids = []
-    cur = lo
-    while len(ids) < count and cur <= hi:
-        if cur not in used:
-            ids.append(cur)
-        cur += 1
-    if len(ids) < count:
-        raise KosmoError("range_exhausted", f"Not enough free {kind} ids in {lo}-{hi}")
+    scan = _scan_other_sources(project, kind, used)
+    if not scan["installed_mods"]["available"]:
+        caveats.append(f"Installed mods were not checked: {scan['installed_mods']['reason']}")
+    if not scan["complete"]:
+        caveats.append("Some workspace projects or installed mods could not be read, or a scan limit was reached "
+                       "(see checked.unreadable and checked.scan_limit_reached); ids defined there were not "
+                       "considered.")
+    free = [i for i in range(lo, hi + 1) if i not in used]
+    if len(free) < count:
+        raise KosmoError("range_exhausted", f"Not enough free {kind} ids in {lo}-{hi}", free=len(free),
+                         requested=count)
+    if kind == "nation":
+        ids = sorted((rng or _NATION_RNG).sample(free, count))
+        caveats.append("Nation ids are drawn at random from the free range to lower the chance of matching an "
+                       "unknown mod's nation; this reduces but cannot eliminate collisions or guarantee "
+                       "compatibility.")
+    else:
+        ids = free[:count]
     return ids, {"caveats": caveats, "checked": {"catalog": catalog is not None, "dependencies": deps,
-                                                  "used_ids_considered": len(used)}}
+                                                  "used_ids_considered": len(used),
+                                                  "selection": "random" if kind == "nation" else "lowest", **scan}}
 
 
 def record_reservations_locked(project: Project, kind: str, ids: list[int], labels: list[str | None] | None) -> None:

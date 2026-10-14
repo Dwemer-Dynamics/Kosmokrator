@@ -73,7 +73,7 @@ copies files into the game folder itself.
 | `inspect PROJECT` | `inspect_mod` | Non-mutating parse: sha256, blocks, definitions, unverified commands |
 | `patch PROJECT --expected-sha256 H (--old-file F --new-file F \| --insert-line N --text-file F)` | `apply_mod_patch` | One exact replacement or one insertion, with a backup and a diff |
 | `lookup [CMD] [--context]` | `lookup_command` | Curated syntax/context/ranges with manual section and page |
-| `allocate PROJECT KIND [N] [--label] [--dep]` | `allocate_ids` | Reserve free ids in documented ranges |
+| `allocate PROJECT KIND [N] [--label] [--dep]` | `allocate_ids` | Reserve free ids in documented ranges, skipping other workspace projects and installed mods; nations are random, other kinds lowest-first |
 | `search QUERY [--category] [--limit] [--project]` | `search_game_data` | Offline catalog search by id or name (max 50 results); `--project` searches that project's snapshot if it has one |
 | `validate PROJECT [--dep]` | `validate_mod` | Errors, warnings and unverified items, each with file and line |
 | `export PROJECT [--dest] [--format zip\|folder]` | `export_mod` | Error-free export with a sha256 manifest; never overwrites |

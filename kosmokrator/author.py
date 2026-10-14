@@ -2,7 +2,8 @@
 attach uploaded PNG sprite frames to a project monster.
 
 Every write follows one transaction under the project lock: the expected SHA-256 of the .dm is checked, ids come
-from project.free_ids_locked (catalog, .dm, dependencies and reservations) and are reserved in the metadata, the
+from project.free_ids_locked (catalog, .dm, dependencies, reservations, other workspace projects and installed
+mods; nation ids are drawn at random, seeded so a preview and its create agree) and are reserved in the metadata, the
 candidate text is a set of pure insertions (or, for artwork, small spans inside one block) that is re-parsed and
 re-checked, and only then is the .dm backed up and replaced. If the .dm write fails the reservation is rolled back;
 if that also fails the error says which ids stay reserved. Uploaded frames are new, uniquely named files; on any
@@ -18,6 +19,7 @@ import binascii
 import contextlib
 import difflib
 import os
+import random
 import re
 import secrets
 import struct
@@ -170,7 +172,10 @@ def _transaction(workspace: Path, slug: str, sha: str, preview: bool, kinds: dic
         if sha256_bytes(data).lower() != sha:
             raise KosmoError("sha_mismatch", "The .dm changed since this page loaded. Reload; your form values are "
                                              "kept.", expected=sha, actual=sha256_bytes(data))
-        ids = {k: free_ids_locked(project, k, n, None, catalog)[0] for k, n in kinds.items()}
+        # Seeded by project and .dm state so a preview and the create that follows draw the same random nation id.
+        rng = random.Random(f"{slug}|{project.meta.get('created_utc')}|{sha}")
+        checks = {k: free_ids_locked(project, k, n, None, catalog, rng) for k, n in kinds.items()}
+        ids = {k: v[0] for k, v in checks.items()}
         inserts, info = build(text, ids)
         assets = info.pop("_assets", {})
         cand = _apply(text, inserts)
@@ -181,7 +186,9 @@ def _transaction(workspace: Path, slug: str, sha: str, preview: bool, kinds: dic
         except UnicodeEncodeError as exc:
             raise KosmoError("encoding", f"The new text cannot be written in the file's {enc} encoding.") from exc
         out = {"project": slug, "preview": preview, "ids": ids, "diff": _diff(text, cand, rel),
-               "before_sha256": sha256_bytes(data), "assets": list(assets), **info}
+               "before_sha256": sha256_bytes(data), "assets": list(assets),
+               "id_checks": {k: {"checked": v[1]["checked"], "caveats": v[1]["caveats"]} for k, v in checks.items()},
+               **info}
         if preview:
             return {**out, "written": False,
                     "note": "Preview only: ids are re-checked and reserved when you create; they can change if "

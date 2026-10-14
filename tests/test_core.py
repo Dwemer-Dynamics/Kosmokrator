@@ -55,6 +55,20 @@ def tiny_tga(w: int = 128, h: int = 128) -> bytes:
     return encode_tga(w, h, [[(200, 50, 20, 255)] * w for _ in range(h)])
 
 
+_MODS = tempfile.TemporaryDirectory()
+_ENV = mock.patch.dict(os.environ, {"KOSMOKRATOR_DOMINIONS_MODS": str(Path(_MODS.name).resolve())})
+
+
+def setUpModule() -> None:
+    # Allocation scans installed mods; point it at an empty folder so a real game install never leaks in.
+    _ENV.start()
+
+
+def tearDownModule() -> None:
+    _ENV.stop()
+    _MODS.cleanup()
+
+
 class Base(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -263,6 +277,62 @@ class ReservationTests(Base):
         self.assertEqual(cm.exception.code, "project_locked")
         self.assertEqual(lock.read_text(), "someone-else")
 
+    def sibling(self, dm: bytes, reservations: dict | None = None) -> tuple[bytes, bytes]:
+        create_project(self.ws, "other_mod")
+        root = self.ws / "other_mod"
+        (root / "mod" / "other_mod" / "other_mod.dm").write_bytes(dm)
+        meta = json.loads((root / "kosmokrator.json").read_text("utf-8"))
+        meta["reservations"] = reservations or {}
+        (root / "kosmokrator.json").write_text(json.dumps(meta), "utf-8")
+        return (root / "kosmokrator.json").read_bytes(), dm
+
+    def test_sibling_projects_and_installed_mods_are_avoided_read_only(self) -> None:
+        before = self.sibling(b"#newmonster 5000\n#end\n#newsite 1700\n#end\n",
+                              {"monster": [{"id": 5001, "label": None, "reserved_utc": "x"}]})
+        (self.ws / "broken_mod").mkdir()
+        (self.ws / "broken_mod" / "kosmokrator.json").write_text("{", "utf-8")
+        mods = Path(self._tmp.name) / "mods"
+        (mods / "installed").mkdir(parents=True)
+        (mods / "installed" / "installed.dm").write_bytes(b"#newmonster 5002\n#end\n")
+        (mods / "loose.dm").write_bytes(b"#newweapon 1000\n#end\n")
+        with mock.patch.dict(os.environ, {"KOSMOKRATOR_DOMINIONS_MODS": str(mods)}):
+            res = allocate_ids(self.ws, "demo_mod", "monster", 2)
+            self.assertEqual(allocate_ids(self.ws, "demo_mod", "site", 1)["ids"], [1701])
+            self.assertEqual(allocate_ids(self.ws, "demo_mod", "weapon", 1)["ids"], [1001])
+        self.assertEqual(res["ids"], [5003, 5004])  # lowest-first: sibling 5000/5001, installed 5002
+        checked = res["checked"]
+        self.assertEqual((checked["selection"], checked["workspace_projects"]), ("lowest", ["other_mod"]))
+        self.assertEqual(checked["installed_mods"]["dm_files"], 2)
+        self.assertFalse(checked["complete"])  # the unreadable project is disclosed, not treated as checked
+        self.assertEqual(checked["unreadable"][0]["source"], "project:broken_mod")
+        self.assertTrue(any("could not be read" in c for c in res["caveats"]))
+        root = self.ws / "other_mod"
+        self.assertEqual(before, ((root / "kosmokrator.json").read_bytes(),
+                                  (root / "mod" / "other_mod" / "other_mod.dm").read_bytes()))
+        self.assertEqual((mods / "installed" / "installed.dm").read_bytes(), b"#newmonster 5002\n#end\n")
+
+    def test_nation_ids_are_random_and_exhaustion_is_refused(self) -> None:
+        import random
+        self.sibling(b"#selectnation 150\n#end\n")
+        free = list(range(151, 500))
+        with mock.patch.object(project_mod, "_NATION_RNG", random.Random(7)):
+            res = allocate_ids(self.ws, "demo_mod", "nation", 3, catalog=self.catalog)
+        self.assertEqual(res["ids"], sorted(random.Random(7).sample(free, 3)))
+        self.assertEqual(res["checked"]["selection"], "random")
+        self.assertTrue(any("cannot eliminate" in c for c in res["caveats"]))
+        no_rng = mock.Mock(sample=mock.Mock(side_effect=AssertionError("non-nation kinds must not sample")))
+        with mock.patch.object(project_mod, "_NATION_RNG", no_rng):
+            self.assertEqual(allocate_ids(self.ws, "demo_mod", "site", 2)["ids"], [1700, 1701])
+        left = [i for i in free if i not in res["ids"]]
+        taken = [{"id": i, "label": None, "reserved_utc": "x"} for i in left[2:]]
+        meta_path = self.ws / "other_mod" / "kosmokrator.json"
+        meta = json.loads(meta_path.read_text("utf-8"))
+        meta_path.write_text(json.dumps({**meta, "reservations": {"nation": taken}}), "utf-8")
+        with self.assertRaises(KosmoError) as cm:
+            allocate_ids(self.ws, "demo_mod", "nation", 3)
+        self.assertEqual(cm.exception.code, "range_exhausted")
+        self.assertEqual(allocate_ids(self.ws, "demo_mod", "nation", 2)["ids"], left[:2])
+
 
 class ExportTests(Base):
     def test_export_refuses_errors_and_overwrite_and_self(self) -> None:
@@ -454,12 +524,16 @@ class AuthorTests(Base):
         meta = json.loads((self.ws / "demo_mod" / "kosmokrator.json").read_text("utf-8"))
         self.assertEqual([x["id"] for x in meta["reservations"]["monster"]], [5002, 5003, 5004, g["id"]])
         self.h = sha(self.dm.read_bytes())
-        n = create_nation(self.ws, "demo_mod", self.catalog, {
-            "expected_sha256": self.h, "name": "B", "epithet": "Second", "era": 2, "sites": [1700],
-            "troops": [5000], "commanders": [5002], "gods": [5003], "startcom": [5002],
-            "startunits": [{"id": 5000, "count": 10}], "realms": [10]})
-        self.assertEqual(n["id"], 151)
-        self.assertIn('#selectnation 151\n#name "B"\n#epithet "Second"\n#era 2\n#clearnation\n#flag "art/nations/151-flag.tga"\n#startsite "Hall"\n'
+        body = {"expected_sha256": self.h, "name": "B", "epithet": "Second", "era": 2, "sites": [1700],
+                "troops": [5000], "commanders": [5002], "gods": [5003], "startcom": [5002],
+                "startunits": [{"id": 5000, "count": 10}], "realms": [10]}
+        pv = create_nation(self.ws, "demo_mod", self.catalog, {**body, "preview": True})
+        n = create_nation(self.ws, "demo_mod", self.catalog, body)
+        nid = n["id"]
+        self.assertEqual(pv["id"], nid)  # the preview shows the id the create then writes
+        self.assertTrue(150 < nid <= 499)
+        self.assertEqual(n["id_checks"]["nation"]["checked"]["selection"], "random")
+        self.assertIn(f'#selectnation {nid}\n#name "B"\n#epithet "Second"\n#era 2\n#clearnation\n#flag "art/nations/{nid}-flag.tga"\n#startsite "Hall"\n'
                       '#homerealm 10\n#addgod 5003\n#addrecunit 5000\n#addreccom 5002\n#startcom 5002\n'
                       '#startunittype1 5000\n#startunitnbrs1 10\n#end', self.dm.read_text("utf-8"))
 

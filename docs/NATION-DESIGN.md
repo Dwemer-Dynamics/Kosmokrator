@@ -86,6 +86,26 @@ Prevention check: before final export, reconcile these five areas against the
 saved mod and test evidence. Correct defects or identify the exact unverified
 item; do not describe an accelerated or static result as normal gameplay proof.
 
+## Nation prose: vanilla tone
+
+Before writing, compare the lore and feature summaries of two or three relevant
+vanilla nations in the official manual or verified game data. Record the references.
+Write original prose; do not copy their wording.
+
+- `#descr`: use a compact historical account of origins, society, religion and
+  military traditions. Explain how magic and sacred warriors belong to that culture.
+  Keep prices, numerical paths, random percentages, research plans and tactical
+  counter advice in the project guide, rather than the lore paragraph.
+- `#brief`: one short factual sentence identifying the nation.
+- `#summary`: use short labelled feature lines, not a roster catalogue. Group troops
+  by type and magic by path. Mention decisive restrictions such as capital-only
+  sacreds or secondary magic. Keep individual mage names and exact random chances
+  in unit sheets. Avoid authoring phrases such as ordinary human stats.
+
+Prevention check: compare the saved prose with the references, reconcile claims
+against the saved mechanics, and read the final in-game presentation when possible.
+Static validation cannot prove line wrapping or engine-added feature text.
+
 ## National Features: vanilla presentation format
 
 For every generated nation, write the in-game National Features text in nation
@@ -107,7 +127,7 @@ parenthetical explanations where needed, matching the vanilla example's structur
 and useful detail. Cover all six categories even for a nation with ordinary priests
 or no special dominion. Do not invent mechanics to fill a line. Distinguish reliable
 magic access from random, rare, capital-only or summon-dependent access. Mention
-important recruitment restrictions and weaknesses where they change the summary.
+important recruitment restrictions; put detailed tactical weaknesses in the guide.
 Describe concrete capabilities and restrictions. For priests, state Holy levels,
 availability and distinctive abilities rather than relying on adjectives such as
 weak or strong. Keep lore readable and separate from mechanical feature lines.
