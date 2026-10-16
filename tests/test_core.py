@@ -1238,5 +1238,338 @@ class HealthTests(Base):
         self.assertEqual((code, res["ok"], res["result"]["revision"]), (1, True, direct["revision"]))
 
 
+class RevisionTests(Base):
+    # Synthetic latin-1 CRLF source with a donor copy, stats, traits, magic, equipment, description, artwork, an
+    # unknown command and a nation recruitment line.
+    DM = ('#modname "Synthetic"\r\n#description "d"\r\n'
+          '#newmonster 5000\r\n#copystats 199\r\n#name "Unit \xc4"\r\n#hp 10\r\n#fireres 5\r\n#magicskill 0 1\r\n'
+          '#weapon 1\r\n#descr "Old text"\r\n#spr1 "art/unit.tga"\r\n#weird 1 2\r\n#end\r\n'
+          '#selectmonster 199\r\n#hp 12\r\n#end\r\n'
+          '#selectnation 150\r\n#name "Nation A"\r\n#addrecunit 5000\r\n#end\r\n').encode("latin-1")
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.root = self.ws / "demo_mod"
+        self.mod = self.root / "mod" / "demo_mod"
+        self.set_dm(self.DM)
+        (self.mod / "art").mkdir()
+        (self.mod / "art" / "unit.tga").write_bytes(tiny_tga(32, 32))
+        (self.root / "maps" / "test_map").mkdir(parents=True)
+        (self.root / "maps" / "test_map" / "test_map.map").write_bytes(b"#dom2title Test\r\n#mapsize 256 256\r\n")
+        (self.root / "maps" / "test_map" / "test_map.tga").write_bytes(tiny_tga(8, 8))
+        (self.root / "playtests").mkdir()
+        (self.root / "playtests" / "records.json").write_text("[]\n", encoding="utf-8")
+        # Local state and exports are outside the checkpoint scope.
+        (self.root / "exports").mkdir()
+        (self.root / "exports" / "old.zip").write_bytes(b"zip")
+
+    def rev(self, body: dict) -> dict:
+        from kosmokrator.revisions import save_revisions
+        return save_revisions(self.ws, "demo_mod", body, self.catalog)
+
+    def tree(self) -> dict[str, bytes]:
+        out = {}
+        for p in sorted(self.root.rglob("*")):
+            rel = p.relative_to(self.root).as_posix()
+            if p.is_file() and not rel.startswith(".kosmokrator/"):
+                out[rel] = p.read_bytes()
+        return out
+
+    def checkpoints(self) -> list[dict]:
+        from kosmokrator.revisions import revision_state
+        return revision_state(self.ws, "demo_mod")["checkpoints"]
+
+    def restore(self, cid: str) -> dict:
+        plan = self.rev({"action": "restore", "checkpoint": cid})
+        return self.rev({"action": "restore", "checkpoint": cid, "preview": False, "confirm": True,
+                         "expected_revision": plan["current_revision"], "plan_hash": plan["plan_hash"]})
+
+    def test_roundtrip_restores_bytes_assets_maps_and_keeps_history(self) -> None:
+        from kosmokrator.revisions import compare
+        original = self.tree()
+        cp = self.rev({"action": "checkpoint", "label": "start"})["checkpoint"]
+        self.assertEqual(cp["totals"]["by_role"], {"asset": 2, "dm": 1, "map": 2, "metadata": 2})  # banner + unit art
+        self.assertFalse(any("exports" in f["path"] for f in compare(self.ws, "demo_mod", cp["id"])["files"]))
+        # Edits: source, a deleted and an added asset, a changed and deleted map file and a new bundle.
+        self.set_dm(self.DM.replace(b"#hp 10", b"#hp 11"))
+        (self.mod / "art" / "unit.tga").unlink()
+        (self.mod / "art" / "new.tga").write_bytes(tiny_tga(16, 16))
+        (self.root / "maps" / "test_map" / "test_map.map").write_bytes(b"#dom2title Test 2\r\n#mapsize 256 256\r\n")
+        (self.root / "maps" / "test_map" / "test_map.tga").unlink()
+        (self.root / "maps" / "other_map").mkdir()
+        (self.root / "maps" / "other_map" / "other_map.map").write_bytes(b"#dom2title Other\n")
+        c = compare(self.ws, "demo_mod", cp["id"])
+        self.assertEqual(c["counts"], {"unchanged": 3, "modified": 2, "deleted": 2, "added": 2})
+        self.assertEqual(c["dm"][0]["encoding"], {"before": "latin-1", "after": "latin-1"})
+        self.assertEqual(c["dm"][0]["newlines"], {"before": "crlf", "after": "crlf"})
+        self.assertEqual({(a["path"], a["status"]) for a in c["assets"]},
+                         {("mod/demo_mod/art/unit.tga", "deleted"), ("mod/demo_mod/art/new.tga", "added")})
+        new = next(a for a in c["assets"] if a["status"] == "added")
+        self.assertEqual((new["image_after"]["width"], new["preview"]["checkpoint"]), (16, None))
+        self.assertEqual({m["id"]: m["status"] for m in c["maps"]}, {"test_map": "modified", "other_map": "added"})
+        self.assertIn("Test 2", next(f for m in c["maps"] for f in m["files"] if f["name"] == "test_map.map")["source"]["diff"])
+        res = self.restore(cp["id"])
+        self.assertEqual(res["counts"], {"add": 2, "replace": 2, "delete": 2})
+        self.assertTrue(res["verified"] and res["candidate_check"]["ok"])
+        self.assertEqual(self.tree(), original)  # byte-identical, latin-1 and CRLF kept
+        self.assertFalse((self.root / "maps" / "other_map").exists())
+        kinds = [x["kind"] for x in self.checkpoints()]
+        self.assertEqual(kinds, ["restore", "pre-restore", "manual"])
+        self.assertEqual(self.checkpoints()[0]["revision"], cp["revision"])
+        # The pre-restore checkpoint can undo the restore: the edits come back.
+        self.restore(res["pre_restore"]["id"])
+        self.assertTrue((self.root / "maps" / "other_map" / "other_map.map").exists())
+        self.assertIn(b"#hp 11", self.dm.read_bytes())
+
+    def test_metadata_keeps_identity_and_unions_reservations(self) -> None:
+        meta_path = self.root / "kosmokrator.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta["reservations"] = {"monster": [{"id": 5100, "label": "old", "reserved_utc": "x"}]}
+        meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        cp = self.rev({"action": "checkpoint"})["checkpoint"]
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta.update(name="Renamed", target_game_version="9.99", reservations={"monster": [
+            {"id": 5200, "label": "new", "reserved_utc": "y"}]})
+        meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        plan = self.rev({"action": "restore", "checkpoint": cp["id"]})
+        self.assertEqual(plan["metadata"]["restored_keys"], ["name", "dependencies"])
+        self.restore(cp["id"])
+        after = json.loads(meta_path.read_text(encoding="utf-8"))
+        self.assertEqual((after["name"], after["target_game_version"], after["slug"]), ("Demo Mod", "9.99", "demo_mod"))
+        self.assertEqual(sorted(r["id"] for r in after["reservations"]["monster"]), [5100, 5200])
+
+    def test_stale_plan_missing_blob_and_unconfirmed_apply_write_nothing(self) -> None:
+        cp = self.rev({"action": "checkpoint"})["checkpoint"]
+        self.set_dm(self.DM.replace(b"#hp 10", b"#hp 13"))
+        (self.mod / "art" / "unit.tga").write_bytes(tiny_tga(24, 24))
+        plan = self.rev({"action": "restore", "checkpoint": cp["id"]})
+        body = {"action": "restore", "checkpoint": cp["id"], "preview": False, "confirm": True,
+                "expected_revision": plan["current_revision"], "plan_hash": plan["plan_hash"]}
+        before, count = self.tree(), len(self.checkpoints())
+        for change, code in ((dict(confirm=False), "confirm_required"), (dict(plan_hash="0" * 64), "plan_changed")):
+            with self.assertRaises(KosmoError) as cm:
+                self.rev({**body, **change})
+            self.assertEqual(cm.exception.code, code)
+        self.set_dm(self.DM.replace(b"#hp 10", b"#hp 14"))  # an edit after the preview
+        with self.assertRaises(KosmoError) as cm:
+            self.rev(body)
+        self.assertEqual(cm.exception.code, "stale_revision")
+        before = self.tree()
+        # A missing historical blob refuses the preview and the apply.
+        blob = self.root / ".kosmokrator" / "revisions" / "objects"
+        target = sha(self.DM)
+        (blob / target[:2] / target).unlink()
+        from kosmokrator.revisions import revision_state
+        current = revision_state(self.ws, "demo_mod")["current"]["revision"]
+        for preview in (True, False):
+            with self.assertRaises(KosmoError) as cm:
+                self.rev({**body, "preview": preview, "expected_revision": current})
+            self.assertEqual(cm.exception.code, "blob_missing")
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(len(self.checkpoints()), count)
+
+    def test_injected_write_failure_rolls_back_and_interrupted_restore_recovers(self) -> None:
+        from kosmokrator import revisions
+        cp = self.rev({"action": "checkpoint"})["checkpoint"]
+        self.set_dm(self.DM.replace(b"#hp 10", b"#hp 15"))
+        (self.mod / "art" / "unit.tga").write_bytes(tiny_tga(20, 20))
+        (self.root / "maps" / "test_map" / "test_map.map").write_bytes(b"#dom2title Changed\n")
+        edited = self.tree()
+        real, calls = revisions._place, []
+
+        def flaky(src, dest):
+            calls.append(dest)
+            if len(calls) == 2:
+                raise OSError("disk full (injected)")
+            real(src, dest)
+        with mock.patch.object(revisions, "_place", flaky):
+            with self.assertRaises(KosmoError) as cm:
+                self.restore(cp["id"])
+        self.assertEqual(cm.exception.code, "restore_failed")
+        self.assertEqual(self.tree(), edited)  # the first replaced file was put back
+        state = revisions.revision_state(self.ws, "demo_mod")
+        self.assertEqual(state["interrupted_restores"], [])
+        self.assertEqual([c["kind"] for c in state["checkpoints"]], ["pre-restore", "manual"])
+        # A rollback that cannot finish leaves an interrupted journal; apply refuses until it is recovered.
+        calls.clear()
+        with mock.patch.object(revisions, "_place", flaky), \
+                mock.patch.object(revisions, "_revert", return_value=[{"path": "x", "reason": "injected"}]):
+            with self.assertRaises(KosmoError) as cm:
+                self.restore(cp["id"])
+        self.assertEqual(cm.exception.code, "restore_rollback_failed")
+        self.assertNotEqual(self.tree(), edited)
+        pending = revisions.revision_state(self.ws, "demo_mod")["interrupted_restores"]
+        self.assertEqual(len(pending), 1)
+        with self.assertRaises(KosmoError) as cm:
+            self.restore(cp["id"])
+        self.assertEqual(cm.exception.code, "restore_interrupted")
+        res = self.rev({"action": "recover", "journal": pending[0]["id"], "confirm": True})
+        self.assertEqual((res["state"], res["problems"]), ("recovered", []))
+        self.assertEqual(self.tree(), edited)
+        self.assertEqual(revisions.revision_state(self.ws, "demo_mod")["interrupted_restores"], [])
+
+    def test_semantic_diff_separates_categories_donor_lines_and_raw_unknown_commands(self) -> None:
+        from kosmokrator.revisions import compare
+        cp = self.rev({"action": "checkpoint"})["checkpoint"]
+        new = (self.DM.replace(b"#copystats 199", b"#copystats 311").replace(b"#hp 10", b"#hp 14")
+               .replace(b"#fireres 5", b"#fireres 5\r\n#coldres 3").replace(b"#magicskill 0 1", b"#magicskill 0 2")
+               .replace(b"#weapon 1", b"#weapon 2").replace(b'"Old text"', b'"New text"')
+               .replace(b"#weird 1 2", b"#weird 3").replace(b"#addrecunit 5000", b"#addreccom 5000")
+               .replace(b"#selectmonster 199\r\n#hp 12", b"#selectmonster 199\r\n#hp 9"))
+        self.set_dm(new)
+        objs = {o["key"]: o for o in compare(self.ws, "demo_mod", cp["id"])["dm"][0]["semantic"]["objects"]}
+        unit = objs["monster:newmonster:5000"]
+        got = {(c["command"], c["category"], c["change"]) for c in unit["changes"]}
+        self.assertEqual(got, {("#copystats", "donor", "changed"), ("#hp", "stat", "changed"),
+                               ("#coldres", "trait", "added"), ("#magicskill", "magic", "changed"),
+                               ("#weapon", "equipment", "changed"), ("#descr", "description", "changed"),
+                               ("#weird", "unknown", "changed")})
+        weird = next(c for c in unit["changes"] if c["command"] == "#weird")
+        self.assertEqual((weird["before"], weird["after"], weird["source"]), ("#weird 1 2", "#weird 3", "unknown_raw"))
+        donor = next(c for c in unit["changes"] if c["command"] == "#copystats")
+        self.assertEqual(donor["source"], "donor_reference")
+        self.assertTrue(any("not recomputed" in n for n in unit["notes"]))
+        self.assertEqual(unit["name"], "Unit \xc4")
+        self.assertTrue(any("existing object" in n for n in objs["monster:selectmonster:199"]["notes"]))
+        nation = objs["nation:selectnation:150"]
+        self.assertEqual({(c["command"], c["category"], c["change"]) for c in nation["changes"]},
+                         {("#addrecunit", "recruitment", "removed"), ("#addreccom", "recruitment", "added")})
+        # Only authored lines are reported: no resolved values are invented for the donor.
+        self.assertFalse(any("effective" in c or "resolved" in c for c in unit["changes"]))
+
+    def test_review_baseline_records_declared_human_or_agent(self) -> None:
+        from kosmokrator.revisions import compare, revision_state
+        with self.assertRaises(KosmoError) as cm:
+            self.rev({"action": "review", "expected_revision": "0" * 64})
+        self.assertEqual(cm.exception.code, "bad_request")
+        current = revision_state(self.ws, "demo_mod")["current"]["revision"]
+        with self.assertRaises(KosmoError) as cm:
+            self.rev({"action": "review", "reviewer_kind": "agent", "expected_revision": "0" * 64})
+        self.assertEqual(cm.exception.code, "stale_revision")
+        agent = self.rev({"action": "review", "reviewer_kind": "agent", "expected_revision": current})
+        st = revision_state(self.ws, "demo_mod")
+        self.assertEqual((st["review_baseline"]["reviewer_kind"], st["checkpoints"][0]["kind"]), ("agent", "review"))
+        self.assertTrue(st["review_baseline"]["checkpoint_summary"]["matches_current"])
+        manual = self.rev({"action": "checkpoint", "label": "later"})["checkpoint"]
+        self.set_dm(self.DM.replace(b"#hp 10", b"#hp 16"))
+        self.rev({"action": "review", "reviewer_kind": "human", "reviewer": "Tester", "checkpoint": manual["id"]})
+        st = revision_state(self.ws, "demo_mod")
+        self.assertEqual((st["review_baseline"]["reviewer_kind"], st["review_baseline"]["checkpoint"]), ("human", manual["id"]))
+        c = compare(self.ws, "demo_mod", "baseline")
+        self.assertEqual((c["baseline"]["reviewer_kind"], c["target"]["id"], c["counts"]["modified"]), ("human", manual["id"], 1))
+        self.assertNotEqual(agent["checkpoint"]["id"], manual["id"])
+
+    def test_capture_refuses_unsafe_paths_links_limits_and_midflight_edits(self) -> None:
+        from kosmokrator import revisions
+        (self.mod / "bad name.txt").write_bytes(b"x")
+        with self.assertRaises(KosmoError) as cm:
+            self.rev({"action": "checkpoint"})
+        self.assertEqual(cm.exception.code, "bad_path")
+        (self.mod / "bad name.txt").unlink()
+        with mock.patch.object(revisions, "MAX_FILES", 2), self.assertRaises(KosmoError) as cm:
+            self.rev({"action": "checkpoint"})
+        self.assertEqual(cm.exception.code, "too_large")
+        real = revisions._scan
+        seq = iter([None, {"extra": (self.dm, 1, 1)}])
+
+        def changing(project):
+            out = real(project)
+            out.update(next(seq) or {})
+            return out
+        with mock.patch.object(revisions, "_scan", changing), self.assertRaises(KosmoError) as cm:
+            self.rev({"action": "checkpoint"})
+        self.assertEqual(cm.exception.code, "changed_during_capture")
+        self.assertEqual(self.checkpoints(), [])
+        try:
+            os.symlink(self.dm, self.mod / "linked.dm")
+        except (OSError, NotImplementedError):
+            try:  # Windows without symlink rights: a directory junction is also a link
+                import _winapi
+                _winapi.CreateJunction(str(self.root / "playtests"), str(self.mod / "linked"))
+            except (ImportError, OSError, AttributeError):
+                self.skipTest("symlinks and junctions unavailable")
+        with self.assertRaises(KosmoError) as cm:
+            self.rev({"action": "checkpoint"})
+        self.assertEqual(cm.exception.code, "symlink_rejected")
+
+    def test_entry_points_and_verified_previews(self) -> None:
+        from kosmokrator.cli import main
+        from kosmokrator.core import Kosmokrator
+        from kosmokrator.revisions import preview_image
+        k = Kosmokrator(str(self.ws), str(Path(self._tmp.name) / "cat"))
+        cp = k.author_save("demo_mod", "revisions", {"action": "checkpoint", "actor": "agent"})["checkpoint"]
+        self.assertEqual(cp["actor"], "agent")
+        self.assertEqual(k.author_state("demo_mod", "revisions")["checkpoints"][0]["id"], cp["id"])
+        self.assertTrue(k.author_state("demo_mod", f"revisions:{cp['id']}")["identical"])
+        with self.assertRaises(KosmoError):
+            k.author_save("demo_mod", "revisions", {"action": "checkpoint", "surprise": 1})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["--workspace", str(self.ws), "author", "demo_mod", "revisions", "--json"])
+        self.assertEqual((code, json.loads(out.getvalue())["result"]["checkpoints"][0]["id"]), (0, cp["id"]))
+        old = sha((self.mod / "art" / "unit.tga").read_bytes())
+        (self.mod / "art" / "unit.tga").write_bytes(tiny_tga(40, 40))
+        png = preview_image(self.ws, "demo_mod", "checkpoint", "mod/demo_mod/art/unit.tga", old)
+        self.assertTrue(png.startswith(b"\x89PNG"))
+        with self.assertRaises(KosmoError) as cm:
+            preview_image(self.ws, "demo_mod", "current", "mod/demo_mod/art/unit.tga", old)
+        self.assertEqual(cm.exception.code, "stale_preview")
+        blob = self.root / ".kosmokrator" / "revisions" / "objects" / old[:2] / old
+        blob.write_bytes(b"tampered")
+        with self.assertRaises(KosmoError) as cm:
+            preview_image(self.ws, "demo_mod", "checkpoint", "mod/demo_mod/art/unit.tga", old)
+        self.assertEqual(cm.exception.code, "blob_corrupt")
+        with self.assertRaises(KosmoError) as cm:
+            preview_image(self.ws, "demo_mod", "checkpoint", "../outside.png", old)
+        self.assertEqual(cm.exception.code, "bad_path")
+
+    def test_web_routes_guard_writes_and_serve_verified_previews(self) -> None:
+        import http.client
+        import threading
+        from kosmokrator.webserver import make_server
+        server = make_server(str(self.ws), None, None, port=0)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        host = f"127.0.0.1:{server.server_address[1]}"
+
+        def call(method: str, path: str, body: dict | None = None, csrf: str | None = None):
+            conn = http.client.HTTPConnection(host, timeout=10)
+            headers = {"Host": host}
+            data = None
+            if body is not None:
+                data = json.dumps(body).encode()
+                headers.update({"Content-Type": "application/json", "Origin": f"http://{host}",
+                                "Content-Length": str(len(data))})
+                if csrf:
+                    headers["X-Kosmo-CSRF"] = csrf
+            conn.request(method, path, body=data, headers=headers)
+            res = conn.getresponse()
+            raw = res.read()
+            conn.close()
+            return res.status, res.getheader("Content-Type"), raw
+        try:
+            base = "/api/projects/demo_mod/revisions"
+            status, _ct, _raw = call("POST", base, {"action": "checkpoint"})
+            self.assertEqual(status, 403)  # no editor token
+            self.assertEqual(self.checkpoints(), [])
+            status, _ct, raw = call("POST", base, {"action": "checkpoint", "label": "web"}, server.RequestHandlerClass.state.csrf)
+            self.assertEqual(status, 200, raw)
+            cid = json.loads(raw)["result"]["checkpoint"]["id"]
+            art = self.mod / "art" / "unit.tga"
+            old = sha(art.read_bytes())
+            art.write_bytes(tiny_tga(12, 12))
+            status, _ct, raw = call("GET", f"{base}/compare?target={cid}")
+            asset = json.loads(raw)["result"]["assets"][0]
+            self.assertEqual((status, asset["status"], asset["dimensions_changed"]), (200, "modified", True))
+            status, ctype, png = call("GET", f"{base}/preview?side=current&path=mod/demo_mod/art/unit.tga&sha={asset['after']['sha256']}")
+            self.assertEqual((status, ctype, png[:4]), (200, "image/png", b"\x89PNG"))
+            status, _ct, _raw = call("GET", f"{base}/preview?side=current&path=mod/demo_mod/art/unit.tga&sha={old}")
+            self.assertEqual(status, 409)
+            status, _ct, raw = call("GET", base)
+            self.assertEqual((status, json.loads(raw)["result"]["checkpoints"][0]["via"]), (200, "browser"))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
 if __name__ == "__main__":
     unittest.main()

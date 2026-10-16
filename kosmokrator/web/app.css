@@ -979,6 +979,23 @@ details.used-by > summary { font-size: .88rem; }
   .health-row.is-err, .health-row.is-warn { border-left: 3px solid CanvasText; }
 }
 
+/* ----- changes (Build > Changes): checkpoints, compare and restore ----- */
+.changes-forms { display: grid; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); gap: .8rem; }
+.changes-forms .input { flex: 1 1 10rem; min-width: 0; }
+.changes-radio, .changes-confirm { display: inline-flex; align-items: center; gap: .3rem; cursor: pointer; }
+.changes-confirm { margin: .3rem 0; }
+.changes-title { margin: .2rem 0 0; }
+.changes-count { margin-right: .6rem; }
+.changes-obj { padding: .5rem .3rem; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: .35rem; }
+.changes-raw { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .82rem; }
+.changes .state .mono { overflow-wrap: anywhere; }
+tr.is-selected > td { background: var(--accent-tint); }
+.changes-assets { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: .8rem; }
+.changes-asset { margin: 0; padding: .5rem; border: 1px solid var(--line); border-radius: var(--radius-s); display: flex; flex-direction: column; gap: .4rem; }
+.changes-asset figcaption { overflow-wrap: anywhere; }
+.changes-pair { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; align-items: end; }
+.changes-pair img { display: block; max-width: 100%; max-height: 8rem; image-rendering: pixelated; background: #0d0c0a; border: 1px solid var(--line-2); }
+
 /* Map preview details stay out of the way until opened. */
 .map-look-more { margin: 0 0 .5rem; font-size: .84rem; }
 .map-look-more > summary { cursor: pointer; color: var(--muted); }

@@ -18,8 +18,12 @@ PNG_DEPTHS = {0: (1, 2, 4, 8, 16), 2: (8, 16), 3: (1, 2, 4, 8), 4: (8, 16), 6: (
 
 def image_info(path: Path) -> dict[str, Any]:
     """Return {format, width, height, depth, alpha, problems} from the file header."""
-    data = path.read_bytes()
-    ext = path.suffix.lower()
+    return image_info_bytes(path.name, path.read_bytes())
+
+
+def image_info_bytes(name: str, data: bytes) -> dict[str, Any]:
+    """image_info for bytes already in memory (for example a stored checkpoint blob); name gives the extension."""
+    ext = Path(name).suffix.lower()
     info: dict[str, Any] = {"format": None, "width": None, "height": None, "depth": None, "problems": []}
     if data.startswith(PNG_SIG):
         info["format"] = "png"

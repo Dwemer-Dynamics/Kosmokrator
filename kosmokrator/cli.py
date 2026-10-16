@@ -109,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("author", parents=[common], help="Show or preview/save sites, spells, weapons, armour, "
                                                         "nation heroes or playtest records")
     p.add_argument("project")
-    p.add_argument("kind", help="sites | spells | weapons | armors | heroes:<nation id> | playtests | commands:<context> | dependencies | inheritance | compatibility | health | balance[:nation IDs] | map-builds | maps | maps:<id> | maps:import | reference-snapshot")
+    p.add_argument("kind", help="sites | spells | weapons | armors | heroes:<nation id> | playtests | commands:<context> | dependencies | inheritance | compatibility | health | balance[:nation IDs] | map-builds | maps | maps:<id> | maps:import | reference-snapshot | revisions | revisions:<checkpoint id> | revisions:baseline")
     p.add_argument("--body-file", help="JSON request (as for the web route; '-' for stdin). Omit to show state")
 
     p = sub.add_parser('import-map', parents=[common], help='Import a map bundle into an existing project')

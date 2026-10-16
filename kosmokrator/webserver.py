@@ -125,6 +125,7 @@ MAX_EDIT_BYTES = 64 * 1024
 TOOLS_ROUTE_RE = re.compile(r"/api/tools/(domerger|nationgen|spritegen|mapnuke)/(preview|run)")
 REFERENCE_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/reference-snapshot")
 MERC_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/mercs")
+REVISIONS_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/revisions")
 EQUIPMENT_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/monsters/(\d{1,6})/equipment")
 # Import uploads one .dm plus its assets as base64; bounded like the art route.
 MAX_IMPORT_BODY_BYTES = 6 * 1024 * 1024
@@ -146,8 +147,18 @@ EDIT_STATUS = {"sha_mismatch": HTTPStatus.CONFLICT, "project_locked": HTTPStatus
                "object_missing": HTTPStatus.NOT_FOUND, "project_missing": HTTPStatus.NOT_FOUND,
                "reference_changed": HTTPStatus.CONFLICT, "reference_too_large": HTTPStatus.REQUEST_ENTITY_TOO_LARGE}
 EDIT_STATUS.update(object_in_use=HTTPStatus.CONFLICT, id_conflict=HTTPStatus.CONFLICT)
+# Local checkpoints and restore (revisions.py).
+EDIT_STATUS.update(stale_revision=HTTPStatus.CONFLICT, plan_changed=HTTPStatus.CONFLICT,
+                   restore_interrupted=HTTPStatus.CONFLICT, changed_during_capture=HTTPStatus.CONFLICT,
+                   changed_during_restore=HTTPStatus.CONFLICT, checkpoint_missing=HTTPStatus.NOT_FOUND,
+                   baseline_missing=HTTPStatus.NOT_FOUND, journal_missing=HTTPStatus.NOT_FOUND,
+                   blob_missing=HTTPStatus.UNPROCESSABLE_ENTITY, blob_corrupt=HTTPStatus.UNPROCESSABLE_ENTITY,
+                   manifest_corrupt=HTTPStatus.UNPROCESSABLE_ENTITY,
+                   restore_failed=HTTPStatus.INTERNAL_SERVER_ERROR,
+                   restore_rollback_failed=HTTPStatus.INTERNAL_SERVER_ERROR)
 # Only these error details are echoed to the browser (no absolute, lock or temp paths).
-SAFE_DETAILS = {"lines", "field", "blocked", "problems", "expected", "actual", "counts", "errors", "validation"}
+SAFE_DETAILS = {"lines", "field", "blocked", "problems", "expected", "actual", "counts", "errors", "validation",
+                "missing", "paths", "path", "journal", "pre_restore"}
 MAX_DONOR_QUERY = 60
 
 
@@ -287,7 +298,9 @@ class Handler(BaseHTTPRequestHandler):
             mm = re.fullmatch(r'/api/projects/([a-z][a-z0-9_]{1,47})/maps/(import|[A-Za-z][A-Za-z0-9_]{0,47}/(?:edit|export))', self.path)
             mr = REFERENCE_ROUTE_RE.fullmatch(self.path)
             mmerc = MERC_ROUTE_RE.fullmatch(self.path)
-            if not (m or mx or mc or ma or mn or mco or mh or mp or mi or mt or me or mg or md or mm or mb or mw or mr or mmerc):
+            mrev = REVISIONS_ROUTE_RE.fullmatch(self.path)
+            if not (m or mx or mc or ma or mn or mco or mh or mp or mi or mt or me or mg or md or mm or mb or mw or mr or mmerc
+                    or mrev):
                 return self._reject_write()
             limit = 180 * 1024 * 1024 if mm and mm.group(2) == 'import' else MAX_ART_BODY_BYTES if ma else MAX_IMPORT_BODY_BYTES if mi else MAX_EDIT_BYTES
             host = (self.headers.get("Host") or "").strip()
@@ -324,7 +337,7 @@ class Handler(BaseHTTPRequestHandler):
                 live, _err = self.state.catalog()
                 return self._json({"ok": True, "result": create_snapshot(self.state.workspace, mr.group(1), live, body)})
             # Project routes read the project's own reference snapshot when it has one.
-            scoped = next((x for x in (m, mx, mc, ma, mn, mco, mh, mp, me, mg, md, mm, mb, mmerc) if x), None)
+            scoped = next((x for x in (m, mx, mc, ma, mn, mco, mh, mp, me, mg, md, mm, mb, mmerc, mrev) if x), None)
             cat, _err = self.state.catalog_for(scoped.group(1)) if scoped else self.state.catalog()
             if mb:
                 from .map_builds import save_map_build
@@ -339,6 +352,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({'ok': True, 'result': result})
             if mmerc:
                 return self._json({"ok": True, "result": save_merc(self.state.workspace, mmerc.group(1), cat, body)})
+            if mrev:
+                from .revisions import save_revisions
+                return self._json({"ok": True, "result": save_revisions(self.state.workspace, mrev.group(1), body,
+                                                                        cat, via="browser")})
             if mg:
                 return self._json({'ok': True, 'result': save_commands(self.state.workspace, mg.group(1), cat, body)})
             if md:
@@ -422,6 +439,8 @@ class Handler(BaseHTTPRequestHandler):
             self._route(segs, query)
         except KosmoError as exc:
             status = HTTPStatus.NOT_FOUND if exc.code.endswith(("missing", "not_a_file")) else HTTPStatus.BAD_REQUEST
+            if exc.code in ("stale_preview", "changed_during_capture"):
+                status = HTTPStatus.CONFLICT
             if exc.code in ("path_escape", "symlink_rejected", "asset_symlink"):
                 status = HTTPStatus.FORBIDDEN
             self._error(status, exc.code, exc.message, **exc.details)
@@ -525,6 +544,16 @@ class Handler(BaseHTTPRequestHandler):
             expected = q.get('expected_revision') or None
             return self._json({'ok': True, 'result': build_health(ws, slug, live, live_err, cached, expected)},
                               download=f"{slug}-health.json" if dl else None)
+        if head == 'revisions':
+            from .revisions import compare, preview_image, revision_state
+            if len(rest) == 1:
+                return self._json({'ok': True, 'result': revision_state(ws, slug)})
+            if len(rest) == 2 and rest[1] == 'compare':
+                return self._json({'ok': True, 'result': compare(ws, slug, q.get('target') or 'baseline')},
+                                  download=f"{slug}-changes.json" if dl else None)
+            if len(rest) == 2 and rest[1] == 'preview':
+                png = preview_image(ws, slug, q.get('side', ''), q.get('path', ''), q.get('sha', ''))
+                return self._send(200, png, 'image/png')
         if head == 'map-builds' and len(rest) == 1:
             from .map_builds import map_build_state
             return self._json({'ok':True,'result':map_build_state(ws,slug)})

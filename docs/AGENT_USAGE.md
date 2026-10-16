@@ -48,7 +48,10 @@ overrides. Editing these docs locally does not update a published release ZIP.
 
 Read-only `author_state` kinds now include `inheritance`, `compatibility`, `balance`
 and `balance:<nation IDs separated by commas>`. These return source-backed reports;
-they do not change the mod or simulate combat. Kind `health` (CLI `health`) returns one prioritized, deduplicated
+they do not change the mod or simulate combat. Kind `revisions` lists local checkpoints; `revisions:<id>` and
+`revisions:baseline` compare them with the current files. Before larger work, `author_save` kind `revisions`
+`{"action": "checkpoint"}` lets the user review or undo it; mark reviews with your true `reviewer_kind` (`agent`)
+and never claim a human review. Restores are preview-then-apply with `plan_hash` and `confirm`. Kind `health` (CLI `health`) returns one prioritized, deduplicated
 finding list with stable ids, locations, evidence, next actions, recruitment classes, scope and caveats for a
 captured revision; read its `not_checked` scope before reporting a project as healthy. See [inheritance](INHERITANCE.md),
 [compatibility](COMPATIBILITY.md) and [comparisons](BALANCE-COMPARISONS.md).

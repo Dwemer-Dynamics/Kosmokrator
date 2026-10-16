@@ -492,7 +492,7 @@
   // the secondary Files group sits behind the More disclosure so the page content starts sooner on narrow screens.
   const TAB_GROUPS = [
     ["browse", "Browse", [["overview", "Overview"], ["nation", "Nation"], ["units", "Units"], ["pretenders", "Pretenders"], ["sites", "Sites"], ["spells", "Spells"], ["items", "Items"], ["mercs", "Mercenaries"], ["maps", "Maps"], ["balance", "Balance"]]],
-    ["edit", "Build", [["author", "Advanced tools"], ["health", "Health"], ["validation", "Validation"], ["export", "Export"]]],
+    ["edit", "Build", [["author", "Advanced tools"], ["health", "Health"], ["changes", "Changes"], ["validation", "Validation"], ["export", "Export"]]],
     ["files", "More", [["source", "Source"], ["assets", "Assets"], ["other", "Other definitions"], ["docs", "Docs"]]],
   ];
   // The vanilla inspector is reached from the sidebar's Catalog section, not the tab bar.
@@ -4200,6 +4200,218 @@
             el("dt", { text: "Not checked" }), el("dd", null, el("ul", { class: "plain-list" }, r.scope.not_checked.map((x) => el("li", null, el("code", { text: x.check }), " ", x.reason))))),
           panel("Limitations", el("ul", null, r.limitations.map((l) => el("li", { text: l })))),
           panel("JSON", jsonActions(url, () => last, "Health JSON"))));
+    }
+    load();
+    return holder;
+  }
+
+  // ---------- changes: local checkpoints, review baseline, compare and restore ----------
+  // GET /api/projects/<slug>/revisions (history), .../revisions/compare?target=<id|baseline>, .../revisions/preview (PNG
+  // whose bytes must hash to the listed SHA-256) and POST .../revisions {action}. Viewing never creates a checkpoint.
+  const CHANGE_STATUS = { added: ["added", "ok"], modified: ["changed", "warn"], changed: ["changed", "warn"], removed: ["removed", "err"],
+    deleted: ["deleted", "err"], reordered: ["reordered", "info"], add: ["add", "ok"], replace: ["replace", "warn"], delete: ["delete", "err"] };
+  const CP_KIND = { manual: "checkpoint", review: "review", "pre-restore": "before restore", restore: "restored" };
+  const CHANGE_CATS = { stat: "stats", trait: "traits", magic: "magic", equipment: "equipment", recruitment: "recruitment", description: "description",
+    asset: "artwork", donor: "donor/copy", other: "other", unknown: "unknown (raw)" };
+  const changeBadge = (s) => { const [t, k] = CHANGE_STATUS[s] || [s, ""]; return badge(t, k); };
+  const fmtWhen = (iso) => { const d = new Date(txt(iso)); return Number.isNaN(d.getTime()) ? txt(iso) : d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" }); };
+  const fmtSize = (n) => (n === null || n === undefined ? "—" : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
+  const imgDims = (i) => (i && i.width ? `${i.width}×${i.height}${i.format ? ` ${i.format.toUpperCase()}` : ""}` : "—");
+  function writeError(e, what) {
+    const err = (e && e.error) || { code: "network_error", message: String(e && e.message || e) };
+    return stateBox("error", `${what} failed.`, el("span", null, el("span", { class: "code", text: `[${err.code}] ` }), txt(err.message),
+      err.details ? el("div", { class: "faint mono", text: JSON.stringify(err.details) }) : null));
+  }
+  function viewChanges(m) {
+    const slug = m.project.slug, base = `/api/projects/${encodeURIComponent(slug)}/revisions`;
+    const holder = el("div", { class: "stack changes" }, stateBox("loading", "Reading local history..."));
+    const top = el("div", { class: "stack" }), cmpBox = el("div", { class: "stack changes-compare", "aria-live": "polite" }), planBox = el("div", { class: "stack changes-restore" });
+    const ui = { st: null, target: null, cmp: null, busy: false, msg: null, label: "", reviewer: "", reviewKind: "", note: "" };
+    const preview = (side, ref) => `${base}/preview?side=${side}&path=${encodeURIComponent(ref.path)}&sha=${ref.sha256}`;
+    async function load(keepTarget) {
+      try { ui.st = (await getJSON(base)).result; ui.msg = null; }
+      catch (e) { fillKids(holder, errorBox(e, "local history"), el("p", null, el("button", { type: "button", class: "btn btn-small", onclick: () => load() }, "Retry"))); return; }
+      const ids = ui.st.checkpoints.map((c) => c.id);
+      if (!keepTarget || (ui.target !== "baseline" && !ids.includes(ui.target)) || (ui.target === "baseline" && !ui.st.review_baseline))
+        ui.target = ui.st.review_baseline ? "baseline" : ids[0] || null;
+      fillKids(holder, top, cmpBox, planBox);
+      draw();
+      if (ui.target) compareNow(); else fillKids(cmpBox);
+    }
+    async function post(body, what) {
+      ui.busy = true; ui.msg = null; draw();
+      try { return await postJSON(base, body); }
+      catch (e) { ui.msg = writeError(e, what); return null; }
+      finally { ui.busy = false; draw(); }
+    }
+    async function createCheckpoint() {
+      const r = await post({ action: "checkpoint", label: ui.label || null }, "Creating the checkpoint");
+      if (r) { ui.label = ""; toast("Checkpoint created"); await load(true); }
+    }
+    async function markReviewed() {
+      const r = await post({ action: "review", reviewer_kind: ui.reviewKind, reviewer: ui.reviewer || null, note: ui.note || null,
+        expected_revision: ui.st.current.revision }, "Marking the review");
+      if (r) { ui.note = ""; ui.target = "baseline"; toast(`Marked reviewed (${r.review.reviewer_kind})`); await load(true); }
+    }
+    async function recover(j) {
+      const r = await post({ action: "recover", journal: j.id, confirm: true }, "Recovery");
+      if (r) { state.models.delete(slug); toast(`Recovery ${r.state}`); await load(true); }
+    }
+    function draw() {
+      const st = ui.st;
+      if (!st) return;
+      const cur = st.current, cps = st.checkpoints, rb = st.review_baseline;
+      const kindPick = el("div", { class: "btn-row", role: "radiogroup", "aria-label": "Who reviewed" },
+        ["human", "agent"].map((k) => el("label", { class: "changes-radio" }, el("input", { type: "radio", name: `rk-${slug}`, value: k, checked: ui.reviewKind === k || null,
+          onchange: () => { ui.reviewKind = k; draw(); } }), k === "human" ? " I reviewed it (human)" : " An agent reviewed it")));
+      fillKids(top,
+        el("div", { class: "health-head" },
+          el("span", null, "Current revision ", el("code", { title: txt(cur.revision), text: shortSha(cur.revision) }),
+            cur.totals ? el("span", { class: "faint", text: ` · ${cur.totals.files} files · ${fmtSize(cur.totals.bytes)}` }) : null),
+          el("button", { type: "button", class: "btn btn-small", disabled: ui.busy || null, onclick: () => load(true) }, "Refresh")),
+        el("p", { class: "panel-note" }, "Checkpoints store every file in the mod folder, complete map bundles and project metadata locally (",
+          el("code", { text: ".kosmokrator/revisions" }), "). They are never exported or pruned. Viewing this page creates nothing."),
+        cur.error ? stateBox("error", "The current files could not be read.", `${cur.error.code}: ${cur.error.message}`) : null,
+        st.interrupted_restores.map((j) => stateBox("error", `Restore ${j.id} did not finish (${j.state}).`,
+          el("span", null, "Put back the files it touched from its journal and pre-restore checkpoint ", el("code", { text: txt(j.pre_restore) }), ". ",
+            el("button", { type: "button", class: "btn btn-small", disabled: ui.busy || null, onclick: () => recover(j) }, "Recover now")))),
+        ui.msg,
+        el("div", { class: "changes-forms" },
+          panel("Create checkpoint",
+            el("p", { class: "panel-note", text: "Before agent or manual work you may want to compare or undo. History starts at the first checkpoint." }),
+            el("div", { class: "btn-row" },
+              el("input", { class: "input", type: "text", maxlength: "120", placeholder: "Label (optional)", "aria-label": "Checkpoint label", value: ui.label,
+                oninput: (e) => { ui.label = e.target.value; } }),
+              el("button", { type: "button", class: "btn", disabled: ui.busy || !cur.revision || null, onclick: createCheckpoint }, ui.busy ? "Working..." : "Create checkpoint"))),
+          panel("Review baseline",
+            rb ? el("p", null, badge(rb.reviewer_kind === "human" ? "human review" : "agent review", rb.reviewer_kind === "human" ? "ok" : "info"), " ",
+              el("code", { text: rb.checkpoint }), el("span", { class: "faint", text: ` · ${fmtWhen(rb.created_utc)}${rb.reviewer ? ` · ${rb.reviewer}` : ""}` }),
+              rb.checkpoint_summary && rb.checkpoint_summary.matches_current ? [" ", badge("matches current", "ok")] : null)
+              : el("p", { class: "faint", text: "No review baseline yet." }),
+            el("p", { class: "panel-note", text: "Marks the current files as reviewed (a new checkpoint). Choose who reviewed; it is recorded as declared." }),
+            kindPick,
+            el("div", { class: "btn-row" },
+              el("input", { class: "input", type: "text", maxlength: "80", placeholder: "Reviewer (optional)", "aria-label": "Reviewer name", value: ui.reviewer, oninput: (e) => { ui.reviewer = e.target.value; } }),
+              el("input", { class: "input", type: "text", maxlength: "400", placeholder: "Note (optional)", "aria-label": "Review note", value: ui.note, oninput: (e) => { ui.note = e.target.value; } }),
+              el("button", { type: "button", class: "btn", disabled: ui.busy || !ui.reviewKind || !cur.revision || null, onclick: markReviewed }, "Mark current files reviewed")))),
+        cps.length ? panel(`Checkpoints (${cps.length})`,
+          table(["Created", "Kind", "Label", "Files", "Revision", "Review", ""], cps.map((c) => ({ class: ui.target === c.id ? "is-selected" : null, cells: [
+            fmtWhen(c.created_utc), badge(CP_KIND[c.kind] || c.kind, c.kind === "review" ? "ok" : c.kind === "manual" ? "" : "info"), txt(c.label || ""),
+            `${c.totals.files} · ${fmtSize(c.totals.bytes)}`,
+            el("span", null, el("code", { title: c.revision, text: shortSha(c.revision) }), c.matches_current ? [" ", badge("current", "ok")] : null),
+            c.review ? badge(c.review.reviewer_kind, c.review.reviewer_kind === "human" ? "ok" : "info") : "",
+            el("div", { class: "btn-row" },
+              el("button", { type: "button", class: "btn btn-small", disabled: ui.busy || null, "aria-pressed": ui.target === c.id ? "true" : "false",
+                onclick: () => { ui.target = c.id; draw(); compareNow(); } }, "Compare"),
+              el("button", { type: "button", class: "btn btn-small btn-ghost", disabled: ui.busy || !cur.revision || null, onclick: () => previewRestore(c) }, "Restore…"))] }))),
+          rb ? el("div", { class: "btn-row" }, el("button", { type: "button", class: "btn btn-small", "aria-pressed": ui.target === "baseline" ? "true" : "false",
+            onclick: () => { ui.target = "baseline"; draw(); compareNow(); } }, "Compare with review baseline")) : null,
+          st.unreadable_checkpoints.length ? stateBox("error", `${st.unreadable_checkpoints.length} checkpoint files could not be read.`,
+            st.unreadable_checkpoints.map((u) => `${u.file}: ${u.code}`).join("; ")) : null)
+          : stateBox("empty", "No checkpoints yet.", "Create one before agent or manual edits. Changes made before the first checkpoint cannot be reconstructed."),
+        techSection("Scope and notes", false,
+          el("dl", { class: "kv" }, el("dt", { text: "Captured" }), el("dd", { text: st.scope.captured.join(", ") }),
+            el("dt", { text: "Not captured" }), el("dd", { text: st.scope.excluded.join("; ") }),
+            el("dt", { text: "History starts" }), el("dd", { text: st.history_starts_utc ? fmtWhen(st.history_starts_utc) : "no checkpoints" })),
+          el("ul", null, st.notes.map((n) => el("li", { text: n })))));
+    }
+    async function compareNow() {
+      const target = ui.target;
+      fillKids(cmpBox, stateBox("loading", "Comparing with the current files..."));
+      try {
+        const c = (await getJSON(`${base}/compare?target=${encodeURIComponent(target)}`)).result;
+        if (target !== ui.target) return;
+        ui.cmp = c;
+        fillKids(cmpBox, renderCompare(c));
+      } catch (e) { if (target === ui.target) fillKids(cmpBox, errorBox(e, "the comparison")); }
+    }
+    function renderCompare(c) {
+      const n = c.counts, label = c.baseline ? `review baseline (${c.baseline.reviewer_kind})` : `checkpoint ${c.target.label || c.target.id}`;
+      const head = el("h3", { class: "changes-title" }, `Changes since ${label}`);
+      if (c.identical) return [head, stateBox("empty", "No changes.", "The current files match this checkpoint exactly.")];
+      const sem = c.dm.flatMap((d) => d.semantic.objects.map((o) => ({ ...o, file: d.path })));
+      return [head,
+        el("p", null, ["added", "modified", "deleted"].map((k) => n[k] ? el("span", { class: "changes-count" }, changeBadge(k), ` ${n[k]} `) : null),
+          el("span", { class: "faint", text: `${n.unchanged || 0} unchanged · current ${shortSha(c.current_revision)} vs ${shortSha(c.target_revision)}` })),
+        sem.length ? panel("Definitions", el("ul", { class: "health-list" }, sem.map((o) => el("li", { class: "changes-obj" },
+          el("div", { class: "health-title" }, changeBadge(o.status), " ", el("strong", { text: `${o.name || o.key}` }), " ",
+            el("span", { class: "faint", text: `${o.context}${o.id !== null && o.id !== undefined ? ` #${o.id}` : ""}` }), " ",
+            o.categories.map((k) => badge(CHANGE_CATS[k] || k, k === "unknown" ? "warn" : k === "donor" ? "copper" : "")),
+            o.name_before && o.name_before !== o.name ? el("span", { class: "faint", text: ` (was ${o.name_before})` }) : null),
+          o.changes.length ? table(["Command", "Change", "Checkpoint", "Current"], o.changes.map((x) => [
+            el("span", null, el("code", { text: x.command }), " ", el("span", { class: "faint", text: CHANGE_CATS[x.category] || x.category })),
+            changeBadge(x.change), el("code", { class: "changes-raw", text: txt(x.before) }), el("code", { class: "changes-raw", text: txt(x.after) })])) : null,
+          o.notes.map((t) => el("p", { class: "panel-note", text: t }))))),
+          c.dm.some((d) => d.semantic.objects_truncated) ? el("p", { class: "faint", text: "More definitions changed; see the raw diff." }) : null) : null,
+        c.assets.length ? panel(`Artwork (${c.assets.length})`, el("div", { class: "changes-assets" }, c.assets.map((a) => el("figure", { class: "changes-asset" },
+          el("figcaption", null, changeBadge(a.status), " ", el("code", { text: a.path })),
+          el("div", { class: "changes-pair" },
+            el("div", null, el("div", { class: "faint", text: "Checkpoint" }), a.preview.checkpoint ? el("img", { src: preview("checkpoint", a.preview.checkpoint), alt: `Checkpoint version of ${a.path}` }) : el("div", { class: "faint", text: "none" })),
+            el("div", null, el("div", { class: "faint", text: "Current" }), a.preview.current ? el("img", { src: preview("current", a.preview.current), alt: `Current version of ${a.path}` }) : el("div", { class: "faint", text: "none" }))),
+          el("div", { class: "faint" }, `${imgDims(a.image_before)} → ${imgDims(a.image_after)}`, a.dimensions_changed ? [" ", badge("size changed", "warn")] : null,
+            ` · ${fmtSize(a.before && a.before.bytes)} → ${fmtSize(a.after && a.after.bytes)}`))))) : null,
+        c.maps.length ? panel(`Maps (${c.maps.length})`, c.maps.map((mp) => el("div", { class: "stack" },
+          el("div", null, changeBadge(mp.status), " ", el("strong", { text: mp.id }), el("span", { class: "faint", text: ` bundle ${shortSha(mp.revision_before)} → ${shortSha(mp.revision_after)}` })),
+          table(["File", "Change", "Size", "Image"], mp.files.map((f) => [el("code", { text: f.name }), changeBadge(f.status),
+            `${fmtSize(f.before && f.before.bytes)} → ${fmtSize(f.after && f.after.bytes)}`, f.image_before || f.image_after ? `${imgDims(f.image_before)} → ${imgDims(f.image_after)}` : ""])),
+          mp.files.filter((f) => f.source && f.source.diff).map((f) => diffView(f.source.diff, `${f.name} source lines (+${f.source.lines_added} −${f.source.lines_removed})`)))),
+          el("p", { class: "panel-note", text: "Bundles are compared by file; open Maps to inspect provinces." })) : null,
+        c.metadata.length ? panel("Project metadata", c.metadata.map((md) => el("div", null, changeBadge(md.status), " ", el("code", { text: md.path }),
+          md.keys && md.keys.length ? table(["Key", "Checkpoint", "Current"], md.keys.map((k) => [el("code", { text: k.key }), el("code", { class: "changes-raw", text: JSON.stringify(k.before) }), el("code", { class: "changes-raw", text: JSON.stringify(k.after) })])) : null,
+          (md.reservations || []).map((r) => el("p", null, `Reserved ${r.kind} IDs: `, r.added.length ? `+${r.added.join(", ")} ` : "", r.removed.length ? `−${r.removed.join(", ")}` : "")),
+          md.records ? el("p", { text: `Playtest records: ${txt(md.records.before)} → ${txt(md.records.after)}` }) : null))) : null,
+        c.other.length ? panel("Other files", table(["File", "Change", "Size"], c.other.map((f) => [el("code", { text: f.path }), changeBadge(f.status), `${fmtSize(f.before && f.before.bytes)} → ${fmtSize(f.after && f.after.bytes)}`]))) : null,
+        c.dm.map((d) => d.raw.diff ? el("details", { class: "raw" }, el("summary", null, `Raw source diff: ${d.path} (+${d.raw.lines_added} −${d.raw.lines_removed})`,
+          d.newlines.before !== d.newlines.after || d.encoding.before !== d.encoding.after ? ` · ${txt(d.encoding.before)}/${txt(d.newlines.before)} → ${txt(d.encoding.after)}/${txt(d.newlines.after)}` : ""),
+          el("div", { class: "inner" }, diffView(d.raw.diff, "Unified diff (checkpoint → current)"), d.raw.truncated ? el("p", { class: "faint", text: "Diff truncated." }) : null)) : null),
+        techSection("Limitations", false, el("ul", null, c.limitations.map((l) => el("li", { text: l }))), jsonActions(`${base}/compare?target=${encodeURIComponent(ui.target)}`, () => ui.cmp, "Changes JSON"))];
+    }
+    async function previewRestore(cp, refresh) {
+      fillKids(planBox, stateBox("loading", "Planning the restore..."));
+      planBox.scrollIntoView({ block: "nearest" });
+      if (refresh) await load(true); // the files changed: plan against the revision on disk now
+      try {
+        const p = await postJSON(base, { action: "restore", checkpoint: cp.id, preview: true, expected_revision: ui.st.current.revision });
+        drawPlan(cp, p, false, null);
+      } catch (e) { fillKids(planBox, writeError(e, "Planning the restore")); }
+    }
+    function drawPlan(cp, p, stale, err) {
+      let confirmed = false;
+      const apply = el("button", { type: "button", class: "btn", disabled: true }, "Restore this checkpoint");
+      const cand = p.candidate_check;
+      apply.addEventListener("click", async () => {
+        apply.disabled = true; apply.textContent = "Restoring...";
+        try {
+          const r = await postJSON(base, { action: "restore", checkpoint: cp.id, preview: false, expected_revision: p.current_revision, plan_hash: p.plan_hash, confirm: true });
+          state.models.delete(slug);
+          recordReceipt(slug, `Restored checkpoint ${cp.label || cp.id} (${r.ops.length} files)`, { revision: r.revision },
+            { backup: `pre-restore checkpoint ${r.pre_restore.id}` });
+          const v = r.validation_after;
+          fillKids(planBox, stateBox(v.ok ? "empty" : "error", `Restored ${cp.label || cp.id}.`,
+            el("span", null, `Pre-restore checkpoint ${r.pre_restore.id}; new checkpoint ${r.post_restore.id}. `, r.verified ? "Result verified. " : "Result differs from the plan; check Changes. ",
+              v.counts ? `Validation: ${v.counts.errors} errors, ${v.counts.warnings} warnings.` : `Validation unavailable: ${v.error && v.error.code}`)));
+          await load(true);
+        } catch (e) {
+          const code = e && e.error && e.error.code;
+          drawPlan(cp, p, ["stale_revision", "plan_changed", "changed_during_capture", "changed_during_restore", "restore_interrupted"].includes(code), e);
+        }
+      });
+      const counts = p.counts;
+      fillKids(planBox, panel(`Restore preview: ${cp.label || cp.id}`,
+        err ? writeError(err, "The restore") : null,
+        stale ? stateBox("error", "The files changed since this preview.", el("button", { type: "button", class: "btn btn-small", onclick: () => previewRestore(cp, true) }, "Preview again")) : null,
+        p.noop ? stateBox("empty", "Nothing to restore.", "The current files already match this checkpoint.") : [
+          el("p", null, ["add", "replace", "delete"].map((k) => counts[k] ? el("span", { class: "changes-count" }, changeBadge(k), ` ${counts[k]} `) : null),
+            el("span", { class: "faint", text: `current ${shortSha(p.current_revision)} → ${shortSha(p.result_revision)}` })),
+          table(["Change", "File", "Size"], p.ops.map((o) => [changeBadge(o.op), el("code", { text: o.path }), `${fmtSize(o.bytes_before)} → ${fmtSize(o.bytes_after)}`])),
+          cand.ok ? el("p", null, badge("pre-check ok", "ok"), " ", el("span", { class: "faint", text: cand.message }))
+            : stateBox("error", "The restored source has problems.", el("span", null, cand.message || "", " ",
+              cand.syntax_errors.map((s) => `L${s.line}: ${s.message}`).join("; "), cand.missing_assets.length ? ` Missing files: ${cand.missing_assets.join(", ")}.` : "",
+              cand.statement_errors ? ` ${cand.statement_errors} command errors.` : "", " Restoring an older broken state is allowed.")),
+          el("ul", { class: "panel-note" }, el("li", { text: p.recovery }), p.limitations.map((l) => el("li", { text: l }))),
+          el("label", { class: "changes-confirm" }, el("input", { type: "checkbox", disabled: stale || null, onchange: (e) => { confirmed = e.target.checked; apply.disabled = !confirmed || stale; } }),
+            " Replace the current files with this checkpoint (a pre-restore checkpoint is created first)."),
+          el("div", { class: "btn-row" }, apply, el("button", { type: "button", class: "btn btn-ghost", onclick: () => fillKids(planBox) }, "Cancel"))]));
     }
     load();
     return holder;
@@ -9133,6 +9345,7 @@
       else if (tab === "author") body.append(viewAuthoring(m, arg, parts.slice(4)));
       else if (tab === "assets") body.append(viewAssets(m));
       else if (tab === "health") body.append(viewHealth(m));
+      else if (tab === "changes") body.append(viewChanges(m));
       else if (tab === "validation") body.append(viewValidation(m));
       else if (tab === "export") body.append(viewExport(m));
       else if (tab === "source") await viewSource(m, arg, body);

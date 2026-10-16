@@ -22,6 +22,7 @@ Workflow:
    inspect_mod then apply_mod_patch with its sha256. Preserve unrelated source and unknown commands.
 4. validate_mod after every change; fix errors, review warnings, and treat 'unverified' as needing human or
    in-game confirmation. author_state kind 'health' gives the combined prioritized findings for one revision.
+   Before larger work, author_save kind 'revisions' {action: checkpoint} lets the user compare or undo it later.
    export_mod refuses sources with errors and never overwrites.
 Be explicit with users: these checks are static. They do not prove the mod loads, plays or balances in game;
 say so, and recommend an in-game test. Do not claim parity with the game or ownership of catalog data."""
@@ -100,6 +101,9 @@ def build_server(k: Kosmokrator):
         health returns one prioritized, deduplicated finding list (error, warning, unverified, info) with stable ids,
         locations, evidence and next actions for a captured revision, plus recruitment classes, scope and caveats.
         reference-snapshot reports the project's local reference snapshot (state, coverage, missing data).
+        revisions lists local checkpoints, the review baseline and the current content revision;
+        revisions:<checkpoint id> or revisions:baseline compares the current files (raw .dm diff, authored
+        definition changes, assets, map bundles, metadata) with that checkpoint.
         mercs lists #newmerc companies with #com/#unit/#item names resolved and the structured form options.
         Includes source revision, reviewed schemas, authored values and preserved unknown lines."""
         return envelope(k.author_state, project, kind)
@@ -113,6 +117,10 @@ def build_server(k: Kosmokrator):
         mercs (expected_sha256, preview, company) appends one #newmerc company; commander/troop/items are
         {origin: catalog, id} or {origin: project, key} and are written as their exact names (manual p.63).
         Mod edits need expected_sha256; map edits and jobs need expected_revision; acceptance also binds output.
+        revisions takes {action: checkpoint (label, note, actor)} to store every authored file locally;
+        {action: review, reviewer_kind: human|agent (required; never claim a human review you did not receive),
+        expected_revision or checkpoint}; {action: restore, checkpoint, preview: true} for a plan, then the same
+        with preview: false, expected_revision, plan_hash and confirm: true; {action: recover, journal, confirm}.
         Uses project locking, backups and reviewed command forms."""
         return envelope(k.author_save, project, kind, body)
 

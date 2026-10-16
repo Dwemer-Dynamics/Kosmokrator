@@ -109,6 +109,9 @@ class Kosmokrator:
         from . import content, playtest
         if kind == 'health':
             return self.project_health(project)
+        if kind == 'revisions' or kind.startswith('revisions:'):
+            from .revisions import revisions_state
+            return revisions_state(self.ws, project, kind)
         if kind == 'reference-snapshot':
             from .browse import build_project_model
             from .reference import reference_status
@@ -153,6 +156,9 @@ class Kosmokrator:
     def author_save(self, project: str, kind: str, body: dict[str, Any]) -> dict[str, Any]:
         """Preview ({"preview": true}) or save one authoring request; body as for the web route."""
         from . import content, playtest
+        if kind == 'revisions':
+            from .revisions import save_revisions
+            return save_revisions(self.ws, project, body, self._project_catalog(project))
         if kind == 'reference-snapshot':
             from .reference import create_snapshot
             return create_snapshot(self.ws, project, self._catalog(required=True), body)

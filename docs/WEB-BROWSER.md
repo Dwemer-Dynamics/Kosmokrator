@@ -112,7 +112,7 @@ review-before-save and meaningful warnings are unchanged.
 **Project header.** A compact heading: a small mod banner, the mod name with epithet, era and version, and on the
 right the **Nation** selector (only on the sections it filters, see below) and an **N unsaved drafts** badge when
 any editor holds unsaved input (it links to Export, which lists them). Below it, one row of section tabs:
-Browse (Overview … Balance) and Build (**Advanced tools**, **Health**, **Validation**, **Export**),
+Browse (Overview … Balance) and Build (**Advanced tools**, **Health**, **Changes**, **Validation**, **Export**),
 labelled as groups for assistive technology (a wider gap separates them visually). The secondary sections **Source**, **Assets**, **Other definitions**
 and **Docs** are under **More** at the end of the row: a button that opens a short list of links (Down arrow opens
 it and focuses the current or first link, Up/Down move, Escape closes it and returns focus to the button; a click elsewhere or tabbing away also closes it).
@@ -206,6 +206,32 @@ Unassigned units are informational; `recruitment` classifies new units as recrui
 start army, defence, hero, summon, pretender, alternate form or other references. **Recheck** passes
 `?expected_revision=` and says when files changed. The result lists what it did not check (installed mods,
 unlisted enabled mods, game load, balance, revision history); it is static and proves nothing about the game.
+
+## Changes (local checkpoints)
+
+**Build > Changes** keeps an explicit, local history of one project. **Create checkpoint** stores every file in
+`mod/<slug>/`, every complete map bundle in `maps/<id>/` and the authored metadata (`kosmokrator.json`,
+`playtests/records.json`) as content-addressed blobs plus an immutable manifest in `.kosmokrator/revisions/`. Local
+state, exports and other files are not captured; links, junctions, unsafe names and oversized trees are refused,
+and a file that changes while it is read refuses the checkpoint. Viewing the page creates nothing, history is never
+pruned, and changes made before the first checkpoint cannot be reconstructed. Single-file `.dm` backups are not
+checkpoints.
+
+**Compare** shows the current files (including edits made outside the browser) against a checkpoint or the latest
+review baseline: added, changed and deleted files; authored definition changes grouped as stats, traits, magic,
+equipment, recruitment, description, artwork, donor/copy, other and unknown (raw command text); artwork with
+checkpoint and current previews and sizes; map bundles by file; metadata keys and reservations; and the raw `.dm`
+diff. Donor and catalog values are not recomputed for a checkpoint; only authored lines are compared. Previews are
+served only when the bytes still hash to the compared SHA-256.
+
+**Mark current files reviewed** records a review baseline (a new checkpoint) with the reviewer kind you choose,
+human or agent; it is recorded as declared, never assumed. **Restore…** previews the add/replace/delete plan, a
+static pre-check of the restored source, and how metadata is merged (identity and configuration stay current; name
+and dependencies come from the checkpoint; ID reservations are the union). Applying needs the confirmation box and
+the same plan and current revision; a changed project is refused. A complete pre-restore checkpoint is stored first,
+replacement files are staged and journaled, and a failure puts back the touched files. An interrupted restore is
+shown with **Recover now**. This is not a filesystem-atomic transaction. Validation runs after the restore; an older
+broken state may be restored deliberately.
 
 ## Reference snapshot (self-contained project)
 
@@ -785,6 +811,9 @@ catalog dataset version and revision, the `.dm` path and SHA-256. Add `?download
 /api/projects/<slug>                          whole model, plus latest_export (newest export, read fresh)
 /api/projects/<slug>/{nations,monsters,sites,other_definitions,assets,validation,pretenders,readiness}
 /api/projects/<slug>/health                   project health (kosmokrator.health/1); ?expected_revision= reports staleness
+/api/projects/<slug>/revisions               local checkpoints (kosmokrator.revisions/1); POST {action} creates, reviews, restores
+/api/projects/<slug>/revisions/compare       ?target=<checkpoint id>|baseline (kosmokrator.compare/1)
+/api/projects/<slug>/revisions/preview       ?side=current|checkpoint&path=&sha= PNG preview, hash-verified
 /api/projects/<slug>/monsters/<id>            one object (also nations/<id>, sites/<id>, other_definitions/<id>)
 /api/projects/<slug>/pretenders/<god>         one god: project-5011, catalog-3416 or god:catalog:3416
 /api/projects/<slug>/pretenders/catalog-<id>/sprite/{idle,attack}
