@@ -772,9 +772,31 @@ class WorkshopTests(Base):
         return prepare_workshop(self.ws, "demo_mod", {"expected_sha256": self.h, "export_id": export_id,
                                                       "visibility": "Public", **extra})
 
-    def install(self, wid: str, digest: str | None = None, config: dict | None = None):
+    def preflight(self, target: str, config: dict | None = None) -> dict:
+        from kosmokrator.preflight import preflight
+        return preflight(self.ws, "demo_mod", target, config or self.config)
+
+    def install(self, wid: str, digest: str | None = None, config: dict | None = None, fingerprint: str | None = None,
+                ack: bool = False):
+        """Install after a fresh preflight (its fingerprint, acknowledged when ack) unless a fingerprint is given."""
         from kosmokrator.workshop import install_workshop
-        return install_workshop(self.ws, "demo_mod", wid, {"expected_sha256": digest or self.h}, config or self.config)
+        if fingerprint is None:
+            try:
+                fingerprint = self.preflight(wid, config)["fingerprint"]
+            except KosmoError:
+                fingerprint = "0" * 64  # the install itself must report why the folder cannot be checked
+        body = {"expected_sha256": digest or self.h, "expected_preflight": fingerprint}
+        if ack:
+            body["acknowledge_review"] = fingerprint
+        return install_workshop(self.ws, "demo_mod", wid, body, config or self.config)
+
+    def tree(self, *roots: Path) -> dict[str, bytes | None]:
+        """Every path under the roots with file bytes (None for folders), to prove a call wrote nothing."""
+        out: dict[str, bytes | None] = {}
+        for root in roots:
+            for p in sorted(root.rglob("*")):
+                out[str(p)] = p.read_bytes() if p.is_file() else None
+        return out
 
     def code(self, call) -> str:
         with self.assertRaises(KosmoError) as cm:
@@ -865,7 +887,10 @@ class WorkshopTests(Base):
         self.h = self.set_dm(self.dm.read_bytes() + b"-- v3\n")
         r3 = self.prepare(self.export()["export_id"])
         snap = {p.name: p.read_bytes() for p in dest.iterdir()}
-        self.assertEqual(self.code(lambda: self.install(r3["workshop_id"])), "install_conflict")
+        self.assertEqual(self.preflight(r3["workshop_id"])["findings"][0]["code"], "destination_conflict")
+        self.assertEqual(self.code(lambda: self.install(r3["workshop_id"])), "preflight_blocked")
+        with mock.patch("kosmokrator.preflight.require_current"):  # the destination guard still holds on its own
+            self.assertEqual(self.code(lambda: self.install(r3["workshop_id"])), "install_conflict")
         self.assertEqual({p.name: p.read_bytes() for p in dest.iterdir()}, snap)
         prepared = self.ws / "demo_mod" / r3["path"] / "dom6ws.txt"
         prepared.write_bytes(b'Visibility = "Private"')
@@ -877,7 +902,9 @@ class WorkshopTests(Base):
         dest.mkdir()
         (dest / "demo_mod.dm").write_bytes(b"-- someone else's mod\n")
         (dest / "dom6ws_pfid").write_bytes(b"42")
-        self.assertEqual(self.code(lambda: self.install(r["workshop_id"])), "install_conflict")
+        self.assertEqual(self.code(lambda: self.install(r["workshop_id"])), "preflight_blocked")
+        with mock.patch("kosmokrator.preflight.require_current"):
+            self.assertEqual(self.code(lambda: self.install(r["workshop_id"])), "install_conflict")
         self.assertEqual(sorted(p.name for p in dest.iterdir()), ["demo_mod.dm", "dom6ws_pfid"])
         self.assertEqual((dest / "demo_mod.dm").read_bytes(), b"-- someone else's mod\n")
         outside = Path(self._tmp.name) / "outside"
@@ -886,8 +913,177 @@ class WorkshopTests(Base):
             p.unlink()
         dest.rmdir()
         PatchTests._dir_link(self, outside, dest)
-        self.assertEqual(self.code(lambda: self.install(r["workshop_id"])), "symlink_rejected")
+        pre = self.preflight(r["workshop_id"])
+        self.assertEqual(pre["status"], "incomplete")  # the linked folder is neither followed nor owned
+        self.assertIn("destination_conflict", [f["code"] for f in pre["findings"]])
+        self.assertEqual(self.code(lambda: self.install(r["workshop_id"])), "preflight_blocked")
+        with mock.patch("kosmokrator.preflight.require_current"):
+            self.assertEqual(self.code(lambda: self.install(r["workshop_id"])), "symlink_rejected")
         self.assertEqual(list(outside.iterdir()), [])
+
+
+class PreflightTests(WorkshopTests):
+    """Installation preflight compares the exact verified bundle with installed mods; install needs its fingerprint."""
+
+    MOD = (b'#selectnation 250\n#name "Nation Alpha"\n#era 1\n#end\n'
+           b'#selectnation 5\n#end\n'
+           b'#newmonster 5000\n#name "Unit Alpha"\n#hp 10\n#end\n'
+           b'#newsite 1700\n#name "Site Alpha"\n#path 0\n#level 0\n#rarity 5\n#end\n')
+
+    # Inherit the helpers, not the WorkshopTests cases.
+    test_prepare_allowlist_banner_and_regular_zip_unchanged = None
+    test_prepare_refuses_blocked_stale_tampered_and_traversal = None
+    test_install_new_identical_managed_conflict_and_pfid = None
+    test_install_preserves_unmanaged_and_linked_destinations = None
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.h = self.set_dm(self.dm.read_bytes() + self.MOD)
+
+    def other(self, dm: bytes, folder: str = "other_mod") -> Path:
+        (self.mods / folder).mkdir(exist_ok=True)
+        path = self.mods / folder / f"{folder}.dm"
+        path.write_bytes(dm)
+        return path
+
+    def ready(self) -> str:
+        return self.prepare(self.export()["export_id"])["workshop_id"]
+
+    def test_independent_nation_collision_blocks_low_nation_needs_review_then_installs(self) -> None:
+        wid = self.ready()
+        other = self.other(b'#modname "Other"\n#selectnation 250\n#name "Nation Beta"\n#end\n#selectnation 5\n#end\n')
+        before = self.tree(self.ws, self.mods)
+        r = self.preflight(wid)
+        self.assertEqual(self.tree(self.ws, self.mods), before)  # preflight writes nothing, not even state folders
+        self.assertEqual((r["status"], r["counts"]["error"], r["counts"]["warning"]), ("blocked", 1, 1))
+        nation = r["findings"][0]
+        self.assertEqual((nation["code"], nation["severity"], nation["kind"], nation["object_id"]),
+                         ("independent_nation", "error", "nation", 250))
+        self.assertEqual(nation["bundle"][0]["file"], "demo_mod/demo_mod.dm")
+        self.assertEqual(nation["bundle"][0]["command"], "#selectnation")
+        self.assertEqual(nation["installed"][0], {"file": "other_mod/other_mod.dm", "line": 2,
+                                                  "command": "#selectnation", "name": "Nation Beta"})
+        self.assertEqual((nation["load_order"], nation["installed_source"]["enabled"]), ("unknown", "unknown"))
+        self.assertNotIn("change_order", [a["action"] for a in nation["actions"]])
+        self.assertEqual([a["action"] for a in nation["actions"]][0], "remap_ids")
+        low = r["findings"][1]
+        self.assertEqual((low["code"], low["severity"], low["object_id"]), ("shared_override", "warning", 5))
+        self.assertTrue(r["coverage"]["complete"])
+        self.assertEqual(r["coverage"]["dm_files_scanned"], 1)
+        self.assertFalse(r["install"]["allowed"])
+        self.assertEqual(self.code(lambda: self.install(wid, fingerprint=r["fingerprint"])), "preflight_blocked")
+        self.assertFalse((self.mods / "demo_mod").exists())
+        # Removing the independent nation leaves a below-150 override: a review warning, not a hard collision.
+        other.write_bytes(b'#modname "Other"\n#selectnation 5\n#end\n')
+        r = self.preflight(wid)
+        self.assertEqual((r["status"], r["install"]["allowed"], r["install"]["requires_acknowledgement"]),
+                         ("review", True, True))
+        self.assertEqual(self.code(lambda: self.install(wid, fingerprint=r["fingerprint"])), "preflight_review")
+        self.assertFalse((self.mods / "demo_mod").exists())
+        done = self.install(wid, fingerprint=r["fingerprint"], ack=True)
+        self.assertEqual((done["result"], done["preflight"]["status"]), ("installed", "review"))
+        content = self.ws / "demo_mod" / self.prepare_summary(wid)["path"]
+        self.assertEqual({p.name: p.read_bytes() for p in (self.mods / "demo_mod").iterdir()},
+                         {p.name: p.read_bytes() for p in content.iterdir()})
+
+    def prepare_summary(self, wid: str) -> dict:
+        from kosmokrator.workshop import workshop_state
+        return next(x for x in workshop_state(self.ws, "demo_mod", self.config)["prepared"] if x["workshop_id"] == wid)
+
+    def test_monster_site_collisions_dependency_patches_and_export_target(self) -> None:
+        self.h = self.set_dm(self.dm.read_bytes() + b'#selectmonster 5100\n#hp 12\n#end\n')
+        ex = self.export()
+        dep = b'#modname "Base"\n#newmonster 5100\n#name "Base Unit"\n#end\n'
+        self.other(b'#modname "Other"\n#newmonster 5000\n#name "Unit Beta"\n#end\n#selectsite 1700\n#end\n')
+        self.other(dep, "base_mod")
+        r = self.preflight(ex["export_id"])
+        got = {(f["code"], f["kind"], f["object_id"], f["severity"]) for f in r["findings"]}
+        self.assertEqual(got, {("hard_id_collision", "monster", 5000, "error"), ("hard_id_collision", "site", 1700, "error"),
+                               ("undeclared_dependency_patch", "monster", 5100, "warning")})
+        self.assertEqual(r["target"]["type"], "export")
+        self.assertFalse(r["install"]["allowed"])  # exports are checked, never installed by preflight
+        # Declaring a byte-identical workspace copy of the patched mod makes it an intentional dependency patch.
+        (self.ws / "deps").mkdir()
+        (self.ws / "deps" / "base_mod.dm").write_bytes(dep)
+        meta_path = self.ws / "demo_mod" / "kosmokrator.json"
+        meta = json.loads(meta_path.read_text("utf-8"))
+        meta_path.write_text(json.dumps({**meta, "dependencies": ["deps/base_mod.dm"]}), "utf-8")
+        r2 = self.preflight(ex["export_id"])
+        patch = next(f for f in r2["findings"] if f["object_id"] == 5100)
+        self.assertEqual((patch["code"], patch["severity"], patch["declared_dependency"]),
+                         ("declared_dependency_patch", "info", True))
+        self.assertNotEqual(r2["fingerprint"], r["fingerprint"])
+        from kosmokrator.core import Kosmokrator
+        with mock.patch.dict(os.environ, {"KOSMOKRATOR_DOMINIONS_MODS": str(self.mods)}):
+            core = Kosmokrator(str(self.ws)).author_state("demo_mod", f"preflight:{ex['export_id']}")
+        self.assertEqual(core["fingerprint"], r2["fingerprint"])
+
+    def test_own_managed_install_is_excluded_and_changed_own_install_is_reported(self) -> None:
+        wid = self.ready()
+        self.install(wid)
+        r = self.preflight(wid)
+        self.assertEqual((r["status"], r["install"]["own_install_excluded"], r["coverage"]["skipped"]),
+                         ("pass", True, ["demo_mod"]))
+        self.assertEqual(r["install"]["destination"]["state"], "identical")
+        installed = self.mods / "demo_mod" / "demo_mod.dm"
+        installed.write_bytes(installed.read_bytes() + b"-- edited by hand\n")
+        r = self.preflight(wid)
+        codes = [f["code"] for f in r["findings"]]
+        self.assertEqual(r["status"], "blocked")
+        self.assertFalse(r["install"]["own_install_excluded"])
+        self.assertIn("destination_conflict", codes)
+        self.assertIn("hard_id_collision", codes)  # the changed copy is scanned like any other installed mod
+        self.assertEqual(self.code(lambda: self.install(wid)), "preflight_blocked")
+
+    def test_unreadable_links_and_scan_caps_make_the_check_incomplete(self) -> None:
+        wid = self.ready()
+        outside = Path(self._tmp.name) / "outside"
+        outside.mkdir()
+        (outside / "hidden.dm").write_bytes(b"#newmonster 5000\n#end\n")
+        PatchTests._dir_link(self, outside, self.mods / "linked_mod")
+        r = self.preflight(wid)
+        self.assertEqual(r["status"], "incomplete")
+        self.assertFalse(r["coverage"]["complete"])
+        self.assertEqual(r["coverage"]["unreadable"][0]["source"], "installed:linked_mod")
+        self.assertEqual(r["findings"][-1]["code"], "scan_incomplete")
+        self.assertNotIn("hard_id_collision", [f["code"] for f in r["findings"]])  # never followed
+        self.assertEqual(self.code(lambda: self.install(wid, fingerprint=r["fingerprint"])), "preflight_blocked")
+        self.assertFalse((self.mods / "demo_mod").exists())
+        os.rmdir(self.mods / "linked_mod")  # removes the link or junction only
+        self.assertTrue((outside / "hidden.dm").is_file())
+        self.other(b"#newweapon 1000\n#end\n" * 4)
+        with mock.patch.object(project_mod, "MAX_SCAN_TOTAL_BYTES", 10):
+            r = self.preflight(wid)
+        self.assertEqual((r["status"], r["coverage"]["scan_limit_reached"]), ("incomplete", ["installed:other_mod/other_mod.dm"]))
+        with mock.patch.object(project_mod, "MAX_SCAN_BYTES", 10):
+            r = self.preflight(wid)
+        self.assertEqual(r["coverage"]["unreadable"][0]["source"], "installed:other_mod/other_mod.dm")
+        self.assertEqual(self.preflight(wid)["status"], "pass")
+        self.assertEqual(self.preflight(wid, mods_dir_config_off())["status"], "incomplete")
+
+    def test_missing_or_stale_fingerprint_is_refused_without_writes(self) -> None:
+        wid = self.ready()
+        r = self.preflight(wid)
+        self.assertEqual(r["status"], "pass")
+        before = self.tree(self.ws / "demo_mod" / "mod", self.mods)
+        from kosmokrator.workshop import install_workshop
+        self.assertEqual(self.code(lambda: install_workshop(self.ws, "demo_mod", wid, {"expected_sha256": self.h},
+                                                            self.config)), "preflight_required")
+        # Another installed .dm changes after the check (no conflict in it): the old fingerprint is stale.
+        self.other(b'#modname "Late"\n#newweapon 1000\n#end\n')
+        with self.assertRaises(KosmoError) as cm:
+            self.install(wid, fingerprint=r["fingerprint"])
+        self.assertEqual(cm.exception.code, "preflight_stale")
+        self.assertNotEqual(cm.exception.details["fingerprint"], r["fingerprint"])
+        self.assertFalse((self.mods / "demo_mod").exists())
+        self.assertEqual(self.tree(self.ws / "demo_mod" / "mod"), {k: v for k, v in before.items()
+                                                                   if k.startswith(str(self.ws))})
+        self.assertEqual(self.install(wid)["result"], "installed")  # a fresh check passes
+
+
+def mods_dir_config_off() -> dict:
+    from kosmokrator.workshop import mods_dir_config
+    return mods_dir_config({"KOSMOKRATOR_DOMINIONS_MODS": "off"})
 
 
 class ReferenceSnapshotTests(Base):
@@ -1221,6 +1417,42 @@ class HealthTests(Base):
                                    5004: ["summon"], 5005: ["pretender"]})
         unassigned = [f for f in r["findings"] if f["code"] == "unassigned_monster"]
         self.assertEqual([(f["severity"], f["location"]["object"]["key"]) for f in unassigned], [("info", "monster:5001")])
+
+    def test_same_source_asset_change_is_never_reported_from_a_cached_model(self) -> None:
+        import http.client
+        import threading
+        from kosmokrator.tga import encode_png
+        from kosmokrator.webserver import make_server
+        missing = lambda r: [f for f in r["findings"] if f["location"]["asset"] == "art/unit_a.png"]  # noqa: E731
+        server = make_server(str(self.ws), str(Path(self._tmp.name) / "cat"), None, port=0)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        host = f"127.0.0.1:{server.server_address[1]}"
+
+        def health() -> dict:
+            conn = http.client.HTTPConnection(host, timeout=10)
+            conn.request("GET", "/api/projects/demo_mod/health", headers={"Host": host})
+            res = conn.getresponse()
+            body = json.loads(res.read())
+            conn.close()
+            self.assertEqual(res.status, 200, body)
+            return body["result"]
+        try:
+            # Simulate a stat collision: the browser cache would hand back the model built before the asset existed.
+            with mock.patch("kosmokrator.browse.project_fingerprint", return_value="same"):
+                server.RequestHandlerClass.state.cache.get(self.ws, "demo_mod", None)
+                r1 = health()
+                self.assertTrue(missing(r1))
+                art = self.dm.parent / "art"
+                art.mkdir()
+                (art / "unit_a.png").write_bytes(encode_png(32, 32, bytes([90, 60, 30, 255]) * 1024))
+                r2 = health()
+            self.assertEqual(r2["identity"]["source_sha256"], r1["identity"]["source_sha256"])
+            self.assertNotEqual(r2["identity"]["assets_sha256"], r1["identity"]["assets_sha256"])
+            self.assertTrue(r2["identity"]["consistent"])
+            self.assertEqual(missing(r2), [])  # findings describe the captured assets, not the cached model
+        finally:
+            server.shutdown()
+            server.server_close()
 
     def test_entry_points_agree(self) -> None:
         from kosmokrator.cli import main

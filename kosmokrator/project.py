@@ -48,6 +48,10 @@ _NATION_RNG: random.Random = random.SystemRandom()
 MAX_SCAN_ENTRIES = 1000
 MAX_SCAN_FILES = 300
 MAX_SCAN_BYTES = 16 * 1024 * 1024
+MAX_SCAN_TOTAL_BYTES = 64 * 1024 * 1024
+# Parsed definitions keyed by content SHA-256 (bytes are always read fresh; only the parse is reused).
+_DEFS_CACHE: dict[str, list[dict[str, Any]]] = {}
+_DEFS_CACHE_MAX = 256
 
 
 def _now() -> str:
@@ -406,14 +410,105 @@ def _scan_names(base: Path) -> tuple[list[str], bool]:
     return sorted(names), False
 
 
-def _scan_dm_text(path: Path) -> str:
-    if is_link(path):
-        raise KosmoError("symlink_rejected", "symlink or junction not followed")
-    if not path.is_file():
-        raise KosmoError("dm_missing", "not a regular file")
-    if path.stat().st_size > MAX_SCAN_BYTES:
-        raise KosmoError("too_large", f"larger than {MAX_SCAN_BYTES} bytes")
-    return decode_dm(path.read_bytes())[0]
+def scan_definitions(data: bytes) -> tuple[str, list[dict[str, Any]]]:
+    """(SHA-256, definitions) for one .dm's bytes; the parse is cached by content hash, never by path or time."""
+    digest = sha256_bytes(data)
+    defs = _DEFS_CACHE.get(digest)
+    if defs is None:
+        defs = definitions(parse(decode_dm(data)[0]))
+        if len(_DEFS_CACHE) >= _DEFS_CACHE_MAX:
+            _DEFS_CACHE.pop(next(iter(_DEFS_CACHE)))
+        _DEFS_CACHE[digest] = defs
+    return digest, defs
+
+
+class ScanBudget:
+    """File and byte limits shared by one bounded scan; unreadable and skipped sources are recorded, never hidden."""
+
+    def __init__(self) -> None:
+        self.files = 0
+        self.bytes = 0
+        self.unreadable: list[dict[str, str]] = []
+        self.truncated: list[str] = []
+
+    @property
+    def complete(self) -> bool:
+        return not self.unreadable and not self.truncated
+
+    def read(self, label: str, path: Path) -> bytes | None:
+        if self.files >= MAX_SCAN_FILES:
+            self.truncated.append(label)
+            return None
+        self.files += 1
+        try:
+            if is_link(path):
+                raise KosmoError("symlink_rejected", "symlink or junction not followed")
+            if not path.is_file():
+                raise KosmoError("dm_missing", "not a regular file")
+            if path.stat().st_size > MAX_SCAN_BYTES:
+                raise KosmoError("too_large", f"larger than {MAX_SCAN_BYTES} bytes")
+            if self.bytes + path.stat().st_size > MAX_SCAN_TOTAL_BYTES:
+                self.truncated.append(label)
+                return None
+            data = path.read_bytes()
+            if len(data) > MAX_SCAN_BYTES:  # grew after the size check
+                raise KosmoError("too_large", f"larger than {MAX_SCAN_BYTES} bytes")
+        except (OSError, KosmoError) as exc:
+            self.unreadable.append({"source": label, "reason": getattr(exc, "message", None) or str(exc)})
+            return None
+        self.bytes += len(data)
+        return data
+
+
+def scan_installed_mods(config: dict[str, Any], budget: ScanBudget, skip_folder: str | None = None) -> dict[str, Any]:
+    """Bounded read-only scan of the configured mods folder: top-level .dm files and .dm files one folder down.
+
+    Each source's SHA-256 and definitions come from one read of its bytes. Links and junctions are never followed.
+    skip_folder (one top-level folder name) is left out and listed under skipped. Installed is not enabled: the
+    game's enabled-mod list and Workshop subscriptions outside this folder are not read.
+    """
+    out: dict[str, Any] = {"mods_dir": config.get("path"), "source": config.get("source"),
+                           "available": bool(config.get("available")), "reason": config.get("reason"),
+                           "dm_files": 0, "sources": [], "skipped": []}
+    if not config.get("available"):
+        return out
+    mods = Path(config["path"])
+    try:
+        if is_link(mods) or not mods.is_dir():
+            raise KosmoError("install_unavailable", "mods folder is a link or not a folder")
+        top, more = _scan_names(mods)
+    except (OSError, KosmoError) as exc:
+        top, more = [], False
+        budget.unreadable.append({"source": "installed mods", "reason": getattr(exc, "message", None) or str(exc)})
+    if more:
+        budget.truncated.append("installed mods")
+    candidates: list[tuple[str, Path]] = []
+    for name in top:
+        p = mods / name
+        if name == skip_folder:
+            out["skipped"].append(name)
+        elif is_link(p):
+            budget.unreadable.append({"source": f"installed:{name}", "reason": "symlink or junction not followed"})
+        elif p.is_file() and name.lower().endswith(".dm"):
+            candidates.append((name, p))
+        elif p.is_dir():
+            try:
+                sub, more = _scan_names(p)
+            except OSError as exc:
+                budget.unreadable.append({"source": f"installed:{name}", "reason": str(exc)})
+                continue
+            if more:
+                budget.truncated.append(f"installed:{name}")
+            candidates += [(f"{name}/{n}", p / n) for n in sub if n.lower().endswith(".dm")]
+    for rel, p in candidates:
+        data = budget.read(f"installed:{rel}", p)
+        if data is None:
+            continue
+        digest, defs = scan_definitions(data)
+        out["dm_files"] += 1
+        out["sources"].append({"label": f"installed:{rel}", "path": rel, "sha256": digest, "bytes": len(data),
+                               "definitions": defs})
+    return out
 
 
 def _scan_other_sources(project: Project, kind: str, used: dict[int, str]) -> dict[str, Any]:
@@ -425,24 +520,10 @@ def _scan_other_sources(project: Project, kind: str, used: dict[int, str]) -> di
     """
     from .workshop import mods_dir_config  # workshop imports this module
 
-    unreadable: list[dict[str, str]] = []
-    truncated: list[str] = []
-    files = 0
+    budget = ScanBudget()
 
-    def take(label: str, path: Path) -> str | None:
-        nonlocal files
-        if files >= MAX_SCAN_FILES:
-            truncated.append(label)
-            return None
-        files += 1
-        try:
-            return _scan_dm_text(path)
-        except (OSError, KosmoError) as exc:
-            unreadable.append({"source": label, "reason": getattr(exc, "message", None) or str(exc)})
-            return None
-
-    def note(label: str, text: str | None) -> None:
-        for d in definitions(parse(text)) if text is not None else []:
+    def note(label: str, defs: list[dict[str, Any]]) -> None:
+        for d in defs:
             if d["kind"] == kind and d["id"] is not None:
                 used.setdefault(d["id"], label)
 
@@ -451,15 +532,15 @@ def _scan_other_sources(project: Project, kind: str, used: dict[int, str]) -> di
         names, more = _scan_names(project.workspace)
     except OSError as exc:
         names, more = [], False
-        unreadable.append({"source": "workspace", "reason": str(exc)})
+        budget.unreadable.append({"source": "workspace", "reason": str(exc)})
     if more:
-        truncated.append("workspace")
+        budget.truncated.append("workspace")
     for name in names:
         root = project.workspace / name
         if name == project.slug or not SLUG_RE.match(name):
             continue
         if is_link(root):
-            unreadable.append({"source": f"project:{name}", "reason": "symlink or junction not followed"})
+            budget.unreadable.append({"source": f"project:{name}", "reason": "symlink or junction not followed"})
             continue
         if not root.is_dir() or not (root / META_FILE).exists():
             continue
@@ -469,55 +550,23 @@ def _scan_other_sources(project: Project, kind: str, used: dict[int, str]) -> di
             dm = resolve_dm_target(other, None)
             reserved = [int(r["id"]) for r in (other.meta.get("reservations") or {}).get(kind, [])]
         except (OSError, KosmoError, TypeError, ValueError, KeyError, AttributeError) as exc:
-            unreadable.append({"source": label, "reason": getattr(exc, "message", None) or str(exc)})
+            budget.unreadable.append({"source": label, "reason": getattr(exc, "message", None) or str(exc)})
             continue
-        text = take(label, dm)
-        if text is None:
+        data = budget.read(label, dm)
+        if data is None:
             continue
-        note(label, text)
+        note(label, scan_definitions(data)[1])
         for i in reserved:
             used.setdefault(i, f"{label} (reserved)")
         projects.append(name)
 
-    config = mods_dir_config()
-    installed: dict[str, Any] = {"mods_dir": config.get("path"), "source": config.get("source"),
-                                 "available": bool(config.get("available")), "reason": config.get("reason"),
-                                 "dm_files": 0}
-    if config.get("available"):
-        mods = Path(config["path"])
-        try:
-            if is_link(mods) or not mods.is_dir():
-                raise KosmoError("install_unavailable", "mods folder is a link or not a folder")
-            top, more = _scan_names(mods)
-        except (OSError, KosmoError) as exc:
-            top, more = [], False
-            unreadable.append({"source": "installed mods", "reason": getattr(exc, "message", None) or str(exc)})
-        if more:
-            truncated.append("installed mods")
-        candidates: list[tuple[str, Path]] = []
-        for name in top:
-            p = mods / name
-            if is_link(p):
-                unreadable.append({"source": f"installed:{name}", "reason": "symlink or junction not followed"})
-            elif p.is_file() and name.lower().endswith(".dm"):
-                candidates.append((name, p))
-            elif p.is_dir():
-                try:
-                    sub, more = _scan_names(p)
-                except OSError as exc:
-                    unreadable.append({"source": f"installed:{name}", "reason": str(exc)})
-                    continue
-                if more:
-                    truncated.append(f"installed:{name}")
-                candidates += [(f"{name}/{n}", p / n) for n in sub if n.lower().endswith(".dm")]
-        for rel, p in candidates:
-            text = take(f"installed:{rel}", p)
-            if text is not None:
-                installed["dm_files"] += 1
-                note(f"installed:{rel}", text)
-    complete = not unreadable and not truncated
-    return {"workspace_projects": projects, "installed_mods": installed, "unreadable": unreadable[:20],
-            "unreadable_count": len(unreadable), "scan_limit_reached": truncated[:20], "complete": complete}
+    scan = scan_installed_mods(mods_dir_config(), budget)
+    for src in scan["sources"]:
+        note(src["label"], src["definitions"])
+    installed = {k: scan[k] for k in ("mods_dir", "source", "available", "reason", "dm_files")}
+    return {"workspace_projects": projects, "installed_mods": installed, "unreadable": budget.unreadable[:20],
+            "unreadable_count": len(budget.unreadable), "scan_limit_reached": budget.truncated[:20],
+            "complete": budget.complete}
 
 
 def free_ids_locked(project: Project, kind: str, count: int, dependencies: list[str] | None,

@@ -109,6 +109,10 @@ class Kosmokrator:
         from . import content, playtest
         if kind == 'health':
             return self.project_health(project)
+        if kind.startswith('preflight:'):
+            from .preflight import preflight
+            from .workshop import mods_dir_config
+            return preflight(self.ws, project, kind.split(':', 1)[1], mods_dir_config())
         if kind == 'revisions' or kind.startswith('revisions:'):
             from .revisions import revisions_state
             return revisions_state(self.ws, project, kind)

@@ -3167,6 +3167,9 @@
           el("p", { class: "panel-note", text: `${txt(man.disclaimer)} Not installed or published: ${txt(man.install_hint)}` })),
         (val.warnings || []).length ? el("details", { class: "raw" }, el("summary", null, `Warnings (${val.warnings.length})`),
           el("div", { class: "inner" }, diagnosticsList(slug, val.warnings, p.file))) : null,
+        el("div", { class: "stack" }, el("h4", { class: "pf-h", text: "Compatibility with installed mods" }),
+          preflightView(slug, r.export_id, draw, "x"),
+          el("p", { class: "panel-note", text: "Read-only check of this export against the server's mods folder. Installing goes through the Workshop folder below." })),
         el("div", { class: "btn-row" },
           zip ? el("a", { class: "btn", href: `${xbase}/archive`, download: "" }, "Download ZIP") : null,
           el("a", { class: "btn btn-small", href: `${xbase}/manifest`, target: "_blank", rel: "noopener" }, "Manifest JSON"),
@@ -3250,6 +3253,80 @@
     return el("div", { class: "stack" }, exportPanel(m), workshopPanel(m));
   }
 
+  // ---------- installation preflight (Export and Workshop) ----------
+  // Compares one verified export or prepared Workshop folder with the .dm files in the mods folder the server was
+  // started with. It runs only when asked (no polling). Install sends the fingerprint of a current check, plus the same
+  // fingerprint as an acknowledgement when the check has review warnings; the server recomputes it before writing.
+  function preflightUi(slug, target) {
+    if (!state.preflight) state.preflight = new Map();
+    const key = `${slug}|${target}`;
+    if (!state.preflight.has(key)) state.preflight.set(key, { data: null, error: null, busy: false, ack: null, stale: false, focus: false });
+    return state.preflight.get(key);
+  }
+  // Body fields for an install, or null while the check is missing, running, stale, blocked or unacknowledged.
+  function preflightReady(slug, target) {
+    const c = preflightUi(slug, target), D = c.data;
+    if (!D || c.busy || c.stale || !D.install.allowed) return null;
+    if (D.install.requires_acknowledgement && c.ack !== D.fingerprint) return null;
+    return D.install.requires_acknowledgement ? { expected_preflight: D.fingerprint, acknowledge_review: D.fingerprint } : { expected_preflight: D.fingerprint };
+  }
+  function preflightWhy(slug, target) {
+    const c = preflightUi(slug, target), D = c.data;
+    return c.busy ? "Checking compatibility..." : !D ? "Check compatibility with the installed mods first."
+      : c.stale ? "The compatibility check is out of date; check again."
+      : !D.install.allowed ? D.install.reason
+      : D.install.requires_acknowledgement && c.ack !== D.fingerprint ? "Review the warnings and tick the acknowledgement first." : null;
+  }
+  function preflightView(slug, target, redraw, pfx) {
+    const c = preflightUi(slug, target), D = c.data;
+    const url = `/api/projects/${encodeURIComponent(slug)}/preflight?target=${encodeURIComponent(target)}`;
+    async function check() {
+      Object.assign(c, { busy: true, error: null, data: null, ack: null, stale: false }); redraw();
+      try { c.data = (await getJSON(url)).result; } catch (e) { c.error = e; }
+      c.busy = false; c.focus = true; redraw();
+    }
+    const words = { pass: ["no conflicts found", "ok"], review: ["review needed", "warn"], blocked: ["install blocked", "err"],
+      incomplete: ["scan incomplete", "err"] }[D && D.status] || ["not checked", "info"];
+    const loc = (who, x) => el("div", { class: "pf-loc" }, el("span", { class: "faint", text: `${who}: ` }),
+      el("code", { text: `${x.file}${x.line ? `:${x.line}` : ""}` }), x.command ? [" ", el("code", { text: x.command })] : null,
+      x.name ? el("span", { class: "faint", text: ` "${x.name}"` }) : null);
+    const finding = (f) => el("li", { class: `pf-finding pf-${f.severity}` },
+      el("div", null, badge(f.severity, f.severity === "error" ? "err" : f.severity === "warning" ? "warn" : "info"), " ",
+        f.kind ? el("code", { text: `${f.kind} ${f.object_id}` }) : null, " ", el("span", { text: f.message })),
+      f.bundle.map((x) => loc("This mod", x)), f.installed.slice(0, 5).map((x) => loc("Installed", x)),
+      f.installed.length > 5 ? el("div", { class: "faint", text: `…and ${f.installed.length - 5} more` }) : null,
+      f.load_order === "unknown" && f.kind ? el("div", { class: "faint", text: "Load order unknown; installed does not mean enabled." }) : null,
+      el("ul", { class: "plain-list pf-actions" }, f.actions.map((a) => el("li", null, el("strong", { text: a.action.replace(/_/g, " ") }), ` — ${a.reason}`))));
+    const cov = D && D.coverage;
+    const ackId = `${pfx}-pf-ack`;
+    const ack = D && D.status === "review" ? el("label", { class: "pf-ack", for: ackId },
+      el("input", { type: "checkbox", id: ackId, checked: c.ack === D.fingerprint || null, disabled: c.stale || null,
+        onchange: (ev) => { c.ack = ev.target.checked ? D.fingerprint : null; redraw(); const t = document.getElementById(ackId); if (t) t.focus(); } }),
+      " I reviewed these shared identities and want to install this exact bundle anyway (applies to this check only).") : null;
+    const node = el("div", { class: "pf stack" },
+      el("div", { class: "btn-row" },
+        el("button", { type: "button", class: "btn btn-small", disabled: c.busy || null, onclick: check }, c.busy ? "Checking…" : D ? "Check again" : "Check compatibility"),
+        el("strong", { id: `${pfx}-pf-outcome`, tabindex: "-1" }, badge(c.stale ? "out of date" : words[0], c.stale ? "warn" : words[1])),
+        D ? el("span", { class: "faint", text: `${D.counts.error} error(s) · ${D.counts.warning} warning(s) · ${D.counts.info} info` }) : null),
+      el("div", { role: "status", "aria-live": "polite" }, c.busy ? stateBox("loading", "Reading the installed mods...") : null),
+      c.error ? errorBox(c.error, "the compatibility check") : null,
+      D && D.findings.length ? el("ol", { class: "plain-list pf-findings" }, D.findings.map(finding)) : null,
+      D && D.findings_total > D.findings.length ? el("p", { class: "faint", text: `${D.findings_total - D.findings.length} more not shown; download the JSON.` }) : null,
+      ack,
+      cov ? el("dl", { class: "kv pf-coverage" },
+        el("dt", { text: "Mods folder" }), el("dd", null, cov.mods_dir ? el("span", { class: "mono", text: cov.mods_dir }) : el("span", { class: "muted", text: txt(cov.reason) || "none" })),
+        el("dt", { text: "Scanned" }), el("dd", { text: `${cov.dm_files_scanned} .dm file(s), ${cov.bytes_scanned} bytes; top level and one folder down; links not followed` }),
+        cov.skipped.length ? [el("dt", { text: "Skipped" }), el("dd", { text: `${cov.skipped.join(", ")} (this project's own unchanged install)` })] : null,
+        cov.unreadable.length || cov.scan_limit_reached.length ? [el("dt", { text: "Not read" }), el("dd", null, el("ul", { class: "plain-list ws-problems" },
+          cov.unreadable.map((u) => el("li", null, el("code", { text: u.source }), ` — ${u.reason}`)),
+          cov.scan_limit_reached.map((s) => el("li", null, el("code", { text: s }), " — scan limit reached"))))] : null,
+        el("dt", { text: "Not checked" }), el("dd", { text: `${cov.not_scanned.join("; ")}.` }),
+        el("dt", { text: "Fingerprint" }), el("dd", { class: "hash", text: D.fingerprint })) : null,
+      D ? el("a", { class: "btn btn-small btn-ghost", href: `${url}&download=1`, download: "" }, "Check JSON") : null);
+    if (c.focus) { c.focus = false; queueMicrotask(() => { const t = document.getElementById(`${pfx}-pf-outcome`); if (t) t.focus(); }); }
+    return node;
+  }
+
   // ---------- Steam Workshop preparation ----------
   // Builds <project>/exports/workshop/<id>/<slug>/ from an export of the revision this page shows (the server re-hashes
   // it under the project lock), adds dom6ws.txt and a 256x256 banner.png, and can copy it into the mods folder the
@@ -3298,8 +3375,10 @@
     }
     async function install(wid) {
       ui.busy = "install"; ui.install = null; ui.installError = null; draw();
-      try { ui.install = await postJSON(`${base}/workshop/${encodeURIComponent(wid)}/install`, { expected_sha256: p.sha256 }); }
+      const pf = preflightUi(slug, wid);
+      try { ui.install = await postJSON(`${base}/workshop/${encodeURIComponent(wid)}/install`, { expected_sha256: p.sha256, ...preflightReady(slug, wid) }); }
       catch (e) { ui.installError = e; }
+      pf.stale = true; pf.ack = null;  // the destination (or what the server saw) changed: check again before another install
       ui.busy = null; ui.focus = "#ws-install-outcome";
       await load();
     }
@@ -3310,6 +3389,8 @@
       banner_missing: "No banner image to reuse.", banner_unsupported: "The banner image cannot be read.", banner_conflict: "The mod's own banner.png cannot be used.",
       export_conflict: "The export already holds Workshop control files.", bad_visibility: "Choose a visibility first.",
       install_conflict: "a different mod folder is already there.", install_unavailable: "local install is not available.",
+      preflight_required: "check compatibility first.", preflight_stale: "the installed mods or the bundle changed since the check.",
+      preflight_blocked: "the compatibility check blocks this install.", preflight_review: "acknowledge the review warnings first.",
       symlink_rejected: "Refused: a link or junction is in the way.", bad_csrf: "The page token is out of date.", bad_origin: "Request was not from this page.",
     }[code] || fallback);
     function failure(e, id, what) {
@@ -3356,9 +3437,11 @@
       if (!I) return null;
       const words = { absent: ["not installed yet", "info"], managed: ["installed by Kosmokrator", "ok"], identical: ["identical", "ok"],
         conflict: ["another folder is there", "err"], unavailable: ["unavailable", "warn"] }[I.state] || [I.state, "info"];
-      const can = I.available && latest && latest.sha256 === p.sha256 && I.state !== "conflict" && CSRF;
+      const ready = latest ? preflightReady(slug, latest.workshop_id) : null;
+      const can = I.available && latest && latest.sha256 === p.sha256 && I.state !== "conflict" && CSRF && ready;
       const why = !I.available ? I.reason : !latest ? "Prepare a Workshop folder first." : latest.sha256 !== p.sha256 ? "Prepare the current revision first."
-        : I.state === "conflict" ? "A mod folder with this name already exists and was not installed from this project. It is left untouched." : null;
+        : I.state === "conflict" ? "A mod folder with this name already exists and was not installed from this project. It is left untouched."
+        : preflightWhy(slug, latest.workshop_id);
       const R = ui.install;
       return el("div", { class: "ws-step stack" },
         el("h4", { id: "ws-install-h", text: "Install locally (optional)" }),
@@ -3367,6 +3450,8 @@
             " ", el("span", { class: "faint", text: I.source === "environment" ? `(server setting ${I.env})` : I.source === "appdata" ? "(%APPDATA%\\Dominions6\\mods)" : "" })),
           el("dt", { text: "Destination" }), el("dd", null, I.destination ? el("span", { class: "mono", text: I.destination }) : "—", " ", badge(words[0], words[1]),
             I.pfid_present ? [" ", badge("dom6ws_pfid kept", "info")] : null)),
+        latest && I.available ? el("div", { class: "stack" }, el("h5", { class: "pf-h", text: "Compatibility with installed mods" }),
+          preflightView(slug, latest.workshop_id, draw, "ws")) : null,
         I.state === "conflict" && (I.unmanaged || []).length ? el("details", { class: "raw" }, el("summary", null, `Files not from this project (${I.unmanaged_count})`),
           el("div", { class: "inner" }, el("ul", { class: "plain-list ws-problems" }, I.unmanaged.map((f) => el("li", null, el("code", { text: f })))))) : null,
         el("div", { class: "btn-row" },
@@ -4197,7 +4282,8 @@
             el("dt", { text: "Dependencies" }), el("dd", { text: r.scope.dependencies.length ? r.scope.dependencies.join(", ") : "none declared" }),
             el("dt", { text: "Recruitment" }), el("dd", { text: recruitText || "no new units" }),
             el("dt", { text: "Checked" }), el("dd", { text: r.scope.checked.join(", ") }),
-            el("dt", { text: "Not checked" }), el("dd", null, el("ul", { class: "plain-list" }, r.scope.not_checked.map((x) => el("li", null, el("code", { text: x.check }), " ", x.reason))))),
+            el("dt", { text: "Not checked" }), el("dd", null, el("ul", { class: "plain-list" }, r.scope.not_checked.map((x) => el("li", null, el("code", { text: x.check }), " ", x.reason,
+              x.see === "preflight" ? [" ", el("a", { href: route("p", slug, "export") }, "Check compatibility on the Export tab")] : null))))),
           panel("Limitations", el("ul", null, r.limitations.map((l) => el("li", { text: l })))),
           panel("JSON", jsonActions(url, () => last, "Health JSON"))));
     }

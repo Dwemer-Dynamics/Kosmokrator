@@ -106,13 +106,16 @@ RECRUITMENT_CLASSES = ("normal", "cap_only", "site", "start_army", "defence", "h
 
 LIMITATIONS = [
     "Static health only: it does not load Dominions, simulate combat or prove balance.",
-    "Installed mods are not scanned here; conflicts with mods that are not declared dependencies are unknown.",
+    "Installed mods are not scanned here; run the installation preflight (author_state preflight:<export or "
+    "Workshop id>, or Check compatibility in the browser) for an exported bundle.",
     "Dependencies are modelled in declared order followed by this project, not the game's detected activation order.",
     "Catalog and reference snapshot data are third-party extracts and may differ from the installed game.",
     "Recruitment classes come from explicit commands only; unassigned units are reported, not treated as errors.",
 ]
 NOT_CHECKED = [
-    {"check": "installed_mods", "reason": "The game's mods folder is not scanned by health (allocate_ids scans it separately)."},
+    {"check": "installed_mods", "reason": "The game's mods folder is not scanned by health. Run the installation "
+     "preflight on an export or prepared Workshop folder (author_state preflight:<id>; browser Check compatibility).",
+     "see": "preflight"},
     {"check": "unlisted_enabled_mods", "reason": "Mods enabled in game but not declared as dependencies are unknown."},
     {"check": "game_load", "reason": "No engine load test; a clean result covers supported static checks only."},
     {"check": "gameplay_balance", "reason": "Balance comparisons are separate review aids, not simulations."},
@@ -544,21 +547,20 @@ def _reconcile(findings: list[dict[str, Any]], validation: dict[str, Any] | None
 
 
 def build_health(workspace: Path, slug: str, live: Catalog | None, live_error: dict[str, Any] | None = None,
-                 model: dict[str, Any] | None = None, expected_revision: str | None = None) -> dict[str, Any]:
-    """Project health for the captured revision. model may be a cached browser model; it is rebuilt when its
-    source hash does not match the captured source."""
+                 expected_revision: str | None = None) -> dict[str, Any]:
+    """Project health for the captured revision. The model is always built fresh between two identity captures:
+    a cached model can match the .dm hash while assets, metadata or dependencies differ."""
     from .browse import build_project_model
     from .reference import reference_status
     catalog, cat_err, cat_state = resolve_health_catalog(workspace, slug, live, live_error)
     before = capture_identity(workspace, slug, catalog, cat_state, cat_err)
     F = _Findings()
+    model: dict[str, Any] | None = None
     model_error = None
-    if model is None or (model.get("provenance") or {}).get("sha256") != before["source_sha256"]:
-        try:
-            model = build_project_model(workspace, slug, catalog)
-        except (KosmoError, OSError, ValueError, UnicodeError) as exc:
-            model = None
-            model_error = exc.to_dict() if isinstance(exc, KosmoError) else {"code": "read_error", "message": str(exc)}
+    try:
+        model = build_project_model(workspace, slug, catalog)
+    except (KosmoError, OSError, ValueError, UnicodeError) as exc:
+        model_error = exc.to_dict() if isinstance(exc, KosmoError) else {"code": "read_error", "message": str(exc)}
     ref = None
     try:
         ref = reference_status(workspace, slug, live, model)

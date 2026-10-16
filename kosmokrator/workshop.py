@@ -439,8 +439,10 @@ def _verified_content(project: Project, e: dict[str, Path], man: dict[str, Any])
     return out
 
 
-def _records(project: Project) -> tuple[Path, dict[str, Any]]:
-    path = state_subdir(project, "workshop") / INSTALL_RECORD
+def _records(project: Project, create: bool = False) -> tuple[Path, dict[str, Any]]:
+    """The install record; the state folder is only created when about to write (reads stay write-free)."""
+    folder = state_subdir(project, "workshop") if create else         contained(project.root, project.state_dir / "workshop", what="state workshop directory")
+    path = folder / INSTALL_RECORD
     if not path.exists():
         return path, {}
     if is_link(path):
@@ -491,9 +493,16 @@ def destination_status(project: Project, config: dict[str, Any], new: dict[str, 
 
 
 def install_workshop(workspace: Path, slug: str, wid: str, body: Any, config: dict[str, Any]) -> dict[str, Any]:
-    """Copy a prepared content folder into <mods>/<slug>: new, identical, or a managed update; never a conflict."""
-    if not isinstance(body, dict) or set(body) - {"expected_sha256"}:
-        raise KosmoError("bad_request", "Body needs expected_sha256 only; the destination is fixed by the server.")
+    """Copy a prepared content folder into <mods>/<slug>: new, identical, or a managed update; never a conflict.
+
+    The body must carry the fingerprint of a current installation preflight (expected_preflight) and, when that
+    check has review warnings, the same fingerprint as acknowledge_review. The preflight is recomputed from the
+    verified content under the project lock immediately before the first write.
+    """
+    from .preflight import build_report, require_current
+    if not isinstance(body, dict) or set(body) - {"expected_sha256", "expected_preflight", "acknowledge_review"}:
+        raise KosmoError("bad_request", "Body needs expected_sha256, expected_preflight and optional "
+                         "acknowledge_review; the destination is fixed by the server.")
     project = open_project(workspace, slug)
     root = _mods_root(config)
     with project_lock(project):
@@ -502,6 +511,9 @@ def install_workshop(workspace: Path, slug: str, wid: str, body: Any, config: di
         _check_revision(project, body.get("expected_sha256"), man.get("sha256"))
         content = _verified_content(project, e, man)
         new = {r: sha256_bytes(d) for r, d in content.items()}
+        report = build_report(project, {"type": "workshop", "id": wid, "manifest": man, "payload": content,
+                                        "sha256": man.get("sha256")}, config)
+        require_current(report, body)
         status = destination_status(project, config, new)
         dest = Path(status["destination"])
         if status["state"] == "conflict":
@@ -538,14 +550,15 @@ def install_workshop(workspace: Path, slug: str, wid: str, body: Any, config: di
                 if rel not in content and rel not in PFID_NAMES:
                     contained(root, p, what="install target").unlink()
                     removed.append(rel)
-        rec_path, records = _records(project)
+        rec_path, records = _records(project, create=True)
         records[str(dest)] = {"workshop_id": wid, "sha256": man.get("sha256"), "files": new,
                               "installed_utc": _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")}
         atomic_write_bytes(rec_path, (json.dumps(records, indent=2) + "\n").encode("utf-8"))
         after = destination_status(project, config, new)
     return {"workshop_id": wid, "destination": str(dest), "result": {"absent": "installed", "identical": "unchanged",
             "managed": "updated"}[status["state"]], "written": written, "removed": removed,
-            "pfid_preserved": bool(after.get("pfid_present")), "status": after}
+            "pfid_preserved": bool(after.get("pfid_present")), "status": after,
+            "preflight": {"fingerprint": report["fingerprint"], "status": report["status"], "counts": report["counts"]}}
 
 
 # ---------- status ----------

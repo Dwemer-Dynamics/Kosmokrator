@@ -54,9 +54,35 @@ on a transparent 256x256 canvas, so its pixels and aspect ratio are kept. A larg
 nearest-neighbour sampling, with one scale for both axes. This is mechanical packaging; no artwork is generated. If
 the mod already ships a 256x256 `banner.png`, it is used unchanged.
 
+## Compatibility check (installation preflight)
+
+`GET /api/projects/<slug>/preflight?target=<export id or Workshop id>` (browser: **Check compatibility** on the Export
+and Workshop panels; agents: `author_state` kind `preflight:<id>`) re-verifies that exact bundle against its manifest
+and compares its numbered definitions with the `.dm` files in the configured mods folder (top level and one folder
+down, bounded by file count, per-file and total bytes; links are never followed). It writes nothing and runs only
+when asked.
+
+- `#new...` reusing an installed ID, and two custom nations 150+ (`#selectnation 150+` creates a nation), are
+  errors. Reordering mods never fixes them; remap with `allocate_ids` or move the other mod out yourself.
+- Both mods selecting an existing identity (for example a nation below 150), or patching an ID only an undeclared
+  installed mod creates, are review warnings. A byte-identical declared dependency makes a patch informational.
+- Every finding names the file, line, command and ID on both sides. Load order is reported as unknown; installed does
+  not mean enabled; Workshop subscriptions outside the configured folder are not scanned.
+- This project's own install is skipped only when it is identical or every file is one it installed. An edited or
+  foreign copy is an error and is scanned like any other mod.
+- Unreadable entries, links or a reached limit make the result `incomplete`.
+
+The result has a `fingerprint` over the manifest, bundle `.dm` hashes, every scanned file's path, hash and size, scan
+completeness, destination ownership and declared dependency hashes. Status is `pass`, `review`, `blocked` or
+`incomplete`.
+
 ## Optional local install
 
-`POST /api/projects/<slug>/workshop/<id>/install` takes only `{expected_sha256}`. The destination is
+`POST /api/projects/<slug>/workshop/<id>/install` takes `{expected_sha256, expected_preflight}`, plus
+`acknowledge_review` (the same fingerprint) when the check has review warnings. Under the project lock and right
+before its first write, the server recomputes the preflight. It refuses with `preflight_required`, `preflight_stale`,
+`preflight_blocked` or `preflight_review` and writes nothing. Files can still change after that recheck; it is not a
+cross-process atomic guarantee. The destination is
 `<mods>/<slug>`, where `<mods>` is set when the server starts:
 
 - `KOSMOKRATOR_DOMINIONS_MODS=<absolute path>`; an empty value or `off` turns local install off;

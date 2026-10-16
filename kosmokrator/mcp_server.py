@@ -21,7 +21,8 @@ Workflow:
 3. Use author_state and author_save for structured preview/save edits. For exact source patches, use
    inspect_mod then apply_mod_patch with its sha256. Preserve unrelated source and unknown commands.
 4. validate_mod after every change; fix errors, review warnings, and treat 'unverified' as needing human or
-   in-game confirmation. author_state kind 'health' gives the combined prioritized findings for one revision.
+   in-game confirmation. author_state kind 'health' gives the combined prioritized findings for one revision;
+   kind 'preflight:<export or Workshop id>' compares that bundle with installed mods (read-only).
    Before larger work, author_save kind 'revisions' {action: checkpoint} lets the user compare or undo it later.
    export_mod refuses sources with errors and never overwrites.
 Be explicit with users: these checks are static. They do not prove the mod loads, plays or balances in game;

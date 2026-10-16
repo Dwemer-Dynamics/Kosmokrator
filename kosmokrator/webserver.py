@@ -38,7 +38,9 @@ Workshop preparation (workshop.py): POST .../workshop/prepare turns one existing
 <project>/exports/workshop/<id>/<slug>/ (exported files plus dom6ws.txt and banner.png) with a ZIP and a manifest
 beside it, and POST .../workshop/<id>/install copies that folder into the Dominions 6 mods folder fixed by the server
 (KOSMOKRATOR_DOMINIONS_MODS or %APPDATA%/Dominions6/mods), refusing any existing folder it did not install. Nothing
-is uploaded or published; the game's own Mods menu uploads to Steam.
+is uploaded or published; the game's own Mods menu uploads to Steam. GET .../preflight?target=<export or Workshop id>
+(preflight.py) compares that verified bundle with the installed mods, read-only and only when asked; install requires
+its current fingerprint (and an acknowledgement when it has review warnings).
 """
 
 from __future__ import annotations
@@ -147,6 +149,8 @@ EDIT_STATUS = {"sha_mismatch": HTTPStatus.CONFLICT, "project_locked": HTTPStatus
                "object_missing": HTTPStatus.NOT_FOUND, "project_missing": HTTPStatus.NOT_FOUND,
                "reference_changed": HTTPStatus.CONFLICT, "reference_too_large": HTTPStatus.REQUEST_ENTITY_TOO_LARGE}
 EDIT_STATUS.update(object_in_use=HTTPStatus.CONFLICT, id_conflict=HTTPStatus.CONFLICT)
+EDIT_STATUS.update(preflight_required=HTTPStatus.BAD_REQUEST, preflight_stale=HTTPStatus.CONFLICT,
+                   preflight_blocked=HTTPStatus.CONFLICT, preflight_review=HTTPStatus.CONFLICT)
 # Local checkpoints and restore (revisions.py).
 EDIT_STATUS.update(stale_revision=HTTPStatus.CONFLICT, plan_changed=HTTPStatus.CONFLICT,
                    restore_interrupted=HTTPStatus.CONFLICT, changed_during_capture=HTTPStatus.CONFLICT,
@@ -536,14 +540,14 @@ class Handler(BaseHTTPRequestHandler):
         if head == 'health' and len(rest) == 1:
             from .health import build_health
             live, live_err = self.state.catalog()
-            cat, _err = self.state.catalog_for(slug)
-            try:
-                cached = self.state.cache.get(ws, slug, cat)
-            except (KosmoError, OSError, ValueError, UnicodeError):
-                cached = None  # build_health reports the read failure as a finding
             expected = q.get('expected_revision') or None
-            return self._json({'ok': True, 'result': build_health(ws, slug, live, live_err, cached, expected)},
+            # Rebuilt for every report: the browser cache is keyed by stat fingerprints, not the captured identity.
+            return self._json({'ok': True, 'result': build_health(ws, slug, live, live_err, expected)},
                               download=f"{slug}-health.json" if dl else None)
+        if head == 'preflight' and len(rest) == 1:
+            from .preflight import preflight
+            return self._json({'ok': True, 'result': preflight(ws, slug, q.get('target'), self.state.mods_config())},
+                              download=f"{slug}-preflight.json" if dl else None)
         if head == 'revisions':
             from .revisions import compare, preview_image, revision_state
             if len(rest) == 1:
