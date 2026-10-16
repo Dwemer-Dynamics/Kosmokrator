@@ -76,6 +76,7 @@ copies files into the game folder itself.
 | `allocate PROJECT KIND [N] [--label] [--dep]` | `allocate_ids` | Reserve free ids in documented ranges, skipping other workspace projects and installed mods; nations are random, other kinds lowest-first |
 | `search QUERY [--category] [--limit] [--project]` | `search_game_data` | Offline catalog search by id or name (max 50 results); `--project` searches that project's snapshot if it has one |
 | `validate PROJECT [--dep]` | `validate_mod` | Errors, warnings and unverified items, each with file and line |
+| `health PROJECT [--expected-revision]` | `author_state` kind `health` | One prioritized, deduplicated finding list (error, warning, unverified, info) for a captured revision; exit 1 when errors block export |
 | `export PROJECT [--dest] [--format zip\|folder]` | `export_mod` | Error-free export with a sha256 manifest; never overwrites |
 | `demo [--export zip\|folder]` | (CLI only) | Builds the Hebdomad demo |
 | `author PROJECT KIND [--body-file JSON]` | `author_state`, `author_save` | State or preview/save sites, spells, weapons, armors, heroes:N, equipment:N, playtests, reference-snapshot |

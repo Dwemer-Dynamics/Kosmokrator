@@ -21,7 +21,8 @@ Workflow:
 3. Use author_state and author_save for structured preview/save edits. For exact source patches, use
    inspect_mod then apply_mod_patch with its sha256. Preserve unrelated source and unknown commands.
 4. validate_mod after every change; fix errors, review warnings, and treat 'unverified' as needing human or
-   in-game confirmation. export_mod refuses sources with errors and never overwrites.
+   in-game confirmation. author_state kind 'health' gives the combined prioritized findings for one revision.
+   export_mod refuses sources with errors and never overwrites.
 Be explicit with users: these checks are static. They do not prove the mod loads, plays or balances in game;
 say so, and recommend an in-game test. Do not claim parity with the game or ownership of catalog data."""
 
@@ -96,6 +97,8 @@ def build_server(k: Kosmokrator):
     def author_state(project: str, kind: str) -> dict[str, Any]:
         """State for commands:<context>, dependencies, maps, maps:<id>, map-builds, content or playtests.
         Read-only reports: inheritance, compatibility and balance[:comma-separated nation IDs].
+        health returns one prioritized, deduplicated finding list (error, warning, unverified, info) with stable ids,
+        locations, evidence and next actions for a captured revision, plus recruitment classes, scope and caveats.
         reference-snapshot reports the project's local reference snapshot (state, coverage, missing data).
         mercs lists #newmerc companies with #com/#unit/#item names resolved and the structured form options.
         Includes source revision, reviewed schemas, authored values and preserved unknown lines."""

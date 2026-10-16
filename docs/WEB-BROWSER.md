@@ -112,7 +112,7 @@ review-before-save and meaningful warnings are unchanged.
 **Project header.** A compact heading: a small mod banner, the mod name with epithet, era and version, and on the
 right the **Nation** selector (only on the sections it filters, see below) and an **N unsaved drafts** badge when
 any editor holds unsaved input (it links to Export, which lists them). Below it, one row of section tabs:
-Browse (Overview … Balance) and Build (**Advanced tools**, **Validation**, **Export**),
+Browse (Overview … Balance) and Build (**Advanced tools**, **Health**, **Validation**, **Export**),
 labelled as groups for assistive technology (a wider gap separates them visually). The secondary sections **Source**, **Assets**, **Other definitions**
 and **Docs** are under **More** at the end of the row: a button that opens a short list of links (Down arrow opens
 it and focuses the current or first link, Up/Down move, Escape closes it and returns focus to the button; a click elsewhere or tabbing away also closes it).
@@ -192,6 +192,20 @@ row links to the existing view that fixes it:
   to the Export section; a new export updates this row.
 
 The panel says **needs attention** only for validation errors, missing referenced files and units without a sprite.
+
+## Project health
+
+**Build > Health** reads `GET /api/projects/<slug>/health` (the same `build_health` as CLI `health` and MCP
+`author_state` kind `health`). It combines the existing validation, readiness, reference-graph, compatibility,
+recruitment and catalog reports for one captured revision (source, metadata, mod files, declared dependencies and
+catalog) into one list ordered blocker, warning, unverified, info. Each finding has a stable `id` and `code` that do
+not depend on line numbers, a location (file, line, object, asset), occurrences, evidence and a next action.
+Duplicates across reports (for example a missing file reported by validation and readiness) are merged; every
+validation item is counted in `reconciliation`. Without a catalog, vanilla references are unverified, not errors.
+Unassigned units are informational; `recruitment` classifies new units as recruitable, capital-only, site-only,
+start army, defence, hero, summon, pretender, alternate form or other references. **Recheck** passes
+`?expected_revision=` and says when files changed. The result lists what it did not check (installed mods,
+unlisted enabled mods, game load, balance, revision history); it is static and proves nothing about the game.
 
 ## Reference snapshot (self-contained project)
 
@@ -770,6 +784,7 @@ catalog dataset version and revision, the `.dm` path and SHA-256. Add `?download
 /api/projects                                 project list (errors per project, never fatal)
 /api/projects/<slug>                          whole model, plus latest_export (newest export, read fresh)
 /api/projects/<slug>/{nations,monsters,sites,other_definitions,assets,validation,pretenders,readiness}
+/api/projects/<slug>/health                   project health (kosmokrator.health/1); ?expected_revision= reports staleness
 /api/projects/<slug>/monsters/<id>            one object (also nations/<id>, sites/<id>, other_definitions/<id>)
 /api/projects/<slug>/pretenders/<god>         one god: project-5011, catalog-3416 or god:catalog:3416
 /api/projects/<slug>/pretenders/catalog-<id>/sprite/{idle,attack}

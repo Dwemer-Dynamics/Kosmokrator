@@ -492,7 +492,7 @@
   // the secondary Files group sits behind the More disclosure so the page content starts sooner on narrow screens.
   const TAB_GROUPS = [
     ["browse", "Browse", [["overview", "Overview"], ["nation", "Nation"], ["units", "Units"], ["pretenders", "Pretenders"], ["sites", "Sites"], ["spells", "Spells"], ["items", "Items"], ["mercs", "Mercenaries"], ["maps", "Maps"], ["balance", "Balance"]]],
-    ["edit", "Build", [["author", "Advanced tools"], ["validation", "Validation"], ["export", "Export"]]],
+    ["edit", "Build", [["author", "Advanced tools"], ["health", "Health"], ["validation", "Validation"], ["export", "Export"]]],
     ["files", "More", [["source", "Source"], ["assets", "Assets"], ["other", "Other definitions"], ["docs", "Docs"]]],
   ];
   // The vanilla inspector is reached from the sidebar's Catalog section, not the tab bar.
@@ -4082,6 +4082,127 @@
           ins ? [el("dt", { text: "Inspection" }), el("dd", { text: `${ins.statement_count} statements · ${ins.syntax_issues.length} syntax issues · ${ins.stray_text.length} stray text lines · ${ins.unverified_commands.length} unverified commands` })] : null),
         panel("Limitations", el("ul", null, v.limitations.map((l) => el("li", { text: l })))),
         panel("JSON", jsonActions(`/api/projects/${encodeURIComponent(slug)}/validation`, () => v, "Validation JSON"))));
+  }
+
+  // ---------- project health ----------
+  // One prioritized, deduplicated list from the server's health report (GET /api/projects/<slug>/health). Errors are
+  // always listed in full; longer warning, unverified and info lists show the first rows and expand on request.
+  const HEALTH_SEV = { error: ["Blocker", "err"], warning: ["Warning", "warn"], unverified: ["Unverified", "info"], info: ["Info", ""] };
+  const HEALTH_STATUS = { blocked: ["Blocked", "err", "Errors must be fixed before export."], attention: ["Needs review", "warn", "No errors; review the warnings."],
+    unverified: ["Unverified", "info", "No errors or warnings; some items could not be checked."], clear: ["Clear", "ok", "No findings in the checked scope."] };
+  const HEALTH_PLURAL = { error: "Blockers", warning: "Warnings", unverified: "Unverified", info: "Info" };
+  const HEALTH_COUNT = { error: ["blocker", "blockers"], warning: ["warning", "warnings"], unverified: ["unverified", "unverified"], info: ["info", "info"] };
+  const HEALTH_PAGE = 25;
+  const healthRuns = new Map(); // slug -> revision last shown, so a recheck can say the project changed
+  function healthObjectLink(m, obj, loc) {
+    const slug = m.project.slug;
+    if (!obj || obj.kind === "mod") return loc.line ? srcRef(slug, loc.file, loc.line) : null;
+    const label = `${txt(obj.name || obj.kind)}${obj.id !== null && obj.id !== undefined ? ` (#${obj.id})` : ""}`;
+    const tab = obj.origin === "project" && obj.id !== null && obj.id !== undefined ? { monster: "units", site: "sites", nation: "nation" }[obj.kind] : null;
+    if (tab) return el("a", { href: route("p", slug, tab, obj.id) }, label);
+    return el("span", null, label, obj.origin && obj.origin !== "project" ? el("span", { class: "faint", text: ` in ${obj.origin}` }) : null);
+  }
+  function healthRow(m, f) {
+    const slug = m.project.slug, loc = f.location, [sevLabel, sevKind] = HEALTH_SEV[f.severity] || [f.severity, ""];
+    const places = f.occurrences.filter((o) => o.line);
+    return el("li", { class: `health-row is-${sevKind || "plain"}`, "data-finding": f.id },
+      el("span", { class: `badge ${sevKind}`, text: sevLabel }),
+      el("div", { class: "health-main" },
+        el("div", { class: "health-title" }, el("strong", { text: f.title }), " ", el("code", { class: "faint", text: f.code }),
+          f.count > 1 ? el("span", { class: "faint", text: ` · ${f.count} places` }) : null),
+        el("div", { class: "health-msg", text: f.message }),
+        el("div", { class: "health-where" }, healthObjectLink(m, loc.object, loc), loc.asset ? [" ", el("code", { text: loc.asset })] : null,
+          loc.line && loc.object && loc.object.kind !== "mod" ? [" ", srcRef(slug, loc.file, loc.line)] : null),
+        el("div", { class: "health-next" }, el("span", { class: "faint", text: "Next: " }), f.next_action),
+        places.length > 1 ? el("details", { class: "health-places" }, el("summary", null, `All ${places.length} locations`),
+          el("ul", { class: "plain-list" }, places.map((o) => el("li", null, srcRef(slug, o.file, o.line, true), " ",
+            o.command ? el("code", { text: o.command }) : null, " ", el("span", { class: "faint", text: `${txt(o.source)}${o.message ? `: ${o.message}` : ""}` }))))) : null));
+  }
+  // Three or more findings with one code (e.g. several unreserved IDs) share a row listing their objects; the JSON keeps each.
+  function healthCodeRow(m, fs) {
+    const slug = m.project.slug, f = fs[0], [sevLabel, sevKind] = HEALTH_SEV[f.severity] || [f.severity, ""];
+    return el("li", { class: `health-row is-${sevKind || "plain"}`, "data-code": f.code },
+      el("span", { class: `badge ${sevKind}`, text: sevLabel }),
+      el("div", { class: "health-main" },
+        el("div", { class: "health-title" }, el("strong", { text: f.title }), " ", el("code", { class: "faint", text: f.code }),
+          el("span", { class: "faint", text: ` · ${fs.length} findings` })),
+        el("div", { class: "health-where" }, fs.map((x, i) => [i ? ", " : "", healthObjectLink(m, x.location.object, x.location) || el("code", { text: txt(x.location.asset) }),
+          x.location.asset && x.location.object && x.location.object.kind !== "mod" ? [" ", el("code", { text: x.location.asset })] : null])),
+        el("div", { class: "health-next" }, el("span", { class: "faint", text: "Next: " }), f.next_action),
+        el("details", { class: "health-places" }, el("summary", null, "Messages"),
+          el("ul", { class: "plain-list" }, fs.map((x) => el("li", null, x.location.line ? [srcRef(slug, x.location.file, x.location.line), " "] : null, x.message))))));
+  }
+  function healthGroup(m, sev, items) {
+    if (!items.length) return null;
+    const rows = [];
+    for (const f of items) {
+      const prev = rows[rows.length - 1];
+      if (prev && prev[0].code === f.code) prev.push(f); else rows.push([f]);
+    }
+    const list = el("ul", { class: "health-list" });
+    const more = el("button", { type: "button", class: "btn btn-small btn-ghost" });
+    let shown = 0;
+    const fill = () => {
+      const next = sev === "error" ? rows.length : Math.min(rows.length, shown + HEALTH_PAGE);
+      list.append(...rows.slice(shown, next).map((fs) => fs.length >= 3 ? healthCodeRow(m, fs) : fs.map((f) => healthRow(m, f))).flat());
+      shown = next;
+      if (shown >= rows.length) more.remove();
+      else more.textContent = `Show ${Math.min(HEALTH_PAGE, rows.length - shown)} more of ${rows.length - shown}`;
+    };
+    more.addEventListener("click", fill);
+    fill();
+    return el("details", { class: "raw health-group", open: sev !== "info" || null, "data-severity": sev },
+      el("summary", null, `${HEALTH_PLURAL[sev]} (${items.length})`), el("div", { class: "inner" }, list, shown < rows.length ? more : null));
+  }
+  function viewHealth(m) {
+    const slug = m.project.slug, url = `/api/projects/${encodeURIComponent(slug)}/health`;
+    const holder = el("div", { class: "stack health" }, stateBox("loading", "Checking project health..."));
+    const recheck = el("button", { type: "button", class: "btn btn-small", onclick: () => load() }, "Recheck");
+    let last = null;
+    async function load() {
+      recheck.disabled = true;
+      const prev = healthRuns.get(slug) || null;
+      try {
+        const r = (await getJSON(prev ? `${url}?expected_revision=${encodeURIComponent(prev)}` : url)).result;
+        last = r;
+        healthRuns.set(slug, r.revision);
+        draw(r, prev);
+      } catch (e) {
+        fillKids(holder, errorBox(e, "project health"), el("p", null, recheck));
+      } finally { recheck.disabled = false; }
+    }
+    function draw(r, prev) {
+      const [stLabel, stKind, stText] = HEALTH_STATUS[r.status] || [r.status, "", ""], c = r.counts;
+      const pageOld = r.identity.source_sha256 && r.identity.source_sha256 !== m.provenance.sha256;
+      const rc = r.recruitment.counts, RC = { normal: "recruitable", cap_only: "capital-only", site: "site-only", start_army: "start army", defence: "defence",
+        hero: "hero", summon: "summon", pretender: "pretender", form: "alternate form", merc: "mercenary", event: "event", referenced: "other reference", unassigned: "unassigned" };
+      const recruitText = Object.entries(rc).filter(([, n]) => n).map(([k, n]) => `${n} ${RC[k] || k}`).join(" · ");
+      const noCatalog = ["none", "error", "snapshot_invalid"].includes(r.catalog.state);
+      fillKids(holder,
+        el("div", { class: "health-head" }, badge(stLabel, stKind),
+          el("span", { class: "health-counts faint", text: ["error", "warning", "unverified", "info"].map((s) => `${c[s]} ${HEALTH_COUNT[s][c[s] === 1 ? 0 : 1]}`).join(" · ") }),
+          recheck),
+        el("p", { class: "panel-note" }, stText, " ", noCatalog ? "Vanilla references are unverified without a catalog."
+          : `Catalog: ${r.catalog.state}${r.catalog.dataset_version ? ` (${r.catalog.dataset_version})` : ""}.`, " Static checks only; not a game-load or balance result."),
+        el("div", { role: "status", "aria-live": "polite" },
+          prev && r.stale ? stateBox("empty", "The project changed since the last check.", "These findings describe the current files.") : null),
+        pageOld ? stateBox("empty", "Other tabs show an older revision.", el("button", { type: "button", class: "btn btn-small", onclick: () => { state.models.delete(slug); render(); } }, "Reload project")) : null,
+        r.identity.consistent ? null : stateBox("error", "Files changed while health was read.", "Recheck when edits have finished."),
+        r.findings.length ? ["error", "warning", "unverified", "info"].map((s) => healthGroup(m, s, r.findings.filter((f) => f.severity === s)))
+          : stateBox("empty", "No findings.", "Nothing to fix in the checked scope."),
+        techSection("Scope, recruitment and revision", false,
+          el("dl", { class: "kv" },
+            el("dt", { text: "Revision" }), el("dd", { class: "mono", title: r.revision, text: shortSha(r.revision) }),
+            el("dt", { text: "Source" }), el("dd", { class: "mono", title: txt(r.identity.source_sha256), text: shortSha(r.identity.source_sha256) }),
+            el("dt", { text: "Dependencies" }), el("dd", { text: r.scope.dependencies.length ? r.scope.dependencies.join(", ") : "none declared" }),
+            el("dt", { text: "Recruitment" }), el("dd", { text: recruitText || "no new units" }),
+            el("dt", { text: "Checked" }), el("dd", { text: r.scope.checked.join(", ") }),
+            el("dt", { text: "Not checked" }), el("dd", null, el("ul", { class: "plain-list" }, r.scope.not_checked.map((x) => el("li", null, el("code", { text: x.check }), " ", x.reason))))),
+          panel("Limitations", el("ul", null, r.limitations.map((l) => el("li", { text: l })))),
+          panel("JSON", jsonActions(url, () => last, "Health JSON"))));
+    }
+    load();
+    return holder;
   }
 
   // ---------- docs ----------
@@ -9011,6 +9132,7 @@
       else if (tab === "other") body.append(viewOther(m));
       else if (tab === "author") body.append(viewAuthoring(m, arg, parts.slice(4)));
       else if (tab === "assets") body.append(viewAssets(m));
+      else if (tab === "health") body.append(viewHealth(m));
       else if (tab === "validation") body.append(viewValidation(m));
       else if (tab === "export") body.append(viewExport(m));
       else if (tab === "source") await viewSource(m, arg, body);

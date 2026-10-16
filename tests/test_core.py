@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
+import io
 import json
 import os
 import struct
@@ -1141,6 +1142,100 @@ class InspectorMercTests(Base):
         with zipfile.ZipFile(self.ws / "merc.zip") as zf:
             self.assertIn(b"#newmerc", zf.read("demo_mod/demo_mod.dm"))
             self.assertFalse(any(".kosmokrator" in n for n in zf.namelist()))
+
+
+class HealthTests(Base):
+    # Synthetic roster: a fort recruit with a missing sprite file, a capital-only unit, a hero, a national summon,
+    # a pretender form, an unassigned unit and one broken name reference.
+    DM = (b'#modname "Synthetic"\n#description "d"\n'
+          b'#newmonster 5000\n#copystats 199\n#name "Unit A"\n#spr1 "art/unit_a.png"\n#end\n'
+          b'#newmonster 5001\n#name "Unit B"\n#hp 10\n#end\n'
+          b'#newmonster 5002\n#copystats 199\n#name "Unit C"\n#end\n'
+          b'#newmonster 5003\n#copystats 199\n#name "Unit D"\n#end\n'
+          b'#newmonster 5004\n#copystats 199\n#name "Unit E"\n#end\n'
+          b'#newmonster 5005\n#copystats 199\n#name "Unit F"\n#end\n'
+          b'#newsite 1700\n#name "Home Site"\n#path 0\n#level 0\n#rarity 5\n#homemon 5002\n#end\n'
+          b'#selectnation 150\n#name "Nation A"\n#era 1\n#startsite "Home Site"\n#addrecunit 5000\n'
+          b'#hero1 5003\n#addgod 5005\n#addreccom "Missing Unit"\n#end\n'
+          b'#newspell\n#name "Call Unit E"\n#effect 10001\n#damage 5004\n#restricted 150\n#end\n')
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.set_dm(self.DM)
+        (self.ws / "demo_mod" / "mod" / "demo_mod" / "mod_banner.tga").unlink(missing_ok=True)
+
+    def health(self, catalog=..., **kw):
+        from kosmokrator.health import build_health
+        return build_health(self.ws, "demo_mod", self.catalog if catalog is ... else catalog, None, **kw)
+
+    def test_findings_are_deduplicated_reconciled_and_stable_across_line_shifts(self) -> None:
+        r = self.health()
+        by_code = {f["code"]: f for f in r["findings"]}
+        self.assertEqual(r["status"], "blocked")
+        self.assertEqual(len({f["id"] for f in r["findings"]}), len(r["findings"]))
+        # Validation and readiness both report the missing file; the graph and validation both report the name.
+        missing = [f for f in r["findings"] if f["location"]["asset"] == "art/unit_a.png"]
+        self.assertEqual(len(missing), 1)
+        self.assertEqual((missing[0]["severity"], missing[0]["sources"]), ("error", ["assets", "validation"]))
+        self.assertEqual(missing[0]["location"]["object"]["key"], "monster:5000")
+        broken = [f for f in r["findings"] if f["category"] == "references" and f["severity"] == "error"]
+        self.assertEqual(len(broken), 1)
+        self.assertEqual((broken[0]["code"], broken[0]["location"]["object"]["key"]), ("unresolved_reference", "nation:150"))
+        self.assertIn("references", broken[0]["sources"])
+        # No hidden errors: every validation item is an occurrence of a finding at least as severe.
+        v = validate_project(self.ws, "demo_mod", self.catalog)
+        self.assertTrue(r["reconciliation"]["complete"])
+        self.assertEqual(r["reconciliation"]["accounted"], v["counts"])
+        self.assertEqual(r["counts"]["error"], sum(f["severity"] == "error" for f in r["findings"]))
+        for f in r["findings"]:
+            self.assertTrue(f["next_action"] and f["message"] and f["id"])
+        self.assertIn("no_sprite_source", by_code)
+        self.assertFalse(r["scope"]["complete"])
+        self.assertIn("installed_mods", [x["check"] for x in r["scope"]["not_checked"]])
+        # Inserting lines elsewhere keeps ids and order; the revision changes and an old one is reported stale.
+        shifted = self.DM.replace(b"#newmonster 5001", b"-- note\n\n#newmonster 5001").replace(
+            b'#description "d"\n', b'#description "d"\n\n\n')
+        self.set_dm(shifted)
+        r2 = self.health(expected_revision=r["revision"])
+        self.assertEqual([f["id"] for f in r2["findings"]], [f["id"] for f in r["findings"]])
+        self.assertNotEqual(r2["revision"], r["revision"])
+        self.assertTrue(r2["stale"] and r2["identity"]["consistent"])
+        self.assertFalse(self.health(expected_revision=r2["revision"])["stale"])
+
+    def test_missing_catalog_makes_references_unverified_not_errors(self) -> None:
+        r = self.health(catalog=None)
+        codes = {(f["code"], f["severity"]) for f in r["findings"]}
+        self.assertIn(("catalog_unavailable", "unverified"), codes)
+        refs = [f for f in r["findings"] if f["category"] == "references"]
+        self.assertTrue(refs)
+        self.assertTrue(all(f["severity"] == "unverified" for f in refs))
+        self.assertEqual(r["catalog"]["state"], "none")
+        self.assertTrue(r["reconciliation"]["complete"])
+        # The missing file is still an error without a catalog.
+        self.assertTrue(any(f["code"].startswith("asset_") and f["severity"] == "error" for f in r["findings"]))
+
+    def test_recruitment_classes_and_unassigned_is_info(self) -> None:
+        r = self.health()
+        classes = {u["id"]: u["classes"] for u in r["recruitment"]["units"]}
+        self.assertEqual(classes, {5000: ["normal"], 5001: ["unassigned"], 5002: ["cap_only"], 5003: ["hero"],
+                                   5004: ["summon"], 5005: ["pretender"]})
+        unassigned = [f for f in r["findings"] if f["code"] == "unassigned_monster"]
+        self.assertEqual([(f["severity"], f["location"]["object"]["key"]) for f in unassigned], [("info", "monster:5001")])
+
+    def test_entry_points_agree(self) -> None:
+        from kosmokrator.cli import main
+        from kosmokrator.core import Kosmokrator
+        cat = str(Path(self._tmp.name) / "cat")
+        k = Kosmokrator(str(self.ws), cat)
+        direct = k.project_health("demo_mod")
+        state = k.author_state("demo_mod", "health")
+        self.assertEqual([f["id"] for f in state["findings"]], [f["id"] for f in direct["findings"]])
+        self.assertEqual(state["revision"], self.health()["revision"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["--workspace", str(self.ws), "--catalog", cat, "health", "demo_mod", "--json"])
+        res = json.loads(out.getvalue())
+        self.assertEqual((code, res["ok"], res["result"]["revision"]), (1, True, direct["revision"]))
 
 
 if __name__ == "__main__":

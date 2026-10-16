@@ -514,6 +514,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, **self._model(slug), "latest_export": self._latest_export(slug)},
                               download=f"{slug}.json" if dl else None)
         head = rest[0]
+        if head == 'health' and len(rest) == 1:
+            from .health import build_health
+            live, live_err = self.state.catalog()
+            cat, _err = self.state.catalog_for(slug)
+            try:
+                cached = self.state.cache.get(ws, slug, cat)
+            except (KosmoError, OSError, ValueError, UnicodeError):
+                cached = None  # build_health reports the read failure as a finding
+            expected = q.get('expected_revision') or None
+            return self._json({'ok': True, 'result': build_health(ws, slug, live, live_err, cached, expected)},
+                              download=f"{slug}-health.json" if dl else None)
         if head == 'map-builds' and len(rest) == 1:
             from .map_builds import map_build_state
             return self._json({'ok':True,'result':map_build_state(ws,slug)})

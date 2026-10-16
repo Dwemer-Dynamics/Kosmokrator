@@ -284,34 +284,37 @@ def _check_asset(project: Project, st: Statement, t: str, a: Arg, rep: Report, f
     problems = mod_relpath_problems(ref)
     if problems:
         for p in problems:
-            rep.add("error", "bad_asset_path", f"{cmd} {ref!r}: {p}", file, st.line, cmd)
+            rep.add("error", "bad_asset_path", f"{cmd} {ref!r}: {p}", file, st.line, cmd, asset=ref)
         return
     if t == "img" and Path(ref).suffix.lower() not in IMAGE_EXT:
-        rep.add("error", "bad_image_type", f"{cmd} {ref!r}: images must be .tga or .png (p.3)", file, st.line, cmd)
+        rep.add("error", "bad_image_type", f"{cmd} {ref!r}: images must be .tga or .png (p.3)", file, st.line, cmd,
+                asset=ref)
     found, why = exact_case_lookup(project.mod_dir, ref)
     if found is None:
         msg = {"missing": "file not found in the mod folder",
                "case_mismatch": "file exists with different letter case; filenames are case sensitive (p.3)",
                "symlink": "path traverses a symlink/junction",
                "not_a_file": "not a regular file"}[why or "missing"]
-        rep.add("error", f"asset_{why}", f"{cmd} {ref!r}: {msg}", file, st.line, cmd)
+        rep.add("error", f"asset_{why}", f"{cmd} {ref!r}: {msg}", file, st.line, cmd, asset=ref)
         return
     used[ref] = found
     if t != "img":
         return
     info = image_info(found)
     for p in info["problems"]:
-        rep.add("error", "bad_image", f"{cmd} {ref!r}: {p}", file, st.line, cmd)
+        rep.add("error", "bad_image", f"{cmd} {ref!r}: {p}", file, st.line, cmd, asset=ref)
     w, h = info.get("width"), info.get("height")
     if w and h and not info["problems"]:
         if st.command in ("flag", "indepflag") and (w, h) != (128, 128):
-            rep.add("error", "flag_size", f"{cmd} image is {w}x{h}; it must be 128x128 (p.43)", file, st.line, cmd)
+            rep.add("error", "flag_size", f"{cmd} image is {w}x{h}; it must be 128x128 (p.43)", file, st.line, cmd,
+                    asset=ref)
         elif st.command == "icon" and (w, h) not in ((128, 32), (256, 64)):
-            rep.add("warning", "icon_size", f"#icon is {w}x{h}; manual suggests 128x32 or 256x64", file, st.line, cmd)
+            rep.add("warning", "icon_size", f"#icon is {w}x{h}; manual suggests 128x32 or 256x64", file, st.line, cmd,
+                    asset=ref)
         elif st.command.startswith(("spr", "xspr", "unmountedspr")) and (w not in (8, 16, 32, 64, 128) or
                                                                          h not in (8, 16, 32, 64, 128)):
             rep.add("warning", "sprite_size", f"{cmd} is {w}x{h}; manual suggests 8/16/32/64/128 px", file,
-                    st.line, cmd)
+                    st.line, cmd, asset=ref)
 
 
 def _scan_mod_dir(project: Project, rep: Report) -> list[str]:
@@ -397,16 +400,18 @@ def validate_project(workspace: Path, slug: str, catalog: Catalog | None = None,
         if key in seen and (d["new"] or kind == "nation"):
             sev = "error" if d["new"] else "warning"
             rep.add(sev, "duplicate_definition", f"{kind} {ident} also defined/selected at line {seen[key]}",
-                    dm_rel, line)
+                    dm_rel, line, object_kind=kind, object_id=ident)
         seen.setdefault(key, line)
         dep_hit = [lbl for lbl, dd in dep_defs if dd["kind"] == kind and dd["id"] == ident]
         if dep_hit:
             rep.add("error" if d["new"] else "warning", "dependency_conflict",
-                    f"{kind} {ident} is also defined/selected in {dep_hit[0]}", dm_rel, line)
+                    f"{kind} {ident} is also defined/selected in {dep_hit[0]}", dm_rel, line,
+                    object_kind=kind, object_id=ident)
         cat_name = ID_KINDS.get(kind, {}).get("catalog")
         in_catalog = bool(catalog and cat_name and ident in catalog.ids(cat_name))
         if d["new"] and in_catalog:
-            rep.add("error", "id_in_use", f"New {kind} {ident} collides with an existing catalog object", dm_rel, line)
+            rep.add("error", "id_in_use", f"New {kind} {ident} collides with an existing catalog object", dm_rel, line,
+                    object_kind=kind, object_id=ident)
         if kind == "monster" and d["new"] and 9000 <= ident <= 19999:
             rep.add("warning", "id_range", f"Monster {ident} is outside 5000-8999 given in #newmonster (p.13), "
                     "though inside the 0-19999 limit table (p.64)", dm_rel, line)
@@ -436,11 +441,13 @@ def validate_project(workspace: Path, slug: str, catalog: Catalog | None = None,
         status, detail = index.resolve(t, a)
         cmd = f"#{st.command}"
         if status == "missing":
-            rep.add("error", "unresolved_reference", f"{cmd} {a.raw}: {detail}", dm_rel, st.line, cmd)
+            rep.add("error", "unresolved_reference", f"{cmd} {a.raw}: {detail}", dm_rel, st.line, cmd, argument=a.value)
         elif status == "ambiguous":
-            rep.add("warning", "ambiguous_reference", f"{cmd} {a.raw}: {detail}; prefer a number", dm_rel, st.line, cmd)
+            rep.add("warning", "ambiguous_reference", f"{cmd} {a.raw}: {detail}; prefer a number", dm_rel, st.line, cmd,
+                    argument=a.value)
         elif status == "unverified":
-            rep.add("unverified", "unverified_reference", f"{cmd} {a.raw}: {detail}", dm_rel, st.line, cmd)
+            rep.add("unverified", "unverified_reference", f"{cmd} {a.raw}: {detail}", dm_rel, st.line, cmd,
+                    argument=a.value)
 
     # Assets.
     used_assets: dict[str, Path] = {}
@@ -449,7 +456,7 @@ def validate_project(workspace: Path, slug: str, catalog: Catalog | None = None,
     for f in files:
         if f != f"{slug}.dm" and f not in used_assets and not f.endswith(".dm"):
             rep.add("warning", "unreferenced_file", f"{f} is not referenced by the .dm and will not be exported",
-                    dm_rel)
+                    dm_rel, asset=f)
 
     errors, warnings, unverified = rep.of("error"), rep.of("warning"), rep.of("unverified")
     return {

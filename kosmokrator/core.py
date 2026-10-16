@@ -82,6 +82,19 @@ class Kosmokrator:
     def validate_mod(self, project: str, dependencies: list[str] | None = None) -> dict[str, Any]:
         return validate_project(self.ws, project, self._project_catalog(project), dependencies)
 
+    def project_health(self, project: str, expected_revision: str | None = None) -> dict[str, Any]:
+        """Prioritized findings from validation, assets, references, recruitment, compatibility and catalog state
+        for one captured revision. expected_revision reports whether a previously read result is stale."""
+        from .catalog import resolve_catalog_path
+        from .health import build_health
+        live, live_error = None, None
+        if resolve_catalog_path(self.catalog_arg) is not None:
+            try:
+                live = load_catalog(self.catalog_arg, required=True)
+            except KosmoError as exc:
+                live_error = exc.to_dict()
+        return build_health(self.ws, project, live, live_error, expected_revision=expected_revision)
+
     def export_mod(self, project: str, dest: str | None = None, format: str = "zip",
                    dependencies: list[str] | None = None) -> dict[str, Any]:
         return _export(self.ws, project, dest, format, self._project_catalog(project), dependencies)
@@ -94,6 +107,8 @@ class Kosmokrator:
     def author_state(self, project: str, kind: str) -> dict[str, Any]:
         """Read reviewed authoring state, including commands, dependencies and map bundles."""
         from . import content, playtest
+        if kind == 'health':
+            return self.project_health(project)
         if kind == 'reference-snapshot':
             from .browse import build_project_model
             from .reference import reference_status

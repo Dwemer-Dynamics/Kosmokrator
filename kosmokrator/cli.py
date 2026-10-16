@@ -83,6 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("project")
     p.add_argument("--dep", action="append", default=[])
 
+    p = sub.add_parser("health", parents=[common], help="Prioritized project findings for one captured revision "
+                                                        "(static; exit 1 when errors block export)")
+    p.add_argument("project")
+    p.add_argument("--expected-revision", help="Report whether a previously read health revision is stale")
+
     p = sub.add_parser("export", parents=[common], help="Export an error-free project to a new zip/folder")
     p.add_argument("project")
     p.add_argument("--dest", help="New path inside the workspace (default: <project>/exports/...)")
@@ -104,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("author", parents=[common], help="Show or preview/save sites, spells, weapons, armour, "
                                                         "nation heroes or playtest records")
     p.add_argument("project")
-    p.add_argument("kind", help="sites | spells | weapons | armors | heroes:<nation id> | playtests | commands:<context> | dependencies | inheritance | compatibility | balance[:nation IDs] | map-builds | maps | maps:<id> | maps:import | reference-snapshot")
+    p.add_argument("kind", help="sites | spells | weapons | armors | heroes:<nation id> | playtests | commands:<context> | dependencies | inheritance | compatibility | health | balance[:nation IDs] | map-builds | maps | maps:<id> | maps:import | reference-snapshot")
     p.add_argument("--body-file", help="JSON request (as for the web route; '-' for stdin). Omit to show state")
 
     p = sub.add_parser('import-map', parents=[common], help='Import a map bundle into an existing project')
@@ -193,6 +198,24 @@ def _human(cmd: str, res: dict[str, Any]) -> str:
             e = r["export"]
             out.append(f"Export: {e.get('destination') or e}")
         return "\n".join(out)
+    if cmd == "health":
+        c = r["counts"]
+        out = [f"{r['project']}: {r['status'].upper()}  errors={c['error']} warnings={c['warning']} "
+               f"unverified={c['unverified']} info={c['info']}",
+               f"revision {r['revision']}" + ("  (STALE: differs from --expected-revision)" if r["stale"] else ""),
+               f"catalog: {r['catalog']['state']}"]
+        for f in r["findings"]:
+            if f["severity"] == "info":
+                continue
+            loc = f["location"]
+            where = loc["asset"] or (loc["object"] or {}).get("key") or ""
+            out.append(f"  {f['severity']:10} L{loc['line'] or '-'}: [{f['code']}] {f['message']}"
+                       + (f" ({f['count']}x)" if f["count"] > 1 else "") + (f"  {where}" if where else ""))
+            out.append(f"             next: {f['next_action']}")
+        if c["info"]:
+            out.append(f"  ({c['info']} info items; use --json to list)")
+        out.append("Not checked: " + ", ".join(x["check"] for x in r["scope"]["not_checked"]))
+        return "\n".join(out)
     if cmd == "export":
         files = "\n".join(f"  {f['sha256']}  {f['path']}" for f in r["manifest"]["files"])
         return f"Exported to {r['destination']}\nmanifest {r['manifest_path']}\n{files}"
@@ -232,6 +255,8 @@ def main(argv: list[str] | None = None) -> int:
             res = envelope(k.search_game_data, args.query, args.category, args.limit, args.project)
         elif c == "validate":
             res = envelope(k.validate_mod, args.project, args.dep)
+        elif c == "health":
+            res = envelope(k.project_health, args.project, args.expected_revision)
         elif c == "export":
             res = envelope(k.export_mod, args.project, args.dest, args.format, args.dep)
         elif c == "import-dm":
@@ -289,7 +314,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {key}: {val}", file=sys.stderr)
     if not res["ok"]:
         return 2
-    if c == "validate" and not res["result"]["ok"]:
+    if c in ("validate", "health") and not res["result"]["ok"]:
         return 1
     if c == "demo" and not res["result"]["validation"]["ok"]:
         return 1

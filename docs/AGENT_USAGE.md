@@ -48,7 +48,9 @@ overrides. Editing these docs locally does not update a published release ZIP.
 
 Read-only `author_state` kinds now include `inheritance`, `compatibility`, `balance`
 and `balance:<nation IDs separated by commas>`. These return source-backed reports;
-they do not change the mod or simulate combat. See [inheritance](INHERITANCE.md),
+they do not change the mod or simulate combat. Kind `health` (CLI `health`) returns one prioritized, deduplicated
+finding list with stable ids, locations, evidence, next actions, recruitment classes, scope and caveats for a
+captured revision; read its `not_checked` scope before reporting a project as healthy. See [inheritance](INHERITANCE.md),
 [compatibility](COMPATIBILITY.md) and [comparisons](BALANCE-COMPARISONS.md).
 Kind `mercs` lists and appends optional `#newmerc` companies with structured, manual-documented fields; see
 [mercenary companies](WEB-BROWSER.md#mercenary-companies) and the optional-merc rule in

@@ -817,16 +817,22 @@ def _sprite_status(u: dict[str, Any], files: set[str], catalog_ids: set[int], pr
     return {**base, "status": status, "source": source, "missing": [], "overwritten": overwritten}
 
 
+def sprite_statuses(monsters: list[dict[str, Any]], assets: list[dict[str, Any]],
+                    catalog: Catalog | None) -> list[dict[str, Any]]:
+    """Every monster's sprite status (uncapped), in model order; see _sprite_status."""
+    files = {a["path"] for a in assets if "bytes" in a}
+    catalog_ids = {i for i in (_int(k) for k in _cat_rows(catalog, "units")) if i is not None}
+    project_ids = {u["id"] for u in monsters if u["new"] and u["id"] is not None}
+    return [_sprite_status(u, files, catalog_ids, project_ids) for u in monsters]
+
+
 def build_readiness(monsters: list[dict[str, Any]], assets: list[dict[str, Any]],
                     validation: dict[str, Any] | None, catalog: Catalog | None) -> dict[str, Any]:
     """Project readiness from the parsed mod and the current mod folder (no fixed demo numbers).
 
     Shared sprites (one file or identical bytes used by several monsters) and vanilla sprites are informational;
     only referenced-but-absent files, monsters with no sprite source and validation errors need attention."""
-    files = {a["path"] for a in assets if "bytes" in a}
-    catalog_ids = {i for i in (_int(k) for k in _cat_rows(catalog, "units")) if i is not None}
-    project_ids = {u["id"] for u in monsters if u["new"] and u["id"] is not None}
-    sprites = [_sprite_status(u, files, catalog_ids, project_ids) for u in monsters]
+    sprites = sprite_statuses(monsters, assets, catalog)
     by_status: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
     for s in sprites:
         by_status[s["status"]].append(s)
