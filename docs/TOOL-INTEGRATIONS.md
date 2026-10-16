@@ -66,7 +66,7 @@ python -m kosmokrator tools receipt --run-id RUN_ID
 python -m kosmokrator import-dm output/example.dm --slug imported-example --preview
 ```
 
-Domerger options: `{"projects":["hebdomad"]}`. The run hash must come from the current preview.
+Domerger options: `{"projects":["sample_mod"]}`. The run hash must come from the current preview.
 MCP exposes `external_tools`, `preview_external_tool`, `run_external_tool` and `external_tool_runs`.
 HTTP routes are listed in [WEB-BROWSER.md](WEB-BROWSER.md).
 

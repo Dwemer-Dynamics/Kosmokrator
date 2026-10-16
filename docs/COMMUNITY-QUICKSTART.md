@@ -144,17 +144,16 @@ The community dataset can differ from your installed game. The current default
 project target is 6.37; this is not a game-compatibility guarantee. Native trait
 icons are optional too; see [TRAIT-ICONS.md](TRAIT-ICONS.md).
 
-## Optional: explore a supplied starter
+## Optional: explore the sample demo
 
-This builds the lightweight Hebdomad starter in a new project:
+This builds a small generic sample nation in a new project:
 
 ```powershell
-py -3 -m kosmokrator demo --workspace work --slug starter
+py -3 -m kosmokrator demo --workspace work
 ```
 
-It contains 11 roster units and two original pretenders. It does not reproduce the
-expanded local showcase or SevenRealms map. Those are separate projects, excluded
-from the source download and wheel. The starter is game-untested.
+It contains two units, one site and one nation, and is a tooling fixture only.
+It is game-untested.
 
 Read [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for ownership and redistribution scope.
 For a bug report, include the tool/Python version, exact command or browser action,

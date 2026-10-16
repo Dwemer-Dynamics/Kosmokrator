@@ -71,10 +71,10 @@ The existing `author_state` / `author_save` MCP tools accept `commands:<context>
 `project_view` returns the same sheets, graph and compatibility report as the browser.
 
 ```powershell
-kosmokrator author hebdomad commands:item --workspace .local/projects --json
-kosmokrator author hebdomad commands:event --workspace .local/projects --body-file request.json --json
-kosmokrator author hebdomad dependencies --workspace .local/projects --json
-kosmokrator view hebdomad --workspace .local/projects --catalog .local/references/dom6inspector --json
+kosmokrator author sample_mod commands:item --workspace .local/projects --json
+kosmokrator author sample_mod commands:event --workspace .local/projects --body-file request.json --json
+kosmokrator author sample_mod dependencies --workspace .local/projects --json
+kosmokrator view sample_mod --workspace .local/projects --catalog .local/references/dom6inspector --json
 ```
 
 Command request shape:

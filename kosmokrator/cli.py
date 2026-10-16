@@ -94,8 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--format", choices=["zip", "folder"], default="zip")
     p.add_argument("--dep", action="append", default=[])
 
-    p = sub.add_parser("demo", parents=[common], help="Build the Hebdomad demo project via the core operations")
-    p.add_argument("--slug", default="hebdomad")
+    p = sub.add_parser("demo", parents=[common], help="Build the generic sample demo project via the core operations")
+    p.add_argument("--slug", default="sample_mod")
     p.add_argument("--export", choices=["zip", "folder"])
     p.add_argument("--export-dest")
 

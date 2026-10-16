@@ -16,15 +16,11 @@ def main() -> None:
     files = [root / n for n in ("README.md", "AGENTS.md", "pyproject.toml", ".gitignore", "start.ps1")]
     for folder, patterns in {
         "kosmokrator": ("*.py",), "kosmokrator/web": ("*.html", "*.js", "*.css", "*.svg"),
-        "kosmokrator/demo_assets": ("*.tga",), "kosmokrator/demo_assets/pretenders": ("*.png",),
         "docs": ("*.md",), "examples": ("*.json", "*.toml"), "tests": ("*.py",),
     }.items():
         for pattern in patterns:
             files.extend((root / folder).glob(pattern))
-    files.append(root / "docs/images/get-started.png")
     files.append(Path(__file__).resolve())
-    # Existing packaged-art regression checks compare these independent source checksums.
-    files.append(root / "assets/hebdomad-pretenders/asset-manifest.json")
     files.extend(p for p in (root / "LICENSE", root / "NOTICE") if p.is_file())
     payload: dict[str, bytes] = {}
     for path in sorted(set(files)):
@@ -43,7 +39,7 @@ def main() -> None:
         + ("Source license undecided.\n" if pending else "Original source code: GPL-3.0-only. See LICENSE and third-party notices for scope.\n")
         + "Source licensing does not settle original-art or third-party resource terms.\n"
         + "Static tooling checks do not establish game loading, gameplay or balance.\n"
-        + "Local projects, expanded showcase art/maps, extracted game icons and catalogs are excluded.\n"
+        + "Local projects and their art/maps, extracted game icons and catalogs are excluded.\n"
     ).encode()
     manifest = {"schema": 1, "license_pending": pending,
                 "source_license": None if pending else "GPL-3.0-only",

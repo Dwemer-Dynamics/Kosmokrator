@@ -79,12 +79,12 @@ availability and reason.
 The same operations are available to Claude/Codex through MCP and the CLI:
 
 ```powershell
-kosmokrator import-map hebdomad C:/Maps/SevenRealms/SevenRealms.map --workspace .local/projects --json
-kosmokrator import-map hebdomad C:/Maps/SevenRealms/SevenRealms.map --workspace .local/projects --save --json
-kosmokrator author hebdomad maps --workspace .local/projects --json
-kosmokrator author hebdomad maps:SevenRealms --workspace .local/projects --json
-kosmokrator author hebdomad maps:SevenRealms --workspace .local/projects --body-file map-edit.json --json
-kosmokrator export-map hebdomad SevenRealms --workspace .local/projects --expected-revision <revision> --json
+kosmokrator import-map sample_mod C:/Maps/ExampleMap/ExampleMap.map --workspace .local/projects --json
+kosmokrator import-map sample_mod C:/Maps/ExampleMap/ExampleMap.map --workspace .local/projects --save --json
+kosmokrator author sample_mod maps --workspace .local/projects --json
+kosmokrator author sample_mod maps:ExampleMap --workspace .local/projects --json
+kosmokrator author sample_mod maps:ExampleMap --workspace .local/projects --body-file map-edit.json --json
+kosmokrator export-map sample_mod ExampleMap --workspace .local/projects --expected-revision <revision> --json
 ```
 
 MCP: `import_map`, `export_map`, `author_state(kind="maps" | "maps:<id>")`,

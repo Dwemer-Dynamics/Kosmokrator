@@ -99,7 +99,7 @@ class Kosmokrator:
                    dependencies: list[str] | None = None) -> dict[str, Any]:
         return _export(self.ws, project, dest, format, self._project_catalog(project), dependencies)
 
-    def build_demo(self, slug: str = "hebdomad", export: str | None = None,
+    def build_demo(self, slug: str = "sample_mod", export: str | None = None,
                    export_dest: str | None = None) -> dict[str, Any]:
         return build_demo(self.ws, slug, self._catalog(), export, export_dest)
 

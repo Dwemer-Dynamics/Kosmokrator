@@ -1,4 +1,4 @@
-"""Tiny stdlib TGA writer used for the demo's original flag."""
+"""Tiny stdlib TGA writer used for generated flags and banners."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def encode_tga(width: int, height: int, pixels: list[list[RGBA]]) -> bytes:
     return header + bytes(body)
 
 
-def nation_flag(seed: str = "Hebdomad", colour: tuple[int, int, int] | None = None,
+def nation_flag(seed: str = "sample_mod", colour: tuple[int, int, int] | None = None,
                 finial: str | None = None) -> bytes:
     """Original Dom6-style standard: plain folded cloth and a distinct metal finial above its crossbar."""
     import hashlib
@@ -71,11 +71,6 @@ def nation_flag(seed: str = "Hebdomad", colour: tuple[int, int, int] | None = No
                     c = (227, 121, 35) if dx < 1 else (143, 61, 21)
                 px[y][x] = c + (255,)
     return encode_tga(128, 128, px)
-
-
-def hebdomad_flag() -> bytes:
-    """Fire/earth standard with a seven-rayed bronze seal enclosing a small flame."""
-    return nation_flag("Hebdomad", (142, 48, 31), "seal")
 
 
 def default_mod_banner() -> bytes:

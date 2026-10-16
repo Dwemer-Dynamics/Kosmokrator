@@ -23,9 +23,9 @@ re-serialises it.
 | `catalog.py` | Lazy offline catalog loading, delimiter/encoding detection, git metadata from `.git`, capped search |
 | `project.py` | Create, inspect, guarded patch (sha256, single edit, backup, diff, lock), id allocation |
 | `validate.py` | Syntax, context, ranges, ordering rules, duplicates/ids, references, assets |
-| `images.py`, `tga.py` | PNG/TGA header checks and the demo's stdlib flag writer |
+| `images.py`, `tga.py` | PNG/TGA header checks and the stdlib flag/banner writer |
 | `export.py` | Error-free export (zip or folder) plus a sha256 manifest beside the mod folder |
-| `demo.py` | Hebdomad build through the core operations |
+| `demo.py` | Generic sample build through the core operations |
 | `cli.py`, `mcp_server.py` | Front ends |
 
 ## Key decisions

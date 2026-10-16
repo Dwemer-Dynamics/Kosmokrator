@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kosmokrator"
-version = "0.5.3"
+version = "0.6.0"
 description = "Local, static authoring/validation/export tooling for Dominions 6 mod (.dm) projects, with an optional MCP server."
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -27,4 +27,4 @@ kosmokrator-mcp = "kosmokrator.mcp_server:main"
 packages = ["kosmokrator"]
 
 [tool.setuptools.package-data]
-kosmokrator = ["web/*.html", "web/*.css", "web/*.js", "web/*.svg", "demo_assets/pretenders/*.png", "demo_assets/*.tga"]
+kosmokrator = ["web/*.html", "web/*.css", "web/*.js", "web/*.svg"]

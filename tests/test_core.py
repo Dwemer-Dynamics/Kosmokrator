@@ -443,24 +443,22 @@ class TgaTests(unittest.TestCase):
 
 
 class DemoTests(unittest.TestCase):
-    def test_demo_ships_packaged_pretender_frames(self) -> None:
-        import json
+    def test_generic_demo_builds_validates_and_exports(self) -> None:
         from kosmokrator import demo
-        repo = Path(__file__).resolve().parents[1]
-        manifest = json.loads((repo / "assets" / "hebdomad-pretenders" / "asset-manifest.json").read_text("utf-8"))
-        expected = {Path(f["file"]).name: f["sha256"] for u in manifest["units"] for f in u["frames"].values()}
-        self.assertEqual(sorted(p.name for p in demo.PRETENDER_ART_DIR.iterdir()), sorted(expected))
         with tempfile.TemporaryDirectory() as d:
             ws = Path(d).resolve()
-            demo.build_demo(ws)
-            mod = ws / "hebdomad" / "mod" / "hebdomad"
-            for name, digest in expected.items():
-                self.assertEqual(sha((mod / "art" / "pretenders" / name).read_bytes()), digest)
-            text = (mod / "hebdomad.dm").read_text("utf-8")
-        self.assertEqual(text.count("#copyspr"), 11)
-        self.assertEqual(text.count('#spr1 "art/pretenders/'), 2)
-        demiurge = text.split("#newmonster 5011", 1)[1].split("#end", 1)[0]
-        self.assertIn("#clearweapons\n#weapon 11\n#cleararmor\n#armor 100\n", demiurge)
+            res = demo.build_demo(ws, export="zip", export_dest="sample.zip")
+            self.assertEqual(res["project"], "sample_mod")
+            self.assertTrue(res["validation"]["ok"])
+            self.assertEqual(sorted(res["ids"]), ["COMMANDER", "NATION", "SITE", "TROOP"])
+            mod = ws / "sample_mod" / "mod" / "sample_mod"
+            text = (mod / "sample_mod.dm").read_text("utf-8")
+            self.assertEqual(text.count("#copyspr"), 2)
+            self.assertIn('#flag "art/sample_flag.tga"', text)
+            with zipfile.ZipFile(ws / "sample.zip") as zf:
+                self.assertEqual(sorted(zf.namelist()), ["sample_mod/art/sample_flag.tga",
+                                                         "sample_mod/mod_banner.tga", "sample_mod/sample_mod.dm"])
+                self.assertEqual(zf.read("sample_mod/sample_mod.dm"), (mod / "sample_mod.dm").read_bytes())
 
 
 def rgba_png(w: int, h: int, alpha: int = 255, filt: int = 0) -> bytes:

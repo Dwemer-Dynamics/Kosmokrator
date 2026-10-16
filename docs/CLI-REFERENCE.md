@@ -41,10 +41,8 @@ local only and is never written into exports. See [WEB-BROWSER.md](WEB-BROWSER.m
 
 ## Starter demo
 
-`demo` creates the lightweight starter nation (13 definitions, including two pretenders).
-The expanded local Hebdomad showcase has 21 definitions and a separate SevenRealms map;
-it is not reconstructed by this command or included in the Python wheel. Neither demo is
-game-verified. A wheel installation includes web resources; the repository's `docs/` directory
+`demo` creates a small generic sample nation (4 definitions) in `sample_mod`. It is a
+tooling fixture and is not game-verified. A wheel installation includes web resources; the repository's `docs/` directory
 is optional source-checkout content supplied with `serve --docs`.
 
 For optional coordinated project work, see [Agent team workflow](AGENT-TEAM.md).
@@ -54,13 +52,13 @@ See [Community preview readiness](COMMUNITY-READINESS.md) for current evidence a
 mkdir work
 $K = ".venv\Scripts\kosmokrator.exe"            # or: .venv\Scripts\python.exe -m kosmokrator
 
-& $K demo --workspace work                      # builds work\hebdomad via the core operations
-& $K validate hebdomad --workspace work         # exit 0 clean, 1 errors, 2 operation error
-& $K export hebdomad --workspace work           # -> work\hebdomad\exports\hebdomad-<utc>.zip + .manifest.json
-& $K export hebdomad --workspace work --format folder --dest hebdomad_out
+& $K demo --workspace work                      # builds work\sample_mod via the core operations
+& $K validate sample_mod --workspace work       # exit 0 clean, 1 errors, 2 operation error
+& $K export sample_mod --workspace work         # -> work\sample_mod\exports\sample_mod-<utc>.zip + .manifest.json
+& $K export sample_mod --workspace work --format folder --dest sample_mod_out
 ```
 
-To try the demo in game, copy the exported `hebdomad` folder (which holds `hebdomad.dm` and `art/`) into
+To try the demo in game, copy the exported `sample_mod` folder (which holds `sample_mod.dm` and `art/`) into
 your Dominions 6 user-data `mods` folder (*Game Tools > Open User Data Directory*, usually
 `%APPDATA%\Dominions6\mods`). Then enable the mod and start an **Early Age** game. Kosmokrator never
 copies files into the game folder itself.
@@ -78,7 +76,7 @@ copies files into the game folder itself.
 | `validate PROJECT [--dep]` | `validate_mod` | Errors, warnings and unverified items, each with file and line |
 | `health PROJECT [--expected-revision]` | `author_state` kind `health` | One prioritized, deduplicated finding list (error, warning, unverified, info) for a captured revision; exit 1 when errors block export |
 | `export PROJECT [--dest] [--format zip\|folder]` | `export_mod` | Error-free export with a sha256 manifest; never overwrites |
-| `demo [--export zip\|folder]` | (CLI only) | Builds the Hebdomad demo |
+| `demo [--export zip\|folder]` | (CLI only) | Builds the generic sample demo |
 | `author PROJECT KIND [--body-file JSON]` | `author_state`, `author_save` | State or preview/save sites, spells, weapons, armors, heroes:N, equipment:N, playtests, reference-snapshot |
 | `author PROJECT remap [--body-file JSON]` | `author_state` / `author_save` kind `remap` | Reviewed ID remap: list owned numbered definitions, other users of each ID and free IDs; preview `{"mapping": [{"kind", "old", "new"}], "expected_revision"}` (writes nothing); apply the same mapping with `"preview": false`, `expected_revision`, `expected_occupancy`, `plan_hash` and `confirm` |
 | `author PROJECT revisions [--body-file JSON]` | `author_state` kinds `revisions`, `revisions:<checkpoint id>`, `revisions:baseline`; `author_save` kind `revisions` | Local checkpoints: list, compare with the current files, create (`{"action": "checkpoint"}`), mark a review baseline (`reviewer_kind` human or agent, required), preview/apply a restore (`plan_hash`, `expected_revision`, `confirm`) and recover an interrupted restore |

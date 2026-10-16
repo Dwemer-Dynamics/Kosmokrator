@@ -33,10 +33,6 @@ See the [first-project guide](docs/COMMUNITY-QUICKSTART.md) for other ports and 
 Python troubleshooting, optional reference data and MCP setup. Non-Windows setup
 instructions are included, but have not been verified on a real non-Windows system.
 
-![Kosmokrator unit browser showing the Cairnmark roster and Yew Bowman](docs/images/get-started.png)
-
-*Example workspace with optional reference data connected. Your project list will differ.*
-
 ## What you can make
 
 - **Nations:** recruitment rosters, commanders, pretender gods, magic access,
@@ -59,8 +55,8 @@ Use these as starting briefs, then adjust the fields in the browser.
 
 **Nation**
 
-> An Early Age Fire/Earth nation inspired by Gnostic mythology. Armoured mortal
-> soldiers serve jealous archons. Give it strong forging and durable troops,
+> An Early Age Fire/Earth nation of mountain smiths. Armoured mortal soldiers
+> serve a council of forge-priests. Give it strong forging and durable troops,
 > balanced by expensive mages, slow armies and clear counters. Create original
 > sprites, a flag and a banner.
 
@@ -75,6 +71,12 @@ Use these as starting briefs, then adjust the fields in the browser.
 Edits use revisions, previews and backups. Exports go to new destinations.
 Regular exports do not install themselves. Optional guarded local installation is
 available through the [Workshop workflow](docs/WORKSHOP.md); publication is manual.
+
+**Build > Health** collects validation and readiness findings in one prioritized list.
+**Build > Changes** keeps local checkpoints, compares them with the current files and
+offers a guarded restore. Before installation, a compatibility preflight checks the export
+against installed mods; **Remap IDs** applies a reviewed ID change when a conflict is found.
+See the [browser guide](docs/WEB-BROWSER.md) for details.
 
 Validation checks files and supported rules. It does **not** prove that a mod
 loads, plays correctly or is balanced. Test exports in Dominions 6 separately.
@@ -100,5 +102,5 @@ Original source code: **GPL-3.0-only**. See [LICENSE](LICENSE) and
 
 Kosmokrator is an independent tool. Dominions 6, its manuals and stock art belong
 to Illwinter Game Design. Game binaries, manual PDFs, extracted game icons and the
-reference catalog are not bundled. The lightweight starter references vanilla
-roster sprites by ID and includes original pretender artwork.
+reference catalog are not bundled. The generic sample demo references vanilla
+sprites by ID and generates its own flag and banner.
