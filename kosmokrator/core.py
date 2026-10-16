@@ -116,6 +116,10 @@ class Kosmokrator:
         if kind == 'revisions' or kind.startswith('revisions:'):
             from .revisions import revisions_state
             return revisions_state(self.ws, project, kind)
+        if kind == 'remap':
+            from .remap import remap_state
+            from .workshop import mods_dir_config
+            return remap_state(self.ws, project, self._project_catalog(project), mods_dir_config())
         if kind == 'reference-snapshot':
             from .browse import build_project_model
             from .reference import reference_status
@@ -163,6 +167,10 @@ class Kosmokrator:
         if kind == 'revisions':
             from .revisions import save_revisions
             return save_revisions(self.ws, project, body, self._project_catalog(project))
+        if kind == 'remap':
+            from .remap import save_remap
+            from .workshop import mods_dir_config
+            return save_remap(self.ws, project, body, self._project_catalog(project), mods_dir_config())
         if kind == 'reference-snapshot':
             from .reference import create_snapshot
             return create_snapshot(self.ws, project, self._catalog(required=True), body)

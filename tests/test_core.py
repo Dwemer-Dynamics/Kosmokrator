@@ -1803,5 +1803,205 @@ class RevisionTests(Base):
             server.server_close()
 
 
+class RemapTests(Base):
+    """Reviewed ID remapping: typed references only, byte-preserving, previewed plan only, guarded and recoverable."""
+
+    DM = ('#modname "Remap"\r\n-- unit 5000 and nation 150 notes stay\r\n'
+          '#newmonster 5000\r\n#name "Unit Alpha"\r\n#descr "Lore: 5000 years, nation 150."\r\n#hp 1700\r\n'
+          '#armor 1700\r\n#end\r\n'
+          '#newmonster 5001\r\n#copystats 5000\r\n#name "Unit Beta"\r\n#firstshape 5000\r\n#secondshape -5000\r\n#end\r\n'
+          '#newsite 1700\r\n#name "Site Alpha"\r\n#homemon 5000\r\n#homecom "Unit Alpha"\r\n#end\r\n'
+          '#selectnation 150\r\n#name "Nation Alpha"\r\n#addrecunit 5000\r\n#addreccom "Unit Alpha"\r\n'
+          '#startsite "Site Alpha"\r\n#end\r\n'
+          '#newspell\r\n#copyspell 1\r\n#name "Call Alpha"\r\n#damage 5000\r\n#restricted 150\r\n#end\r\n'
+          '#newspell\r\n#copyspell "Fire Bolt"\r\n#name "Bolt 5000"\r\n#damage 5000\r\n#restricted 150\r\n#end\r\n')
+    MAP = b'#dom2title Alpha\r\n#allowedplayer 150\r\n#pb 150 3 150 1\r\n#landname 150 "Vale 150"\r\n'
+    MAPPING = [{"kind": "monster", "old": 5000, "new": 5002}, {"kind": "site", "old": 1700, "new": 1701},
+               {"kind": "nation", "old": 150, "new": 151}]
+
+    def setUp(self) -> None:
+        super().setUp()
+        from kosmokrator.workshop import mods_dir_config
+        root = write_catalog(Path(self._tmp.name) / "cat_fx")
+        (root / "gamedata" / "spells.csv").write_text("id\tname\teffect_record_id\n1\tSummon Beast\t11\n"
+                                                      "2\tFire Bolt\t12\n", encoding="utf-8")
+        (root / "gamedata" / "effects_spells.csv").write_text("record_id\teffect_number\traw_argument\tritual\n"
+                                                              "11\t1\t199\t0\n12\t2\t10\t0\n", encoding="utf-8")
+        self.catalog = load_catalog(root)
+        self.root = self.ws / "demo_mod"
+        self.mods = Path(self._tmp.name) / "mods"
+        (self.mods / "other").mkdir(parents=True)
+        (self.mods / "other" / "other.dm").write_bytes(b'#newmonster 5000\n#name "X"\n#end\n#selectnation 150\n#end\n')
+        self.config = mods_dir_config({"KOSMOKRATOR_DOMINIONS_MODS": str(self.mods)})
+        self.set_dm(self.DM.encode("latin-1"))
+        (self.root / "maps" / "alpha").mkdir(parents=True)
+        (self.root / "maps" / "alpha" / "alpha.map").write_bytes(self.MAP)
+        meta = json.loads((self.root / "kosmokrator.json").read_text(encoding="utf-8"))
+        meta["reservations"] = {"monster": [{"id": 5000, "label": "old", "reserved_utc": "x"}]}
+        (self.root / "kosmokrator.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+
+    def plan(self, mapping: list) -> dict:
+        from kosmokrator.remap import save_remap
+        return save_remap(self.ws, "demo_mod", {"mapping": mapping}, self.catalog, self.config)
+
+    def apply(self, p: dict, **override) -> dict:
+        from kosmokrator.remap import save_remap
+        body = {"mapping": p["mapping"], "preview": False, "expected_revision": p["current_revision"],
+                "expected_occupancy": p["occupancy_fingerprint"], "plan_hash": p["plan_hash"], "confirm": True}
+        return save_remap(self.ws, "demo_mod", {**body, **override}, self.catalog, self.config)
+
+    def code(self, call) -> str:
+        with self.assertRaises(KosmoError) as ctx:
+            call()
+        return ctx.exception.code
+
+    def tree(self) -> dict[str, bytes]:
+        return {p.relative_to(self.root).as_posix(): p.read_bytes() for p in sorted(self.root.rglob("*")) if p.is_file()}
+
+    def test_typed_units_sites_nations_shapes_summons_and_bytes_preserved(self) -> None:
+        from kosmokrator.remap import remap_state
+        from kosmokrator.revisions import revision_state
+        st = remap_state(self.ws, "demo_mod", self.catalog, self.config)
+        owned = {(d["kind"], d["id"]): d for d in st["definitions"]}
+        self.assertTrue(owned[("monster", 5000)]["eligible"] and owned[("nation", 150)]["eligible"])
+        self.assertEqual(owned[("monster", 5000)]["also_used_by"], ["installed:other/other.dm"])
+        self.assertNotIn(5000, [s["id"] for s in st["suggestions"]["monster"]])
+        before = self.tree()
+        p = self.plan(self.MAPPING)
+        self.assertEqual(self.tree(), before)  # preview writes and reserves nothing
+        self.assertTrue(p["can_apply"], p["blocked_reasons"])
+        got = sorted((e["command"], e["relation"], e["old_raw"], e["new_raw"]) for e in p["edits"])
+        self.assertEqual(got, sorted([
+            ("#newmonster", "definition", "5000", "5002"), ("#copystats", "reference", "5000", "5002"),
+            ("#firstshape", "reference", "5000", "5002"), ("#newsite", "definition", "1700", "1701"),
+            ("#homemon", "reference", "5000", "5002"), ("#selectnation", "selector", "150", "151"),
+            ("#addrecunit", "reference", "5000", "5002"), ("#damage", "summon", "5000", "5002"),
+            ("#restricted", "reference", "150", "151"), ("#restricted", "reference", "150", "151"),
+            ("#allowedplayer", "reference", "150", "151")]))
+        self.assertEqual(p["preserved"]["spell_damage_not_summon"], 1)  # catalog template is not a summon
+        self.assertGreaterEqual(p["preserved"]["other_namespace"], 1)  # #armor 1700 is not site 1700
+        self.assertEqual({c["code"] for c in p["manual_findings"]}, {"external_old_id"})
+        r = self.apply(p)
+        self.assertTrue(r["verified"])
+        want = (self.DM.replace("#newmonster 5000", "#newmonster 5002").replace("#copystats 5000", "#copystats 5002")
+                .replace("#firstshape 5000", "#firstshape 5002").replace("#newsite 1700", "#newsite 1701")
+                .replace("#homemon 5000", "#homemon 5002").replace("#selectnation 150", "#selectnation 151")
+                .replace("#addrecunit 5000", "#addrecunit 5002").replace("#restricted 150", "#restricted 151")
+                .replace("#copyspell 1\r\n#name \"Call Alpha\"\r\n#damage 5000",
+                         "#copyspell 1\r\n#name \"Call Alpha\"\r\n#damage 5002"))
+        self.assertEqual(self.dm.read_bytes(), want.encode("latin-1"))  # comments, text, CRLF, -5000 montag kept
+        self.assertEqual((self.root / "maps" / "alpha" / "alpha.map").read_bytes(),
+                         self.MAP.replace(b"#allowedplayer 150", b"#allowedplayer 151"))
+        res = json.loads((self.root / "kosmokrator.json").read_text(encoding="utf-8"))["reservations"]
+        self.assertEqual({k: [x["id"] for x in v] for k, v in res.items()},
+                         {"monster": [5000, 5002], "site": [1701], "nation": [151]})
+        cps = revision_state(self.ws, "demo_mod")["checkpoints"]
+        self.assertEqual([c["kind"] for c in cps], ["pre-remap"])
+        self.assertEqual(cps[0]["revision"], p["current_revision"])
+        self.assertEqual((self.mods / "other" / "other.dm").read_bytes()[:16], b"#newmonster 5000")
+        self.assertIn("health", r["after"])
+
+    def test_unknown_untyped_unproven_and_numeric_site_block(self) -> None:
+        self.set_dm(b'#newmonster 5000\r\n#name "U"\r\n#weird 5000\r\n#end\r\n#selectnation 150\r\n#name "N"\r\n'
+                    b'#startsite 1700\r\n#end\r\n#newsite 1700\r\n#name "S"\r\n#end\r\n'
+                    b'#newspell\r\n#name "Mystery"\r\n#damage 5000\r\n#end\r\n#customcmd "uses 5000 here"\r\n')
+        (self.root / "maps" / "alpha" / "alpha.map").write_bytes(b"#commander 5000\r\n")
+        before = self.tree()
+        p = self.plan(self.MAPPING[:2])
+        codes = sorted(f["code"] for f in p["manual_findings"] if f["blocking"])
+        self.assertEqual(codes, ["map_reference_unproven", "numeric_site_name", "spell_damage_unproven",
+                                 "untyped_reference", "untyped_reference"])
+        self.assertFalse(p["can_apply"])
+        self.assertEqual(self.code(lambda: self.apply(p)), "remap_blocked")
+        self.assertEqual(self.tree(), before)
+
+    def test_invalid_occupied_chained_and_unowned_targets_refuse(self) -> None:
+        self.set_dm(b'#newmonster 5000\n#name "A"\n#end\n#newmonster 5001\n#name "B"\n#end\n'
+                    b'#selectmonster 199\n#hp 9\n#end\n#selectnation 5\n#end\n')
+        (self.mods / "other" / "other.dm").write_bytes(b'#newmonster 5003\n#name "X"\n#end\n')
+        before = self.tree()
+
+        def codes(mapping):
+            return {f["code"] for f in self.plan(mapping)["manual_findings"] if f["blocking"]}
+        self.assertEqual(codes([{"kind": "monster", "old": 5000, "new": 5001}]), {"target_occupied"})
+        self.assertEqual(codes([{"kind": "monster", "old": 5000, "new": 5003}]), {"target_occupied"})
+        self.assertEqual(codes([{"kind": "monster", "old": 5000, "new": 9500}]), {"target_out_of_range"})
+        self.assertIn("chained_mapping", codes([{"kind": "monster", "old": 5000, "new": 5002},
+                                               {"kind": "monster", "old": 5001, "new": 5000}]))
+        self.assertEqual(codes([{"kind": "monster", "old": 199, "new": 5004}]), {"not_owned"})
+        self.assertEqual(codes([{"kind": "nation", "old": 5, "new": 160}]), {"not_owned"})
+        self.assertEqual(self.code(lambda: self.apply(self.plan([{"kind": "monster", "old": 5000, "new": 5003}]))),
+                         "remap_blocked")
+        self.assertEqual(self.tree(), before)
+
+    def test_stale_project_installed_change_and_plan_refuse_without_writes(self) -> None:
+        p = self.plan(self.MAPPING)
+        (self.mods / "late").mkdir()
+        (self.mods / "late" / "late.dm").write_bytes(b'#newmonster 5002\n#name "Late"\n#end\n')
+        before = self.tree()
+        self.assertEqual(self.code(lambda: self.apply(p)), "occupancy_changed")
+        self.assertEqual(self.tree(), before)
+        (self.mods / "late" / "late.dm").unlink()
+        p = self.plan(self.MAPPING)
+        self.assertEqual(self.code(lambda: self.apply(p, plan_hash="0" * 64)), "plan_changed")
+        self.assertEqual(self.code(lambda: self.apply(p, confirm=False)), "confirm_required")
+        self.set_dm(self.dm.read_bytes() + b"-- outside edit\r\n")
+        before = self.tree()
+        self.assertEqual(self.code(lambda: self.apply(p)), "stale_revision")
+        self.assertEqual(self.tree(), before)
+
+    def test_metadata_save_failure_rolls_back_and_keeps_checkpoint(self) -> None:
+        from kosmokrator.revisions import revision_state
+        p = self.plan(self.MAPPING)
+        dm, mp, meta = self.dm.read_bytes(), (self.root / "maps" / "alpha" / "alpha.map").read_bytes(), \
+            (self.root / "kosmokrator.json").read_bytes()
+        with mock.patch.object(project_mod, "_save_meta", side_effect=OSError("disk full")):
+            self.assertEqual(self.code(lambda: self.apply(p)), "remap_failed")
+        self.assertEqual((self.dm.read_bytes(), (self.root / "maps" / "alpha" / "alpha.map").read_bytes(),
+                          (self.root / "kosmokrator.json").read_bytes()), (dm, mp, meta))
+        self.assertEqual([c["kind"] for c in revision_state(self.ws, "demo_mod")["checkpoints"]], ["pre-remap"])
+        self.assertTrue(self.apply(self.plan(self.MAPPING))["verified"])  # the same reviewed plan applies afterwards
+
+    def test_outside_metadata_edit_during_remap_is_kept_and_reported(self) -> None:
+        p = self.plan(self.MAPPING)
+        meta_path, map_path = self.root / "kosmokrator.json", self.root / "maps" / "alpha" / "alpha.map"
+        dm, mp = self.dm.read_bytes(), map_path.read_bytes()
+        outside = meta_path.read_bytes().replace(b'"old"', b'"edited outside"')
+        real = project_mod.write_dm_locked
+
+        def write_then_edit(*args, **kwargs):
+            out = real(*args, **kwargs)
+            meta_path.write_bytes(outside)  # an outside editor saves after a .dm write, before the metadata save
+            return out
+
+        with mock.patch.object(project_mod, "write_dm_locked", side_effect=write_then_edit):
+            with self.assertRaises(KosmoError) as ctx:
+                self.apply(p)
+        err = ctx.exception
+        self.assertEqual(err.code, "remap_rollback_failed")
+        self.assertIn(err.details["pre_remap"], err.message)
+        self.assertEqual([x["path"] for x in err.details["problems"]], ["kosmokrator.json"])
+        self.assertEqual(meta_path.read_bytes(), outside)
+        self.assertEqual((self.dm.read_bytes(), map_path.read_bytes()), (dm, mp))
+
+    def test_restore_removes_dependency_key_absent_from_checkpoint(self) -> None:
+        from kosmokrator.revisions import save_revisions
+        meta_path = self.root / "kosmokrator.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        del meta["dependencies"]
+        meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        cp = save_revisions(self.ws, "demo_mod", {"action": "checkpoint"})["checkpoint"]
+        meta["dependencies"] = ["base/base.dm"]
+        meta["reservations"]["site"] = [{"id": 1800, "label": "later", "reserved_utc": "y"}]
+        meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        plan = save_revisions(self.ws, "demo_mod", {"action": "restore", "checkpoint": cp["id"]})
+        save_revisions(self.ws, "demo_mod", {"action": "restore", "checkpoint": cp["id"], "preview": False,
+                                             "confirm": True, "expected_revision": plan["current_revision"],
+                                             "plan_hash": plan["plan_hash"]})
+        after = json.loads(meta_path.read_text(encoding="utf-8"))
+        self.assertNotIn("dependencies", after)
+        self.assertEqual((after["slug"], [r["id"] for r in after["reservations"]["site"]]), ("demo_mod", [1800]))
+
+
 if __name__ == "__main__":
     unittest.main()

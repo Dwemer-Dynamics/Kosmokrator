@@ -1001,6 +1001,20 @@ details.used-by > summary { font-size: .88rem; }
 .changes-count { margin-right: .6rem; }
 .changes-obj { padding: .5rem .3rem; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: .35rem; }
 .changes-raw { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .82rem; }
+
+/* ----- remap IDs (Build > Remap IDs): reviewed mapping, typed edits and manual findings ----- */
+.remap-form { gap: .5rem; }
+.remap-row { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .5rem; padding: .4rem 0; border-bottom: 1px solid var(--line); }
+.remap-row select.input { flex: 1 1 16rem; min-width: 0; }
+.remap-row .remap-new { flex: 0 1 7.5rem; min-width: 5.5rem; }
+.remap-arrow { color: var(--muted); }
+.remap-sugg { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .25rem; }
+.remap-hint { flex-basis: 100%; font-size: .84rem; overflow-wrap: anywhere; }
+.remap-old { color: var(--ember); text-decoration: line-through; }
+.remap-new-val { color: var(--ok); font-weight: 600; }
+.remap-plan .pf-finding .changes-raw { display: block; margin-top: .2rem; }
+.remap-plan td code, .remap-plan td .mono { white-space: nowrap; }
+@media (max-width: 480px) { .remap-row select.input { flex-basis: 100%; } }
 .changes .state .mono { overflow-wrap: anywhere; }
 tr.is-selected > td { background: var(--accent-tint); }
 .changes-assets { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: .8rem; }

@@ -202,9 +202,13 @@ def project_lock(project: Project) -> Iterator[None]:
                 os.unlink(lock)
 
 
+def _meta_bytes(project: Project) -> bytes:
+    """The exact bytes _save_meta writes for the current in-memory metadata."""
+    return (json.dumps(project.meta, indent=2) + "\n").encode("utf-8")
+
+
 def _save_meta(project: Project) -> None:
-    data = (json.dumps(project.meta, indent=2) + "\n").encode("utf-8")
-    atomic_write_bytes(project.meta_path, data)
+    atomic_write_bytes(project.meta_path, _meta_bytes(project))
 
 
 def resolve_dm_target(project: Project, file: str | None) -> Path:
@@ -512,21 +516,30 @@ def scan_installed_mods(config: dict[str, Any], budget: ScanBudget, skip_folder:
 
 
 def _scan_other_sources(project: Project, kind: str, used: dict[int, str]) -> dict[str, Any]:
+    """Note the `kind` ids other workspace projects and installed mods define or reserve (see scan_external)."""
+    ext = scan_external(project)
+    for src in ext["sources"]:
+        for d in src["definitions"]:
+            if d["kind"] == kind and d["id"] is not None:
+                used.setdefault(d["id"], src["label"])
+        for i in src["reservations"].get(kind, []):
+            used.setdefault(i, f"{src['label']} (reserved)")
+    return {k: ext[k] for k in ("workspace_projects", "installed_mods", "unreadable", "unreadable_count",
+                                "scan_limit_reached", "complete")}
+
+
+def scan_external(project: Project, config: dict[str, Any] | None = None) -> dict[str, Any]:
     """Read-only scan of other valid projects in this workspace and of installed mods' .dm files.
 
     Only the workspace's immediate project folders and the mods folder's top level plus one folder level are
     read; links and junctions are never followed and nothing is written. Unreadable or skipped sources are
-    reported, never silently treated as checked.
+    reported, never silently treated as checked. Each source lists its SHA-256, definitions, ID reservations and
+    (for projects) declared dependencies. config defaults to the environment's mods folder.
     """
     from .workshop import mods_dir_config  # workshop imports this module
 
     budget = ScanBudget()
-
-    def note(label: str, defs: list[dict[str, Any]]) -> None:
-        for d in defs:
-            if d["kind"] == kind and d["id"] is not None:
-                used.setdefault(d["id"], label)
-
+    sources: list[dict[str, Any]] = []
     projects: list[str] = []
     try:
         names, more = _scan_names(project.workspace)
@@ -548,25 +561,28 @@ def _scan_other_sources(project: Project, kind: str, used: dict[int, str]) -> di
         try:
             other = open_project(project.workspace, name)
             dm = resolve_dm_target(other, None)
-            reserved = [int(r["id"]) for r in (other.meta.get("reservations") or {}).get(kind, [])]
+            res = other.meta.get("reservations") or {}
+            reserved = {k: [int(r["id"]) for r in (res.get(k) or [])] for k in ID_KINDS}
+            deps = [str(d) for d in other.meta.get("dependencies") or []]
         except (OSError, KosmoError, TypeError, ValueError, KeyError, AttributeError) as exc:
             budget.unreadable.append({"source": label, "reason": getattr(exc, "message", None) or str(exc)})
             continue
         data = budget.read(label, dm)
         if data is None:
             continue
-        note(label, scan_definitions(data)[1])
-        for i in reserved:
-            used.setdefault(i, f"{label} (reserved)")
+        digest, defs = scan_definitions(data)
+        sources.append({"label": label, "sha256": digest, "definitions": defs, "reservations": reserved,
+                        "dependencies": deps})
         projects.append(name)
 
-    scan = scan_installed_mods(mods_dir_config(), budget)
+    scan = scan_installed_mods(mods_dir_config() if config is None else config, budget)
     for src in scan["sources"]:
-        note(src["label"], src["definitions"])
+        sources.append({"label": src["label"], "sha256": src["sha256"], "bytes": src["bytes"],
+                        "definitions": src["definitions"], "reservations": {}, "dependencies": []})
     installed = {k: scan[k] for k in ("mods_dir", "source", "available", "reason", "dm_files")}
-    return {"workspace_projects": projects, "installed_mods": installed, "unreadable": budget.unreadable[:20],
-            "unreadable_count": len(budget.unreadable), "scan_limit_reached": budget.truncated[:20],
-            "complete": budget.complete}
+    return {"sources": sources, "workspace_projects": projects, "installed_mods": installed,
+            "unreadable": budget.unreadable[:20], "unreadable_count": len(budget.unreadable),
+            "scan_limit_reached": budget.truncated[:20], "complete": budget.complete}
 
 
 def free_ids_locked(project: Project, kind: str, count: int, dependencies: list[str] | None,

@@ -112,7 +112,7 @@ review-before-save and meaningful warnings are unchanged.
 **Project header.** A compact heading: a small mod banner, the mod name with epithet, era and version, and on the
 right the **Nation** selector (only on the sections it filters, see below) and an **N unsaved drafts** badge when
 any editor holds unsaved input (it links to Export, which lists them). Below it, one row of section tabs:
-Browse (Overview … Balance) and Build (**Advanced tools**, **Health**, **Changes**, **Validation**, **Export**),
+Browse (Overview … Balance) and Build (**Advanced tools**, **Health**, **Changes**, **Remap IDs**, **Validation**, **Export**),
 labelled as groups for assistive technology (a wider gap separates them visually). The secondary sections **Source**, **Assets**, **Other definitions**
 and **Docs** are under **More** at the end of the row: a button that opens a short list of links (Down arrow opens
 it and focuses the current or first link, Up/Down move, Escape closes it and returns focus to the button; a click elsewhere or tabbing away also closes it).
@@ -232,6 +232,39 @@ the same plan and current revision; a changed project is refused. A complete pre
 replacement files are staged and journaled, and a failure puts back the touched files. An interrupted restore is
 shown with **Recover now**. This is not a filesystem-atomic transaction. Validation runs after the restore; an older
 broken state may be restored deliberately.
+
+## Remap IDs (reviewed)
+
+**Build > Remap IDs** moves a definition this project creates to a new ID and updates every typed reference to it.
+Owned definitions are `#newmonster`, `#newsite`, `#newweapon` and `#newarmor` blocks with a number in the project
+`.dm`, and `#selectnation 150+` nations that neither the catalog nor a declared dependency defines. Selectors of
+vanilla or external objects are never offered. The page lists which owned IDs other scanned sources also use
+(catalog, declared dependencies, other workspace projects and their reservations, installed mods) and suggests free
+IDs; the compatibility check's **Remap this ID…** link opens it with that ID chosen.
+
+Choose a definition and a new ID (one row per ID, **Add another ID** for more), then **Preview remap**. The preview
+writes and reserves nothing. It shows each mapping with its definition, selector, reference and spell-summon edit
+counts, every typed edit (file, line, command, old and new number) and the raw diff of each changed `.dm` or `.map`
+file. A number is changed only where the command's typed argument proves it is that kind of ID: the same number in
+another ID type (for example an armour number equal to a site number), plain values, names, descriptions and
+comments stay byte for byte, and so do encoding and line endings. Spell `#damage` changes only for a documented
+summon effect (an authored `#effect`, or the catalog template it copies or selects). Map nation arguments are typed;
+map monster and site references are not, so a matching number there blocks the plan.
+
+**Manual review needed** lists what the plan cannot prove: unknown or untyped commands, numbers inside untyped
+text, quoted numbers in reference positions, `#startsite` with a number, unproven spell damage and map references.
+Apply stays disabled until the source is fixed. Targets must be inside the documented range, free in every scanned
+source and not referenced by the project already; swaps, chains and cycles are refused (move through a free ID in
+separate steps). Other projects that declare this project as a dependency are listed for review; files outside the
+project are never changed.
+
+**Apply remap** needs the review tick and applies only the shown plan: the server rebuilds it under the project
+lock, rescans the installed mods and other sources immediately before writing, and refuses (writing nothing) if
+the project, the external occupancy or the plan changed. It stores a complete pre-remap checkpoint (undo it from
+**Changes**), rewrites each file with a backup and a hash check, keeps old reservations and reserves the new IDs. If
+the metadata cannot be saved, the files are put back. Validation and health run afterwards. Earlier exports,
+prepared Workshop folders and installs still hold the old IDs: export again, prepare again and check compatibility
+again; nothing is exported, installed or published automatically.
 
 ## Reference snapshot (self-contained project)
 
@@ -618,7 +651,8 @@ The Validation tab's **Dependencies and compatibility** section reads `m.compati
   definition**), contributors in activation order (project lines link to the source), the last selector contributor
   (`winner`), or **no safe winner** for collisions, the commands each contributor writes, and the server's actions
   (`remap_ids`, `declare_dependency`, `review_override`, `change_order`) with their reasons. Every action is labelled
-  a manual step; the browser never remaps ids or reorders anything.
+  a manual step; the browser never remaps ids or reorders anything by itself (**Remap IDs** previews a reviewed
+  remap you apply explicitly).
 - `guidance` lists references to check with the same manual actions.
 - **Edit dependency settings → Preview change** now adds **Predicted compatibility changes**: saved vs candidate counts,
   overlaps that appear or disappear, overlaps whose last contributor changes, and collisions that remain (reordering
@@ -812,6 +846,7 @@ catalog dataset version and revision, the `.dm` path and SHA-256. Add `?download
 /api/projects/<slug>/{nations,monsters,sites,other_definitions,assets,validation,pretenders,readiness}
 /api/projects/<slug>/health                   project health (kosmokrator.health/1); ?expected_revision= reports staleness
 /api/projects/<slug>/revisions               local checkpoints (kosmokrator.revisions/1); POST {action} creates, reviews, restores
+/api/projects/<slug>/remap                   owned IDs, occupancy, suggestions (kosmokrator.remap/1); POST previews or applies a mapping
 /api/projects/<slug>/revisions/compare       ?target=<checkpoint id>|baseline (kosmokrator.compare/1)
 /api/projects/<slug>/revisions/preview       ?side=current|checkpoint&path=&sha= PNG preview, hash-verified
 /api/projects/<slug>/monsters/<id>            one object (also nations/<id>, sites/<id>, other_definitions/<id>)

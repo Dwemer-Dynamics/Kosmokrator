@@ -63,7 +63,8 @@ down, bounded by file count, per-file and total bytes; links are never followed)
 when asked.
 
 - `#new...` reusing an installed ID, and two custom nations 150+ (`#selectnation 150+` creates a nation), are
-  errors. Reordering mods never fixes them; remap with `allocate_ids` or move the other mod out yourself.
+  errors. Reordering mods never fixes them; remap the project's ID (**Build > Remap IDs**, or `author_save` kind
+  `remap`) or move the other mod out yourself, then export, prepare and check again.
 - Both mods selecting an existing identity (for example a nation below 150), or patching an ID only an undeclared
   installed mod creates, are review warnings. A byte-identical declared dependency makes a patch informational.
 - Every finding names the file, line, command and ID on both sides. Load order is reported as unknown; installed does

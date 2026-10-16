@@ -41,6 +41,10 @@ beside it, and POST .../workshop/<id>/install copies that folder into the Domini
 is uploaded or published; the game's own Mods menu uploads to Steam. GET .../preflight?target=<export or Workshop id>
 (preflight.py) compares that verified bundle with the installed mods, read-only and only when asked; install requires
 its current fingerprint (and an acknowledgement when it has review warnings).
+
+Reviewed ID remapping (remap.py): GET .../remap lists project-owned numbered definitions, who else uses each ID and
+suggested free IDs; POST .../remap previews a mapping (writes nothing) or, with preview false, applies exactly the
+previewed plan (expected revision, occupancy fingerprint, plan hash, confirm) after a pre-remap checkpoint.
 """
 
 from __future__ import annotations
@@ -128,6 +132,7 @@ TOOLS_ROUTE_RE = re.compile(r"/api/tools/(domerger|nationgen|spritegen|mapnuke)/
 REFERENCE_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/reference-snapshot")
 MERC_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/mercs")
 REVISIONS_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/revisions")
+REMAP_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/remap")
 EQUIPMENT_ROUTE_RE = re.compile(r"/api/projects/([a-z][a-z0-9_]{1,47})/monsters/(\d{1,6})/equipment")
 # Import uploads one .dm plus its assets as base64; bounded like the art route.
 MAX_IMPORT_BODY_BYTES = 6 * 1024 * 1024
@@ -160,9 +165,13 @@ EDIT_STATUS.update(stale_revision=HTTPStatus.CONFLICT, plan_changed=HTTPStatus.C
                    manifest_corrupt=HTTPStatus.UNPROCESSABLE_ENTITY,
                    restore_failed=HTTPStatus.INTERNAL_SERVER_ERROR,
                    restore_rollback_failed=HTTPStatus.INTERNAL_SERVER_ERROR)
+# Reviewed ID remapping (remap.py).
+EDIT_STATUS.update(occupancy_changed=HTTPStatus.CONFLICT, remap_blocked=HTTPStatus.CONFLICT,
+                   changed_during_remap=HTTPStatus.CONFLICT, remap_failed=HTTPStatus.INTERNAL_SERVER_ERROR,
+                   remap_rollback_failed=HTTPStatus.INTERNAL_SERVER_ERROR)
 # Only these error details are echoed to the browser (no absolute, lock or temp paths).
 SAFE_DETAILS = {"lines", "field", "blocked", "problems", "expected", "actual", "counts", "errors", "validation",
-                "missing", "paths", "path", "journal", "pre_restore"}
+                "missing", "paths", "path", "journal", "pre_restore", "pre_remap", "findings"}
 MAX_DONOR_QUERY = 60
 
 
@@ -303,8 +312,9 @@ class Handler(BaseHTTPRequestHandler):
             mr = REFERENCE_ROUTE_RE.fullmatch(self.path)
             mmerc = MERC_ROUTE_RE.fullmatch(self.path)
             mrev = REVISIONS_ROUTE_RE.fullmatch(self.path)
+            mremap = REMAP_ROUTE_RE.fullmatch(self.path)
             if not (m or mx or mc or ma or mn or mco or mh or mp or mi or mt or me or mg or md or mm or mb or mw or mr or mmerc
-                    or mrev):
+                    or mrev or mremap):
                 return self._reject_write()
             limit = 180 * 1024 * 1024 if mm and mm.group(2) == 'import' else MAX_ART_BODY_BYTES if ma else MAX_IMPORT_BODY_BYTES if mi else MAX_EDIT_BYTES
             host = (self.headers.get("Host") or "").strip()
@@ -341,7 +351,7 @@ class Handler(BaseHTTPRequestHandler):
                 live, _err = self.state.catalog()
                 return self._json({"ok": True, "result": create_snapshot(self.state.workspace, mr.group(1), live, body)})
             # Project routes read the project's own reference snapshot when it has one.
-            scoped = next((x for x in (m, mx, mc, ma, mn, mco, mh, mp, me, mg, md, mm, mb, mmerc, mrev) if x), None)
+            scoped = next((x for x in (m, mx, mc, ma, mn, mco, mh, mp, me, mg, md, mm, mb, mmerc, mrev, mremap) if x), None)
             cat, _err = self.state.catalog_for(scoped.group(1)) if scoped else self.state.catalog()
             if mb:
                 from .map_builds import save_map_build
@@ -360,6 +370,10 @@ class Handler(BaseHTTPRequestHandler):
                 from .revisions import save_revisions
                 return self._json({"ok": True, "result": save_revisions(self.state.workspace, mrev.group(1), body,
                                                                         cat, via="browser")})
+            if mremap:
+                from .remap import save_remap
+                return self._json({"ok": True, "result": save_remap(self.state.workspace, mremap.group(1), body, cat,
+                                                                    self.state.mods_config(), via="browser")})
             if mg:
                 return self._json({'ok': True, 'result': save_commands(self.state.workspace, mg.group(1), cat, body)})
             if md:
@@ -558,6 +572,11 @@ class Handler(BaseHTTPRequestHandler):
             if len(rest) == 2 and rest[1] == 'preview':
                 png = preview_image(ws, slug, q.get('side', ''), q.get('path', ''), q.get('sha', ''))
                 return self._send(200, png, 'image/png')
+        if head == 'remap' and len(rest) == 1:
+            from .remap import remap_state
+            cat, _err = self.state.catalog_for(slug)
+            return self._json({'ok': True, 'result': remap_state(ws, slug, cat, self.state.mods_config())},
+                              download=f"{slug}-remap.json" if dl else None)
         if head == 'map-builds' and len(rest) == 1:
             from .map_builds import map_build_state
             return self._json({'ok':True,'result':map_build_state(ws,slug)})

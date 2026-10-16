@@ -54,7 +54,7 @@ they do not change the mod or simulate combat. Kind `revisions` lists local chec
 and never claim a human review. Restores are preview-then-apply with `plan_hash` and `confirm`. Kind `health` (CLI `health`) returns one prioritized, deduplicated
 finding list with stable ids, locations, evidence, next actions, recruitment classes, scope and caveats for a
 captured revision; read its `not_checked` scope before reporting a project as healthy. Kind `preflight:<export or Workshop id>` compares that
-verified bundle with installed mods, read-only (see [Workshop](WORKSHOP.md#compatibility-check-installation-preflight)). See [inheritance](INHERITANCE.md),
+verified bundle with installed mods, read-only (see [Workshop](WORKSHOP.md#compatibility-check-installation-preflight)). For an ID collision on a project-owned definition, kind `remap` lists owned IDs and free targets; `author_save` kind `remap` previews a typed plan (edits, raw diff, `manual_findings`, `can_apply`, `plan_hash`) and applies only that plan with `confirm` after a pre-remap checkpoint. Resolve manual findings in the source; then export, prepare and run preflight again. See [inheritance](INHERITANCE.md),
 [compatibility](COMPATIBILITY.md) and [comparisons](BALANCE-COMPARISONS.md).
 Kind `mercs` lists and appends optional `#newmerc` companies with structured, manual-documented fields; see
 [mercenary companies](WEB-BROWSER.md#mercenary-companies) and the optional-merc rule in

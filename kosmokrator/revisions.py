@@ -67,11 +67,12 @@ CHECKPOINT_RE = re.compile(r"^cp-\d{8}T\d{6}Z-[0-9a-f]{8}$")
 JOURNAL_RE = re.compile(r"^rs-\d{8}T\d{6}Z-[0-9a-f]{8}$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
-KINDS = ("manual", "review", "pre-restore", "restore")
+KINDS = ("manual", "review", "pre-restore", "restore", "pre-remap")
 REVIEWER_KINDS = ("human", "agent")
 # The metadata keys a restore takes from the checkpoint; every other key keeps its current value (identity and
-# configuration), and reservations are merged.
+# configuration), and reservations are merged. A dependency list the checkpoint did not have is removed.
 RESTORED_META_KEYS = ("name", "dependencies")
+REMOVED_IF_ABSENT = ("dependencies",)
 
 MAX_FILES = 4000
 MAX_FILE_BYTES = 128 * 1024 * 1024
@@ -932,6 +933,8 @@ def merge_metadata(current: bytes, historical: bytes) -> bytes:
     for key in RESTORED_META_KEYS:
         if key in old:
             out[key] = old[key]
+        elif key in REMOVED_IF_ABSENT:
+            out.pop(key, None)
     res = out.setdefault("reservations", {})
     if not isinstance(res, dict):
         raise KosmoError("bad_metadata", "Current reservations have an unexpected shape.")
@@ -1028,7 +1031,8 @@ def _plan_view(project: Project, m: dict[str, Any], cap: dict[str, Any], plan: d
                             "lock with a journal; on failure the touched files are restored from the pre-restore "
                             "checkpoint.",
                             "Project identity and configuration stay current; only name and dependencies come from "
-                            "the checkpoint, and reservations are merged so no reserved ID is freed."]}
+                            "the checkpoint (a dependency list it did not have is removed), and reservations are "
+                            "merged so no reserved ID is freed."]}
 
 
 def preview_restore(workspace: Path, slug: str, body: dict[str, Any]) -> dict[str, Any]:

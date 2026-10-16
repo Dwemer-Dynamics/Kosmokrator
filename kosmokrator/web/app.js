@@ -492,7 +492,7 @@
   // the secondary Files group sits behind the More disclosure so the page content starts sooner on narrow screens.
   const TAB_GROUPS = [
     ["browse", "Browse", [["overview", "Overview"], ["nation", "Nation"], ["units", "Units"], ["pretenders", "Pretenders"], ["sites", "Sites"], ["spells", "Spells"], ["items", "Items"], ["mercs", "Mercenaries"], ["maps", "Maps"], ["balance", "Balance"]]],
-    ["edit", "Build", [["author", "Advanced tools"], ["health", "Health"], ["changes", "Changes"], ["validation", "Validation"], ["export", "Export"]]],
+    ["edit", "Build", [["author", "Advanced tools"], ["health", "Health"], ["changes", "Changes"], ["remap", "Remap IDs"], ["validation", "Validation"], ["export", "Export"]]],
     ["files", "More", [["source", "Source"], ["assets", "Assets"], ["other", "Other definitions"], ["docs", "Docs"]]],
   ];
   // The vanilla inspector is reached from the sidebar's Catalog section, not the tab bar.
@@ -3296,7 +3296,8 @@
       f.bundle.map((x) => loc("This mod", x)), f.installed.slice(0, 5).map((x) => loc("Installed", x)),
       f.installed.length > 5 ? el("div", { class: "faint", text: `…and ${f.installed.length - 5} more` }) : null,
       f.load_order === "unknown" && f.kind ? el("div", { class: "faint", text: "Load order unknown; installed does not mean enabled." }) : null,
-      el("ul", { class: "plain-list pf-actions" }, f.actions.map((a) => el("li", null, el("strong", { text: a.action.replace(/_/g, " ") }), ` — ${a.reason}`))));
+      el("ul", { class: "plain-list pf-actions" }, f.actions.map((a) => el("li", null, el("strong", { text: a.action.replace(/_/g, " ") }), ` — ${a.reason}`,
+        a.action === "remap_ids" && f.kind ? [" ", el("a", { href: route("p", slug, "remap", `${f.kind}-${f.object_id}`) }, "Remap this ID…")] : null))));
     const cov = D && D.coverage;
     const ackId = `${pfx}-pf-ack`;
     const ack = D && D.status === "review" ? el("label", { class: "pf-ack", for: ackId },
@@ -4273,6 +4274,8 @@
           prev && r.stale ? stateBox("empty", "The project changed since the last check.", "These findings describe the current files.") : null),
         pageOld ? stateBox("empty", "Other tabs show an older revision.", el("button", { type: "button", class: "btn btn-small", onclick: () => { state.models.delete(slug); render(); } }, "Reload project")) : null,
         r.identity.consistent ? null : stateBox("error", "Files changed while health was read.", "Recheck when edits have finished."),
+        r.findings.some((f) => f.category === "identity") ? el("p", null, el("a", { href: route("p", slug, "remap") }, "Remap IDs"),
+          el("span", { class: "faint", text: " previews a reviewed move of a project-owned ID with every typed reference." })) : null,
         r.findings.length ? ["error", "warning", "unverified", "info"].map((s) => healthGroup(m, s, r.findings.filter((f) => f.severity === s)))
           : stateBox("empty", "No findings.", "Nothing to fix in the checked scope."),
         techSection("Scope, recruitment and revision", false,
@@ -4291,12 +4294,207 @@
     return holder;
   }
 
+  // ---------- Remap IDs: reviewed remapping of project-owned numbered definitions ----------
+  // GET /api/projects/<slug>/remap lists owned definitions, who else uses each ID and suggested free IDs. POST .../remap
+  // previews a mapping (writes and reserves nothing); apply sends exactly the previewed revision, occupancy fingerprint
+  // and plan hash with confirm, after the explicit review tick. The server rebuilds the plan and refuses any change.
+  const REMAP_KIND = { monster: "Unit", site: "Site", nation: "Nation", weapon: "Weapon", armor: "Armour" };
+  const REMAP_REL = { definition: "definition", selector: "selector", reference: "reference", summon: "spell summon" };
+  const REMAP_STALE = ["stale_revision", "occupancy_changed", "plan_changed", "changed_during_capture", "changed_during_remap"];
+  function remapUi(slug) {
+    if (!state.remaps) state.remaps = new Map();
+    if (!state.remaps.has(slug)) state.remaps.set(slug, { st: null, loadErr: null, rows: [], plan: null, planKey: null, busy: null,
+      err: null, result: null, reviewed: false, stale: false, prefilled: null });
+    return state.remaps.get(slug);
+  }
+  function viewRemap(m, arg) {
+    const slug = m.project.slug, base = `/api/projects/${encodeURIComponent(slug)}/remap`, ui = remapUi(slug);
+    const holder = el("div", { class: "stack remap" }, stateBox("loading", "Reading project IDs and scanning other mods..."));
+    const rowsKey = () => JSON.stringify(ui.rows.map((r) => [r.kind, Number(r.old), Number(r.new)]));
+    const defKey = (d) => `${d.kind}-${d.id}`;
+    const ready = () => ui.rows.length > 0 && ui.rows.every((r) => r.kind && r.old !== "" && /^\d+$/.test(String(r.new)));
+    async function load() {
+      ui.busy = "load"; draw();
+      try { ui.st = (await getJSON(base)).result; ui.loadErr = null; } catch (e) { ui.loadErr = e; }
+      ui.busy = null;
+      if (ui.st && arg && ui.prefilled !== arg) {
+        ui.prefilled = arg;
+        const d = ui.st.definitions.find((x) => defKey(x) === arg && x.eligible);
+        if (d && !ui.rows.some((r) => r.kind === d.kind && r.old === d.id)) ui.rows = [...ui.rows.filter((r) => r.kind), newRow(d)];
+      }
+      if (ui.st && !ui.rows.length) ui.rows = [{ kind: "", old: "", new: "" }];
+      if (ui.plan && ui.st && ui.plan.current_revision !== ui.st.current_revision) ui.stale = true;
+      draw();
+    }
+    function newRow(d) {
+      const s = ((ui.st && ui.st.suggestions[d.kind]) || [])[0];
+      return { kind: d.kind, old: d.id, new: s ? s.id : "" };
+    }
+    async function preview() {
+      ui.busy = "preview"; ui.err = null; ui.result = null; ui.reviewed = false; draw();
+      const mapping = ui.rows.map((r) => ({ kind: r.kind, old: Number(r.old), new: Number(r.new) }));
+      try {
+        ui.plan = await postJSON(base, { mapping, expected_revision: ui.st.current_revision });
+        ui.planKey = rowsKey(); ui.stale = false;
+      } catch (e) {
+        ui.plan = null; ui.err = { e, what: "Previewing the remap" };
+        if (e && e.error && e.error.code === "stale_revision") { ui.busy = null; await load(); }
+      }
+      ui.busy = null; draw(); focusTo(ui.plan ? "#remap-plan-h" : "#remap-err");
+    }
+    async function apply() {
+      const p = ui.plan;
+      ui.busy = "apply"; ui.err = null; draw();
+      try {
+        const r = await postJSON(base, { mapping: p.mapping, preview: false, expected_revision: p.current_revision,
+          expected_occupancy: p.occupancy_fingerprint, plan_hash: p.plan_hash, confirm: true });
+        ui.result = r; ui.plan = null; ui.reviewed = false; ui.rows = [];
+        state.models.delete(slug);
+        recordReceipt(slug, `Remapped ${r.mapping.map((e) => `${e.kind} ${e.old} → ${e.new}`).join(", ")}`, { revision: r.revision,
+          files: r.files.map((f) => f.path) }, { backup: `pre-remap checkpoint ${r.pre_remap.id}` });
+        ui.busy = null; await load(); focusTo("#remap-done");
+        return;
+      } catch (e) {
+        ui.err = { e, what: "Applying the remap" };
+        if (REMAP_STALE.includes(e && e.error && e.error.code)) ui.stale = true;
+      }
+      ui.busy = null; draw(); focusTo("#remap-err");
+    }
+    function focusTo(sel) { queueMicrotask(() => { const t = holder.querySelector(sel); if (t) { t.setAttribute("tabindex", "-1"); t.focus(); } }); }
+    function markEdited() {
+      // Typing keeps focus (no redraw); a preview of other values can no longer be applied.
+      const btn = holder.querySelector("#remap-apply"), box = holder.querySelector("#remap-edited"), pv = holder.querySelector("#remap-preview");
+      const changed = ui.plan && rowsKey() !== ui.planKey;
+      if (btn && changed) btn.disabled = true;
+      if (box) box.textContent = changed ? "The mapping changed after this preview; preview again." : "";
+      if (pv) pv.disabled = !ready() || !!ui.busy;
+    }
+    function rowControls(r, i) {
+      const st = ui.st, defs = st.definitions, d = defs.find((x) => x.kind === r.kind && x.id === Number(r.old));
+      const sel = el("select", { class: "input", "aria-label": `Definition to remap (row ${i + 1})`,
+        onchange: (e) => { const nd = defs.find((x) => defKey(x) === e.target.value); ui.rows[i] = nd ? newRow(nd) : { kind: "", old: "", new: "" }; draw(); } },
+        el("option", { value: "", text: "Choose a project definition…" }),
+        st.kinds.map((k) => { const ds = defs.filter((x) => x.kind === k); return ds.length ? el("optgroup", { label: REMAP_KIND[k] },
+          ds.map((x) => el("option", { value: defKey(x), selected: d === x || null, disabled: !x.eligible || null,
+            text: `${x.id} ${x.name || ""}${x.conflict ? " ⚠ also used elsewhere" : ""}${x.eligible ? "" : " (not remappable)"}` }))) : null; }));
+      const range = r.kind ? st.ranges[r.kind] : null;
+      const num = el("input", { class: "input remap-new", type: "number", inputmode: "numeric", value: r.new, min: range ? range[0] : null, max: range ? range[1] : null,
+        "aria-label": `New ID (row ${i + 1})`, disabled: !r.kind || null, oninput: (e) => { ui.rows[i].new = e.target.value; markEdited(); } });
+      const sugg = r.kind ? (st.suggestions[r.kind] || []).slice(0, 3).map((s) => el("button", { type: "button", class: "btn btn-small btn-ghost",
+        title: s.source, onclick: () => { ui.rows[i].new = s.id; draw(); } }, String(s.id))) : [];
+      return el("div", { class: "remap-row" },
+        sel, el("span", { class: "remap-arrow", "aria-hidden": "true", text: "→" }), num,
+        sugg.length ? el("span", { class: "remap-sugg" }, el("span", { class: "faint", text: "Free:" }), sugg) : null,
+        ui.rows.length > 1 ? el("button", { type: "button", class: "btn btn-small btn-ghost", "aria-label": `Remove row ${i + 1}`,
+          onclick: () => { ui.rows.splice(i, 1); draw(); } }, "Remove") : null,
+        d && d.conflict ? el("div", { class: "remap-hint faint" }, `ID ${d.id} is also used by ${d.also_used_by.slice(0, 3).join(", ")}.`) : null,
+        d && !d.eligible ? el("div", { class: "remap-hint" }, d.reasons.join(" ")) : null);
+    }
+    function planView(p) {
+      const changed = rowsKey() !== ui.planKey, stale = ui.stale || changed;
+      const blocking = p.manual_findings.filter((f) => f.blocking), notes = p.manual_findings.filter((f) => !f.blocking);
+      const loc = (f) => (f.file ? el("code", { text: `${f.file}${f.line ? `:${f.line}` : ""}` }) : null);
+      const canApply = p.can_apply && !stale && ui.reviewed && !ui.busy;
+      return el("section", { class: "panel remap-plan", "aria-labelledby": "remap-plan-h" },
+        el("h3", { id: "remap-plan-h" }, "Remap preview ", p.can_apply ? badge("ready to apply", "ok") : badge("apply disabled", "err"), stale ? [" ", badge("out of date", "warn")] : null),
+        stale ? stateBox("error", changed ? "The mapping changed after this preview." : "The project or the installed mods changed since this preview.",
+          el("button", { type: "button", class: "btn btn-small", disabled: !ready() || null, onclick: preview }, "Preview again")) : null,
+        table(["ID", "Change", "Name", "Edits", "Old ID also used by"], p.entries.map((e) => [REMAP_KIND[e.kind] || e.kind,
+          el("strong", { class: "mono", text: `${e.old} → ${e.new}` }), txt(e.name),
+          el("span", null, `${e.definitions + e.selectors} block · ${e.references} ref · ${e.summons} summon`,
+            e.name_references ? el("span", { class: "faint", text: ` · ${e.name_references} by name (unchanged)` }) : null),
+          e.old_also_used_by.length ? e.old_also_used_by.slice(0, 3).join(", ") : el("span", { class: "faint", text: "nothing else scanned" })])),
+        blocking.length ? el("div", { class: "stack", id: "remap-blocked" },
+          el("h4", { text: `Manual review needed (${blocking.length})` }),
+          el("p", { class: "panel-note", text: "Apply stays disabled until these are resolved in the source; nothing is guessed or rewritten for them." }),
+          el("ol", { class: "plain-list pf-findings" }, blocking.map((f) => el("li", { class: "pf-finding pf-error" },
+            el("div", null, badge(f.code.replace(/_/g, " "), "err"), " ", loc(f)), el("div", { text: f.reason }),
+            f.statement ? el("code", { class: "changes-raw", text: f.statement }) : null)))) : null,
+        notes.length ? el("ul", { class: "plain-list pf-findings" }, notes.map((f) => el("li", { class: "pf-finding pf-warning" },
+          badge("review", "warn"), " ", f.reason))) : null,
+        p.edits.length ? el("details", { class: "raw", open: p.edits.length <= 12 || null },
+          el("summary", null, `Typed edits (${p.edits_total})`),
+          el("div", { class: "inner" }, table(["Where", "Command", "Change", "Kind"], p.edits.map((x) => [
+            el("code", { text: `${x.file.split("/").pop()}:${x.line}` }), el("code", { text: x.command }),
+            el("span", { class: "mono" }, el("span", { class: "remap-old", text: x.old_raw }), " → ", el("span", { class: "remap-new-val", text: x.new_raw })),
+            `${REMAP_KIND[x.kind] || x.kind} ${REMAP_REL[x.relation] || x.relation}`])))) : stateBox("empty", "No edits.", "Nothing in the owned files refers to these IDs by number."),
+        p.files.map((f) => (f.diff ? diffView(f.diff, `Raw diff: ${f.path} (${f.edits} edits · ${f.encoding} · ${f.newlines} kept)`) : null)),
+        el("p", { class: "faint" }, `Kept as written: ${p.preserved.other_namespace} same number in another ID type, ${p.preserved.non_reference} non-ID values, `,
+          `${p.preserved.spell_damage_not_summon} non-summon spell damage; names, descriptions and comments are never edited.`),
+        el("ul", { class: "panel-note" }, el("li", { text: p.apply.recovery }), p.caveats.map((c) => el("li", { text: c }))),
+        el("label", { class: "changes-confirm" }, el("input", { type: "checkbox", id: "remap-review", checked: ui.reviewed || null, disabled: !p.can_apply || stale || null,
+          onchange: (e) => { ui.reviewed = e.target.checked; draw(); focusTo("#remap-review"); } }),
+          " I reviewed this mapping and every edit above (applies to this preview only)."),
+        el("div", { class: "btn-row" },
+          el("button", { type: "button", class: "btn", id: "remap-apply", disabled: !canApply || null, onclick: apply }, ui.busy === "apply" ? "Applying…" : "Apply remap"),
+          el("span", { id: "remap-edited", class: "faint", "aria-live": "polite", text: changed ? "The mapping changed after this preview; preview again." : "" }),
+          !p.can_apply ? el("span", { class: "faint", text: `Disabled: ${p.blocked_reasons[0] || "see above"}` }) : null),
+        techSection("Plan identity", false, el("dl", { class: "kv" },
+          el("dt", { text: "Revision" }), el("dd", { class: "hash", text: p.current_revision }),
+          el("dt", { text: "Occupancy" }), el("dd", { class: "hash", text: p.occupancy_fingerprint }),
+          el("dt", { text: "Plan hash" }), el("dd", { class: "hash", text: p.plan_hash })),
+          el("ul", null, p.limitations.map((l) => el("li", { text: l })))));
+    }
+    function doneView(r) {
+      const a = r.after, v = a.validation, h = a.health;
+      return el("section", { class: "panel remap-done", id: "remap-done", "aria-label": "Remap result" },
+        stateBox(v.ok ? "empty" : "error", `Remapped ${r.mapping.map((e) => `${REMAP_KIND[e.kind] || e.kind} ${e.old} → ${e.new}`).join(", ")}.`,
+          el("span", null, `${r.edits_total} edits in ${r.files.length} file(s); ${r.verified ? "result verified" : "result differs from the plan, check Changes"}. `,
+            "Pre-remap checkpoint ", el("code", { text: r.pre_remap.id }), ". ",
+            v.counts ? `Validation: ${v.counts.errors} errors, ${v.counts.warnings} warnings. ` : "",
+            h && h.counts ? `Health: ${h.status} (${h.counts.error} errors, ${h.counts.warning} warnings).` : "")),
+        el("p", null, "Exports, prepared Workshop folders and installs still hold the old IDs",
+          a.regenerate.stale_bundles.length ? ` (${a.regenerate.stale_bundles.length} bundle(s) predate this remap)` : "",
+          ". Next: ", a.regenerate.steps.join(" → "), ". Nothing was exported, installed or published."),
+        el("div", { class: "btn-row" },
+          el("a", { class: "btn btn-small", href: route("p", slug, "export") }, "Export and check again"),
+          el("a", { class: "btn btn-small btn-ghost", href: route("p", slug, "changes") }, "Changes and recovery checkpoint"),
+          el("a", { class: "btn btn-small btn-ghost", href: route("p", slug, "health") }, "Health")));
+    }
+    function draw() {
+      if (!ui.st) {
+        fillKids(holder, ui.loadErr ? [errorBox(ui.loadErr, "project IDs"), el("button", { type: "button", class: "btn btn-small", onclick: load }, "Retry")]
+          : stateBox("loading", "Reading project IDs and scanning other mods..."));
+        return;
+      }
+      const st = ui.st, cov = st.coverage, conflicts = st.definitions.filter((d) => d.conflict);
+      fillKids(holder,
+        el("div", { class: "health-head" },
+          el("span", null, "Current revision ", el("code", { title: st.current_revision, text: shortSha(st.current_revision) })),
+          el("button", { type: "button", class: "btn btn-small", disabled: !!ui.busy || null, onclick: load }, ui.busy === "load" ? "Scanning…" : "Rescan")),
+        el("p", { class: "panel-note" }, "Move a definition this project creates to a free ID and update every typed reference to it. Preview writes nothing; ",
+          "apply stores a recovery checkpoint first (", el("a", { href: route("p", slug, "changes") }, "Changes"), ") and keeps old reservations."),
+        ui.result ? doneView(ui.result) : null,
+        conflicts.length ? el("p", null, badge(`${conflicts.length} ID conflict${conflicts.length === 1 ? "" : "s"}`, "warn"), " ",
+          conflicts.slice(0, 6).map((d) => el("button", { type: "button", class: "btn btn-small btn-ghost", disabled: !d.eligible || null,
+            onclick: () => { if (!ui.rows.some((r) => r.kind === d.kind && r.old === d.id)) ui.rows = [...ui.rows.filter((r) => r.kind), newRow(d)]; draw(); } },
+            `${REMAP_KIND[d.kind]} ${d.id}`))) : el("p", { class: "faint", text: "No owned ID is used by another scanned source." }),
+        el("form", { class: "stack remap-form", novalidate: true, onsubmit: (e) => { e.preventDefault(); if (ready()) preview(); } },
+          ui.rows.map(rowControls),
+          el("div", { class: "btn-row" },
+            el("button", { type: "submit", class: "btn", id: "remap-preview", disabled: !ready() || !!ui.busy || null }, ui.busy === "preview" ? "Previewing…" : "Preview remap"),
+            ui.rows.length < 20 ? el("button", { type: "button", class: "btn btn-small btn-ghost", onclick: () => { ui.rows.push({ kind: "", old: "", new: "" }); draw(); } }, "Add another ID") : null)),
+        el("div", { role: "status", "aria-live": "polite" }, ui.busy === "preview" ? stateBox("loading", "Classifying every reference...")
+          : ui.busy === "apply" ? stateBox("loading", "Applying the reviewed plan...") : null),
+        ui.err ? el("div", { id: "remap-err" }, writeError(ui.err.e, ui.err.what)) : null,
+        ui.plan ? planView(ui.plan) : null,
+        techSection("Scan coverage", false, el("dl", { class: "kv" },
+          el("dt", { text: "Mods folder" }), el("dd", null, cov.installed_mods.mods_dir ? el("span", { class: "mono", text: cov.installed_mods.mods_dir }) : el("span", { class: "muted", text: txt(cov.installed_mods.reason) || "none" })),
+          el("dt", { text: "Scanned" }), el("dd", { text: `${cov.installed_mods.dm_files} installed .dm, ${cov.workspace_projects.length} other project(s), ${cov.dependencies.length} dependency file(s), catalog ${cov.catalog ? "yes" : "no"}` }),
+          el("dt", { text: "Complete" }), el("dd", { text: cov.complete ? "yes (links not followed)" : "no — some sources were not read" })),
+          st.caveats.length ? el("ul", null, st.caveats.map((c) => el("li", { text: c }))) : null,
+          jsonActions(base, () => ui.st, "Remap state JSON")));
+    }
+    if (ui.st) { draw(); load(); } else load();
+    return holder;
+  }
+
   // ---------- changes: local checkpoints, review baseline, compare and restore ----------
   // GET /api/projects/<slug>/revisions (history), .../revisions/compare?target=<id|baseline>, .../revisions/preview (PNG
   // whose bytes must hash to the listed SHA-256) and POST .../revisions {action}. Viewing never creates a checkpoint.
   const CHANGE_STATUS = { added: ["added", "ok"], modified: ["changed", "warn"], changed: ["changed", "warn"], removed: ["removed", "err"],
     deleted: ["deleted", "err"], reordered: ["reordered", "info"], add: ["add", "ok"], replace: ["replace", "warn"], delete: ["delete", "err"] };
-  const CP_KIND = { manual: "checkpoint", review: "review", "pre-restore": "before restore", restore: "restored" };
+  const CP_KIND = { manual: "checkpoint", review: "review", "pre-restore": "before restore", restore: "restored", "pre-remap": "before remap" };
   const CHANGE_CATS = { stat: "stats", trait: "traits", magic: "magic", equipment: "equipment", recruitment: "recruitment", description: "description",
     asset: "artwork", donor: "donor/copy", other: "other", unknown: "unknown (raw)" };
   const changeBadge = (s) => { const [t, k] = CHANGE_STATUS[s] || [s, ""]; return badge(t, k); };
@@ -9432,6 +9630,7 @@
       else if (tab === "assets") body.append(viewAssets(m));
       else if (tab === "health") body.append(viewHealth(m));
       else if (tab === "changes") body.append(viewChanges(m));
+      else if (tab === "remap") body.append(viewRemap(m, arg));
       else if (tab === "validation") body.append(viewValidation(m));
       else if (tab === "export") body.append(viewExport(m));
       else if (tab === "source") await viewSource(m, arg, body);

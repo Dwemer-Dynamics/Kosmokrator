@@ -22,7 +22,8 @@ Workflow:
    inspect_mod then apply_mod_patch with its sha256. Preserve unrelated source and unknown commands.
 4. validate_mod after every change; fix errors, review warnings, and treat 'unverified' as needing human or
    in-game confirmation. author_state kind 'health' gives the combined prioritized findings for one revision;
-   kind 'preflight:<export or Workshop id>' compares that bundle with installed mods (read-only).
+   kind 'preflight:<export or Workshop id>' compares that bundle with installed mods (read-only). For an ID
+   collision, kind 'remap' previews a reviewed remap of a project-owned ID; apply only the previewed plan.
    Before larger work, author_save kind 'revisions' {action: checkpoint} lets the user compare or undo it later.
    export_mod refuses sources with errors and never overwrites.
 Be explicit with users: these checks are static. They do not prove the mod loads, plays or balances in game;
@@ -106,6 +107,8 @@ def build_server(k: Kosmokrator):
         revisions:<checkpoint id> or revisions:baseline compares the current files (raw .dm diff, authored
         definition changes, assets, map bundles, metadata) with that checkpoint.
         mercs lists #newmerc companies with #com/#unit/#item names resolved and the structured form options.
+        remap lists project-owned numbered definitions (new monsters/sites/weapons/armour, #selectnation 150+),
+        who else uses each ID (catalog, dependencies, other projects, installed mods) and suggested free IDs.
         Includes source revision, reviewed schemas, authored values and preserved unknown lines."""
         return envelope(k.author_state, project, kind)
 
@@ -122,6 +125,9 @@ def build_server(k: Kosmokrator):
         {action: review, reviewer_kind: human|agent (required; never claim a human review you did not receive),
         expected_revision or checkpoint}; {action: restore, checkpoint, preview: true} for a plan, then the same
         with preview: false, expected_revision, plan_hash and confirm: true; {action: recover, journal, confirm}.
+        remap takes {mapping: [{kind, old, new}], expected_revision} for a read-only plan (typed reference edits,
+        raw diff, manual_findings, can_apply, plan_hash); apply the same mapping with preview: false,
+        expected_revision, expected_occupancy, plan_hash and confirm: true (pre-remap checkpoint, reservations kept).
         Uses project locking, backups and reviewed command forms."""
         return envelope(k.author_save, project, kind, body)
 

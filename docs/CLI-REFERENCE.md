@@ -80,6 +80,7 @@ copies files into the game folder itself.
 | `export PROJECT [--dest] [--format zip\|folder]` | `export_mod` | Error-free export with a sha256 manifest; never overwrites |
 | `demo [--export zip\|folder]` | (CLI only) | Builds the Hebdomad demo |
 | `author PROJECT KIND [--body-file JSON]` | `author_state`, `author_save` | State or preview/save sites, spells, weapons, armors, heroes:N, equipment:N, playtests, reference-snapshot |
+| `author PROJECT remap [--body-file JSON]` | `author_state` / `author_save` kind `remap` | Reviewed ID remap: list owned numbered definitions, other users of each ID and free IDs; preview `{"mapping": [{"kind", "old", "new"}], "expected_revision"}` (writes nothing); apply the same mapping with `"preview": false`, `expected_revision`, `expected_occupancy`, `plan_hash` and `confirm` |
 | `author PROJECT revisions [--body-file JSON]` | `author_state` kinds `revisions`, `revisions:<checkpoint id>`, `revisions:baseline`; `author_save` kind `revisions` | Local checkpoints: list, compare with the current files, create (`{"action": "checkpoint"}`), mark a review baseline (`reviewer_kind` human or agent, required), preview/apply a restore (`plan_hash`, `expected_revision`, `confirm`) and recover an interrupted restore |
 | `reference CATEGORY [QUERY] [--id N] [--project]` | `reference_game_data` | Inspect spell, site or equipment catalog references |
 | `import-dm SOURCE --slug SLUG [--preview]` | `import_mod` | Copy an existing mod and supplied assets into a new project |
